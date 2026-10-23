@@ -9,6 +9,7 @@
   "scripts": {
     "test": "node --test",
     "serve": "node scripts/serve.js",
+    "build": "node scripts/build-single.js",
     "erode": "node bin/erode.js"
   },
   "engines": { "node": ">=18" }

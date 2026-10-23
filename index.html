@@ -57,9 +57,11 @@
       <section>
         <h2>Export</h2>
         <div class="buttons">
-          <button id="save-png">View as PNG</button>
-          <button id="save-snapshot">Snapshot JSON</button>
+          <button id="copy-params">Copy parameters</button>
+          <button id="save-png" data-download>View as PNG</button>
+          <button id="save-snapshot" data-download>Snapshot JSON</button>
         </div>
+        <p id="copy-status" class="note"></p>
         <label class="row">Load snapshot / params
           <input id="load" type="file" accept=".json,application/json">
         </label>

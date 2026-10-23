@@ -32,6 +32,10 @@ The browser app needs a local web server (`npm run serve`), not a double-clicked
 because browsers refuse to load ES modules from `file://`. The repository root can also
 be published as-is with GitHub Pages.
 
+For a version you can just double-click or email, `npm run build` bundles everything
+into one self-contained file, `dist/edgy-erosion.html` (about 90 KB, works offline).
+Rebuild it after changing `src/` or `web/`.
+
 ## In the browser
 
 - **Preset** picks a landscape type. **Run/Pause**, **Step** and **Reset** control time.
@@ -151,6 +155,8 @@ src/                 the simulation (browser + Node)
   render.js          colouring, rasterising, cross-sections
 web/                 browser front end (app.js, style.css); index.html at the root
 bin/erode.js         command-line runner (+ png.js encoder)
+scripts/             serve.js (dev server), build-single.js (one-file bundle)
+dist/                the built single-file app
 examples/            small scripts
 test/                node:test suites
 docs/MODEL.md        the physics, its sources and its limits

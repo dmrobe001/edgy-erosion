@@ -325,6 +325,22 @@ $('json-apply').addEventListener('click', () => {
   }
 });
 
+$('copy-params').addEventListener('click', async () => {
+  const text = JSON.stringify(sim.params, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    $('copy-status').textContent = 'Parameters copied. Paste them into the JSON box (or a file) to reproduce this run.';
+  } catch {
+    // clipboard refused: open the JSON panel with the text selected instead
+    refreshJson();
+    $('json').closest('details').open = true;
+    $('json').select();
+    $('copy-status').textContent = 'Copying was blocked; the parameters are selected in the JSON box above.';
+  }
+});
+// Single-file builds published where downloads are blocked set this flag.
+if (window.EDGY_NO_DOWNLOADS) for (const el of document.querySelectorAll('[data-download]')) el.hidden = true;
+
 function download(name, blob) {
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
