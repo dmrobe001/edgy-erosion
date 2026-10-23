@@ -78,6 +78,7 @@ input[type=range] { width: 100%; padding: 0; accent-color: var(--accent); }
 textarea { width: 100%; height: 18rem; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 button { cursor: pointer; padding: 0.35rem 0.8rem; }
 button:hover { border-color: var(--muted); }
+button:disabled, select:disabled, input:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.4rem; }

@@ -186,9 +186,11 @@ export function cellColors(sim, view = 'terrain', out) {
  * The grid is fitted inside the image preserving aspect ratio.
  */
 export function pixelMap(grid, width, height) {
-  const x0 = -grid.dx / 2;
-  const y0 = -grid.edgeLength;
-  const scale = Math.min(width / grid.width, height / grid.height); // pixels per metre
+  if (!grid.cellAt) throw new Error('drawing a map needs a mesh with cellAt()');
+  const b = grid.bounds;
+  const x0 = b.xmin;
+  const y0 = b.ymin;
+  const scale = Math.min(width / (b.xmax - b.xmin), height / (b.ymax - b.ymin)); // pixels per metre
   const map = new Int32Array(width * height);
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {

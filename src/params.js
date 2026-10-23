@@ -36,7 +36,12 @@ export const DEFAULTS = {
     cols: 128,      // cells per row
     rows: 128,      // number of rows
     dx: 30,         // centre-to-centre lattice spacing (m)
+    origin: [0, 0], // world position of the centre of cell (0, 0) (m)
   },
+  // Rectangle { x, y, width, height } (m) that fractional positions refer to (plateau
+  // margins, plugs, fault lines, dip centre). null = the domain itself. Zoomed patches
+  // inherit their parent's so the geology lines up.
+  frame: null,
   time: {
     dt: 2000,       // years per step
   },
@@ -111,7 +116,6 @@ export const DEFAULTS = {
     m: 0.5,                      // drainage-area exponent
     n: 1.0,                      // slope exponent
     soilErodibility: 4e-4,       // K for loose soil/sediment (same units as rock K)
-    soilCoverScale: 0.5,         // soil thickness (m) that shields bedrock from incision (e-folding)
     // 'mfd': drainage area spread over all lower neighbours (smoother hillslopes, no
     // grid-aligned streaks); 'sfd': all to the steepest neighbour (classic D6).
     routing: 'mfd',

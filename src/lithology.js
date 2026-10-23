@@ -18,7 +18,7 @@ export class Lithology {
    * @param {object} params resolved parameters
    * @param {import('./hexgrid.js').HexGrid} grid
    */
-  constructor(params, grid) {
+  constructor(params, grid, frame) {
     this.grid = grid;
     const names = Object.keys(params.rocks);
     this.names = names;
@@ -55,10 +55,13 @@ export class Lithology {
     this.basement = idx(st.basement);
 
     const n = grid.size;
-    const W = grid.width;
-    const H = grid.height;
-    const xc = W / 2;
-    const yc = H / 2;
+    // fractional positions and the dip centre refer to the reference frame (see
+    // referenceFrame in simulation.js), by default the domain itself
+    const F = frame || { x: 0, y: 0, width: grid.width, height: grid.height };
+    const W = F.width;
+    const H = F.height;
+    const xc = F.x + W / 2;
+    const yc = F.y + H / 2;
     const tanDip = Math.tan(((st.dip || 0) * Math.PI) / 180);
     const az = ((st.dipDirection || 0) * Math.PI) / 180;
     // screen y points south, so "north" is -y
@@ -91,8 +94,8 @@ export class Lithology {
       const rock = idx(b.rock);
       const top = b.top ?? Infinity;
       for (let i = 0; i < n; i++) {
-        const px = grid.x[i] / W;
-        const py = grid.y[i] / H;
+        const px = (grid.x[i] - F.x) / W;
+        const py = (grid.y[i] - F.y) / H;
         let inside = false;
         if (b.shape === 'disc') {
           // radius is a fraction of width; measure in width units on both axes

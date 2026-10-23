@@ -1,7 +1,7 @@
 // Browser front end. All physics lives in ../src; this file only wires controls,
 // the animation loop and drawing.
 
-import { Simulation, PRESETS, VIEWS, resolveParams, cellColors, pixelMap, paint, crossSection } from '../src/index.js';
+import { Simulation, PRESETS, VIEWS, resolveParams, cellColors, pixelMap, paint, crossSection, zoomIn, compareWithParent } from '../src/index.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -36,6 +36,11 @@ let running = false;
 let pm;
 let mapImage;
 let sectionRow = null;
+// Zoom: the frozen ancestors of the current simulation, innermost last, each with the
+// options that made its child (so Reset can re-make the child from scratch).
+let stack = [];
+let zoomPending = false;
+let lastPatch = null; // { parent, bounds } of the most recently left child, drawn on its parent
 const mapCanvas = $('map');
 const mapCtx = mapCanvas.getContext('2d');
 const secCanvas = $('section');
@@ -67,6 +72,7 @@ function buildPresetMenu() {
   sel.appendChild(custom);
   sel.addEventListener('change', () => {
     if (!sel.value) return;
+    stack = []; lastPatch = null;
     const params = resolveParams({ preset: sel.value });
     fillGridInputs(params);
     restart(params);
@@ -165,6 +171,26 @@ function syncControls() {
   $('preset-desc').textContent = sim.params.preset ? PRESETS[sim.params.preset]?.description ?? '' : 'Custom parameters.';
   refreshJson();
   updateExtent();
+  syncZoom();
+}
+
+function syncZoom() {
+  const levels = [...stack.map((f) => f.sim), sim];
+  $('zoom-path').textContent = levels.map((s, k) => `level ${k}: dx ${+s.grid.dx.toPrecision(3)} m`).join(' › ') +
+    (stack.length ? '' : '. Zoom in to refine a patch; the level above freezes and feeds its edges and rivers.');
+  $('zoom-out').disabled = !stack.length;
+  for (const id of ['cols', 'rows', 'dx', 'seed', 'preset']) $(id).disabled = stack.length > 0;
+  $('zoom-in').textContent = zoomPending ? 'Click the map…' : 'Zoom in…';
+}
+
+function setSim(next) {
+  sim = next;
+  $('hover').innerHTML = '&nbsp;';
+  fillGridInputs(sim.params);
+  sectionRow = sim.grid.rows >> 1;
+  resize();
+  syncControls();
+  draw();
 }
 
 function fillGridInputs(params) {
@@ -244,6 +270,12 @@ function draw() {
   mapCtx.lineTo(mapCanvas.width, y + 0.5);
   mapCtx.stroke();
   mapCtx.setLineDash([]);
+  if (lastPatch && lastPatch.parent === sim) {
+    const b = lastPatch.bounds;
+    mapCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+    mapCtx.lineWidth = 2;
+    mapCtx.strokeRect((b.xmin - pm.x0) * pm.scale, (b.ymin - pm.y0) * pm.scale, (b.xmax - b.xmin) * pm.scale, (b.ymax - b.ymin) * pm.scale);
+  }
 
   const img = secCtx.createImageData(secCanvas.width, secCanvas.height);
   const info = crossSection(sim, sectionRow, secCanvas.width, secCanvas.height, img.data);
@@ -256,6 +288,15 @@ function draw() {
     `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}` +
     (s.seaLevel != null ? `  sea level ${s.seaLevel.toFixed(1)} m  cliff collapses ${s.cliffCollapses}` : '');
   drawLegend(view);
+  if (stack.length) {
+    const c = compareWithParent(sim, stack[stack.length - 1].sim);
+    $('zoom-compare').textContent =
+      `Against the frozen level above, over ${c.parentCells} of its cells: mean elevation ${c.meanElevation.child.toFixed(1)} m ` +
+      `(level above, extrapolated at its last rate: ${c.meanElevation.expected.toFixed(1)} m); largest river leaving ` +
+      `${(c.largestExitArea.child / 1e6).toFixed(3)} km² (level above: ${(c.largestExitArea.parent / 1e6).toFixed(3)} km²).`;
+  } else {
+    $('zoom-compare').textContent = '';
+  }
 }
 
 function drawLegend(view) {
@@ -304,8 +345,32 @@ mapCanvas.addEventListener('mousemove', (ev) => {
 mapCanvas.addEventListener('click', (ev) => {
   const i = cellAtEvent(ev);
   if (i < 0) return;
+  if (zoomPending) {
+    zoomPending = false;
+    const opts = { center: [sim.grid.x[i], sim.grid.y[i]], factor: +$('zoom-factor').value, cols: +$('zoom-cells').value, rows: +$('zoom-cells').value };
+    try {
+      const child = zoomIn(sim, opts);
+      stack.push({ sim, opts });
+      setSim(child);
+    } catch (e) {
+      $('zoom-compare').textContent = e.message;
+      syncZoom();
+    }
+    return;
+  }
   sectionRow = sim.grid.row(i);
   draw();
+});
+
+$('zoom-in').addEventListener('click', () => {
+  zoomPending = !zoomPending;
+  syncZoom();
+});
+$('zoom-out').addEventListener('click', () => {
+  if (!stack.length) return;
+  const { sim: parent } = stack.pop();
+  lastPatch = { parent, bounds: { ...sim.grid.bounds } };
+  setSim(parent);
 });
 
 $('run').addEventListener('click', () => {
@@ -314,6 +379,11 @@ $('run').addEventListener('click', () => {
 });
 $('step').addEventListener('click', () => { sim.step(); draw(); });
 $('reset').addEventListener('click', () => {
+  if (stack.length) { // re-make this patch from its frozen parent
+    const top = stack[stack.length - 1];
+    setSim(zoomIn(top.sim, top.opts));
+    return;
+  }
   const base = { ...sim.params };
   restart(resolveParams({ ...base, ...gridOverrides(), grid: gridOverrides().grid, time: { ...base.time, dt: +$('dt').value } }));
 });
@@ -327,6 +397,7 @@ $('json-refresh').addEventListener('click', refreshJson);
 $('json-apply').addEventListener('click', () => {
   try {
     const p = resolveParams(JSON.parse($('json').value));
+    stack = []; lastPatch = null;
     fillGridInputs(p);
     restart(p);
   } catch (e) {
@@ -368,6 +439,7 @@ $('load').addEventListener('change', async (ev) => {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
+    stack = []; lastPatch = null; // a loaded run stands alone (a saved patch keeps its edges and inflows)
     if (data.format?.startsWith('edgy-erosion-snapshot')) {
       sim = Simulation.fromSnapshot(data);
       fillGridInputs(sim.params);

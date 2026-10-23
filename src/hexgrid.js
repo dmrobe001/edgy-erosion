@@ -17,6 +17,12 @@
 //
 // Internally we also use axial coordinates (q, r) where the six neighbour
 // directions are simple constant offsets; see https://www.redblobgames.com/grids/hexagons/
+//
+// HexGrid implements the general mesh contract in mesh.js (degree, area, dist,
+// face, edge flags, bounds), so the processes never assume hexagons. It adds
+// `lattice = true`: neighbour slot k always points along azimuth 60k degrees, which
+// the wave-exposure sweep relies on. `originX/originY` place cell (0, 0) in world
+// coordinates, so nested patches share their parent's coordinate system.
 
 const SQRT3 = Math.sqrt(3);
 
@@ -33,8 +39,10 @@ export class HexGrid {
    * @param {number} cols number of cells per row
    * @param {number} rows number of rows
    * @param {number} dx centre-to-centre lattice spacing (m)
+   * @param {number} [originX] world x of the centre of cell (0, 0) (m)
+   * @param {number} [originY] world y of the centre of cell (0, 0) (m)
    */
-  constructor(cols, rows, dx) {
+  constructor(cols, rows, dx, originX = 0, originY = 0) {
     if (!(cols >= 3 && rows >= 3)) throw new Error('grid must be at least 3 x 3');
     if (!(dx > 0)) throw new Error('lattice spacing dx must be positive');
     this.cols = cols | 0;
@@ -47,6 +55,14 @@ export class HexGrid {
     /** Extent of the cell centres, plus half a cell of padding on each side. */
     this.width = dx * (this.cols + 0.5);
     this.height = this.rowSpacing * (this.rows - 1) + 2 * this.edgeLength;
+    this.originX = originX;
+    this.originY = originY;
+    this.bounds = {
+      xmin: originX - dx / 2, ymin: originY - this.edgeLength,
+      xmax: originX - dx / 2 + this.width, ymax: originY - this.edgeLength + this.height,
+    };
+    this.degree = 6;
+    this.lattice = true;
 
     const n = this.size;
     this.x = new Float64Array(n);
@@ -59,8 +75,8 @@ export class HexGrid {
     for (let r = 0; r < this.rows; r++) {
       for (let c = 0; c < this.cols; c++) {
         const i = r * this.cols + c;
-        this.x[i] = dx * (c + 0.5 * (r & 1));
-        this.y[i] = this.rowSpacing * r;
+        this.x[i] = originX + dx * (c + 0.5 * (r & 1));
+        this.y[i] = originY + this.rowSpacing * r;
         let flags = 0;
         if (c === 0) flags |= 1;
         if (c === this.cols - 1) flags |= 2;
@@ -74,6 +90,14 @@ export class HexGrid {
             nc >= 0 && nc < this.cols && nr >= 0 && nr < this.rows ? nr * this.cols + nc : -1;
         }
       }
+    }
+
+    // mesh contract: per-cell area, per-edge centre distance and shared face width
+    this.area = new Float64Array(n).fill(this.cellArea);
+    this.dist = new Float64Array(6 * n);
+    this.face = new Float64Array(6 * n);
+    for (let e = 0; e < 6 * n; e++) {
+      if (this.neighbors[e] >= 0) { this.dist[e] = dx; this.face[e] = this.edgeLength; }
     }
   }
 
@@ -94,6 +118,8 @@ export class HexGrid {
    * Uses fractional axial coordinates and cube rounding.
    */
   cellAt(x, y) {
+    x -= this.originX;
+    y -= this.originY;
     const a = this.edgeLength;
     const qf = ((SQRT3 / 3) * x - y / 3) / a;
     const rf = ((2 / 3) * y) / a;

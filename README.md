@@ -49,6 +49,10 @@ Rebuild it after changing `src/` or `web/`.
   the cross-section, which shows the strata beneath the surface.
 - **All parameters (JSON)** shows the complete parameter set. That JSON *is* the
   experiment: paste it back, or load it from a file, to reproduce a run exactly.
+- **Zoom** refines a patch: choose a refinement factor and size, press *Zoom in…* and
+  click the map. The level above freezes and supplies the patch's edges and inflowing
+  rivers. The panel compares the patch with the level above it. *Zoom out* returns to
+  the level above and outlines the patch. You can zoom several levels deep.
 - **Export** saves the current view as PNG, or a snapshot (full state plus parameters)
   that can be resumed in the browser or the CLI.
 
@@ -76,7 +80,19 @@ sim.stats();      // summary numbers
 const snap = sim.snapshot();      // JSON-able; Simulation.fromSnapshot(snap) resumes bit-for-bit
 ```
 
-See `examples/basic.js` for a runnable script. `src/render.js` turns state into RGBA
+Zoom into a patch at finer resolution:
+
+```js
+import { zoomIn, compareWithParent } from './src/index.js';
+const child = zoomIn(sim, { center: [2000, 1500], factor: 4, cols: 128, rows: 128 });
+child.run(200);                   // the parent stays frozen
+compareWithParent(child, sim);    // mean elevation, rates, river discharge vs the parent
+```
+
+Processes run on any mesh that satisfies the contract in `src/mesh.js`:
+`new Simulation(params, { mesh })`.
+
+See `examples/basic.js` and `examples/zoom.js` for runnable scripts. `src/render.js` turns state into RGBA
 pixels without a canvas, and `bin/erode.js` uses it to write PNGs from Node.
 
 ### Command line
@@ -151,7 +167,9 @@ Changing `dx` changes the landscape, not just its resolution. See "Known limitat
 ```
 src/                 the simulation (browser + Node)
   simulation.js      state, step order, bookkeeping, snapshots
+  mesh.js            the mesh contract every process uses; an irregular test mesh
   hexgrid.js         hex lattice geometry and neighbours
+  nest.js            zooming in: refine a patch of a frozen parent
   flow.js            lakes, flow directions, drainage area
   lithology.js       rock type at any place and depth
   processes/         fluvial.js, hillslope.js, rockfall.js, coast.js

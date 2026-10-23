@@ -22,6 +22,7 @@
 // compared with the timescales you care about (e.g. the rockfall timescale).
 
 import { HexGrid } from './hexgrid.js';
+import { checkMesh } from './mesh.js';
 import { Rng, fbm } from './rng.js';
 import { resolveParams, deepMerge, validate } from './params.js';
 import { Lithology } from './lithology.js';
@@ -35,11 +36,17 @@ export class Simulation {
   /**
    * @param {object|string} [params] parameter overrides (see params.js), optionally
    *   with `preset: name`; or just a preset name.
+   * @param {object} [options]
+   * @param {object} [options.mesh] a mesh satisfying the contract in mesh.js, used
+   *   instead of the hex grid described by params.grid (snapshots then cannot rebuild it)
    */
-  constructor(params = {}) {
+  constructor(params = {}, options = {}) {
     this.params = resolveParams(params);
     const g = this.params.grid;
-    this.grid = new HexGrid(g.cols, g.rows, g.dx);
+    const [ox, oy] = g.origin || [0, 0];
+    /** The mesh. Called `grid` for history; any mesh satisfying mesh.js works. */
+    this.grid = options.mesh || new HexGrid(g.cols, g.rows, g.dx, ox, oy);
+    checkMesh(this.grid);
     const n = this.grid.size;
     this.rock = new Float64Array(n);
     this.soil = new Float64Array(n);
@@ -60,27 +67,39 @@ export class Simulation {
     this.waveExposureField = new Float64Array(n);
     /** Depth (m) of the wave-cut notch at the foot of each sea cliff. Part of the state. */
     this.notch = new Float64Array(n);
+    /** Drainage area (m^2, precipitation-weighted) entering each cell from outside the domain. */
+    this.inflowArea = new Float64Array(n);
+    /** Sediment flux (m^3/yr) entering each cell from outside the domain. */
+    this.inflowSediment = new Float64Array(n);
+    /** Prescribed elevation change rate (m/yr) of open-edge cells; 0 = fixed base level. */
+    this.boundaryRate = new Float64Array(n);
+    /** Sediment flux (m^3/yr) leaving each cell along its river, from the last step. */
+    this.qsOut = new Float64Array(n);
     this.flow = {
       filled: new Float64Array(n),
       receiver: new Int32Array(n),
+      receiverDist: new Float64Array(n),
       order: new Int32Array(n),
       area: new Float64Array(n),
       visited: new Uint8Array(n),
       flowExponent: 0,
+      inflow: this.inflowArea,
     };
     this.qs = new Float64Array(n);
     this.scratch = {
       eroded: new Float64Array(n),
       zNew: new Float64Array(n),
       qs: new Float64Array(n),
-      edgeFlux: new Float64Array(3 * n),
+      edgeFlux: new Float64Array(this.grid.degree * n),
       outTotal: new Float64Array(n),
       zStart: new Float64Array(n),
     };
     this.time = 0;
     this.stepCount = 0;
     this.rng = new Rng(this.params.seed);
-    this.budget = { uplift: 0, exported: 0 };
+    // volume budget (m^3): uplift includes prescribed boundary motion; inflow is
+    // sediment carried in by rivers from outside the domain
+    this.budget = { uplift: 0, exported: 0, inflow: 0 };
     this.last = { substeps: 0, rockfallEvents: 0, rockfallVolume: 0, avalancheVolume: 0, exported: 0, cliffCollapses: 0, coastSubsteps: 0 };
     /** Current sea level (m), or null when there is no sea. */
     this.seaLevel = seaLevelAt(this.params, 0);
@@ -99,10 +118,13 @@ export class Simulation {
     sim.soil.set(snap.soil);
     sim.upliftCum.set(snap.upliftCum);
     if (snap.notch) sim.notch.set(snap.notch);
+    if (snap.inflowArea) sim.inflowArea.set(snap.inflowArea);
+    if (snap.inflowSediment) sim.inflowSediment.set(snap.inflowSediment);
+    if (snap.boundaryRate) sim.boundaryRate.set(snap.boundaryRate);
     sim.time = snap.time;
     sim.seaLevel = seaLevelAt(sim.params, sim.time);
     sim.stepCount = snap.stepCount;
-    sim.budget = { ...snap.budget };
+    sim.budget = { inflow: 0, ...snap.budget };
     sim._updateDerivedState();
     routeFlow(sim.grid, sim.z, sim.outlet, sim.precipWeight, sim.flow);
     sim.rng.state = snap.rngState >>> 0; // after routing, which may draw random numbers
@@ -122,7 +144,28 @@ export class Simulation {
       soil: Array.from(this.soil),
       upliftCum: Array.from(this.upliftCum),
       notch: Array.from(this.notch),
+      inflowArea: Array.from(this.inflowArea),
+      inflowSediment: Array.from(this.inflowSediment),
+      boundaryRate: Array.from(this.boundaryRate),
     };
+  }
+
+  /**
+   * Replace the state wholesale (used when zooming in from a parent run). Arrays are
+   * copied; anything omitted is left as it is.
+   */
+  setState({ rock, soil, upliftCum, time, inflowArea, inflowSediment, boundaryRate } = {}) {
+    if (rock) this.rock.set(rock);
+    if (soil) this.soil.set(soil);
+    if (upliftCum) this.upliftCum.set(upliftCum);
+    if (inflowArea) this.inflowArea.set(inflowArea);
+    if (inflowSediment) this.inflowSediment.set(inflowSediment);
+    if (boundaryRate) this.boundaryRate.set(boundaryRate);
+    if (time != null) { this.time = time; this.seaLevel = seaLevelAt(this.params, time); }
+    this.notch.fill(0);
+    this._updateDerivedState();
+    routeFlow(this.grid, this.z, this.outlet, this.precipWeight, this.flow);
+    return this;
   }
 
   /**
@@ -134,6 +177,7 @@ export class Simulation {
     for (const k of ['cols', 'rows', 'dx']) {
       if (next.grid[k] !== this.params.grid[k]) throw new Error('grid cannot change mid-run; create a new Simulation');
     }
+    if (JSON.stringify(next.grid.origin) !== JSON.stringify(this.params.grid.origin)) throw new Error('grid cannot change mid-run; create a new Simulation');
     validate(next);
     this.params = next;
     this.seaLevel = seaLevelAt(next, this.time);
@@ -147,18 +191,25 @@ export class Simulation {
     const p = this.params;
     const { grid, rock, soil, z, boundaryOutlet } = this;
     const n = grid.size;
-    const ac = grid.cellArea;
+    const area = grid.area;
     this.scratch.zStart.set(z);
     this.seaLevel = seaLevelAt(p, this.time + dt / 2);
 
     // 1. uplift
     let upliftVol = 0;
     for (let i = 0; i < n; i++) {
-      if (boundaryOutlet[i]) continue;
+      if (boundaryOutlet[i]) {
+        // open edges are fixed base level, or follow a prescribed rate (a zoomed patch
+        // tracking its frozen parent); that is surface motion, not rock uplift
+        const b = this.boundaryRate[i] * dt;
+        rock[i] += b;
+        upliftVol += b * area[i];
+        continue;
+      }
       const u = this.upliftField[i] * dt;
       rock[i] += u;
       this.upliftCum[i] += u;
-      upliftVol += u * ac;
+      upliftVol += u * area[i];
     }
     this.budget.uplift += upliftVol;
     this._updateSurfaceRock();
@@ -192,7 +243,12 @@ export class Simulation {
 
     // 5. rivers
     let exported = 0;
-    if (p.fluvial.enabled) exported += fluvial(this, dt);
+    if (p.fluvial.enabled) {
+      exported += fluvial(this, dt);
+      let inflow = 0;
+      for (let i = 0; i < n; i++) inflow += this.inflowSediment[i];
+      this.budget.inflow += inflow * dt;
+    }
 
     // 6. creep
     this.last.substeps = p.hillslope.enabled ? creep(this, dt).substeps : 0;
@@ -227,7 +283,7 @@ export class Simulation {
     // 9. open boundaries: loose material leaves; base level stays fixed
     for (let i = 0; i < n; i++) {
       if (boundaryOutlet[i] && soil[i] > 0) {
-        exported += soil[i] * ac;
+        exported += soil[i] * area[i];
         soil[i] = 0;
       }
       z[i] = rock[i] + soil[i];
@@ -258,8 +314,8 @@ export class Simulation {
   /** Total volume of rock + soil above z = 0 datum (m^3), for budget checks. */
   volume() {
     let v = 0;
-    for (let i = 0; i < this.grid.size; i++) v += this.rock[i] + this.soil[i];
-    return v * this.grid.cellArea;
+    for (let i = 0; i < this.grid.size; i++) v += (this.rock[i] + this.soil[i]) * this.grid.area[i];
+    return v;
   }
 
   /** Summary numbers for logging. */
@@ -312,14 +368,16 @@ export class Simulation {
     this.flow.flowExponent = p.fluvial.routing === 'mfd' ? p.fluvial.flowExponent : 0;
     this.flow.randomExponent = p.fluvial.randomReceivers ? p.fluvial.randomExponent : 0;
     this.flow.rng = this.rng;
-    this.lith = new Lithology(p, g);
-    const W = g.width, H = g.height;
+    this.frame = referenceFrame(p, g);
+    this.lith = new Lithology(p, g, this.frame);
+    const F = this.frame;
+    const W = F.width, H = F.height;
     const u = p.uplift;
     const ang = ((u.angle || 0) * Math.PI) / 180;
     const ux = Math.cos(ang), uy = -Math.sin(ang);
     for (let i = 0; i < g.size; i++) {
-      const fx = g.x[i] / W - 0.5;
-      const fy = (g.y[i] / W) - 0.5 * (H / W); // width units, centred
+      const fx = (g.x[i] - F.x) / W - 0.5;
+      const fy = (g.y[i] - F.y) / W - 0.5 * (H / W); // width units, centred
       let f = 1;
       switch (u.pattern) {
         case 'uniform': f = 1; break;
@@ -340,13 +398,14 @@ export class Simulation {
   _initialTerrain() {
     const p = this.params.initial;
     const g = this.grid;
-    const W = g.width, H = g.height;
+    const F = this.frame;
+    const W = F.width, H = F.height;
     const ang = ((p.angle || 0) * Math.PI) / 180;
     const ux = Math.cos(ang), uy = -Math.sin(ang);
     const noise = p.noise || { amplitude: 0 };
     for (let i = 0; i < g.size; i++) {
-      const fx = g.x[i] / W;
-      const fy = g.y[i] / H;
+      const fx = (g.x[i] - F.x) / W;
+      const fy = (g.y[i] - F.y) / H;
       let shape = 0;
       switch (p.type) {
         case 'flat': shape = 0; break;
@@ -408,6 +467,22 @@ export class Simulation {
     this._updateVegetation();
     this._updateOutlets();
   }
+}
+
+/**
+ * The rectangle that fractional positions in the parameters refer to: plateau margins,
+ * plug locations, fault lines, dip centres, rainfall gradients. By default the domain
+ * itself; a zoomed-in patch inherits its parent's, so the geology lines up.
+ */
+export function referenceFrame(params, mesh) {
+  if (params.frame) return { ...params.frame };
+  const b = mesh.bounds;
+  return {
+    x: mesh.originX ?? b.xmin,
+    y: mesh.originY ?? b.ymin,
+    width: mesh.width ?? b.xmax - b.xmin,
+    height: mesh.height ?? b.ymax - b.ymin,
+  };
 }
 
 function clamp01(v) {

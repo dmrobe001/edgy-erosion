@@ -10,8 +10,8 @@
 // without bound as beta -> phi, so faces no steeper than phi never fail, and
 // strong rock (high C) supports tall vertical cliffs while weak rock does not.
 //
-// On the grid, each cell is compared with its lowest neighbour. The drop between
-// them is the face height and atan(drop / dx) its angle. The face strength is the
+// On the grid, each cell is compared with its steepest-down neighbour. The drop
+// between them is the face height and atan(drop / distance) its angle. The face strength is the
 // thickness-weighted mean over the layers it cuts, so a soft layer at the foot of
 // a cliff weakens it -- undercutting, the engine of escarpment retreat.
 //
@@ -42,8 +42,9 @@ export function rockfall(sim, dt) {
   const rp = sim.params.rockfall;
   const { grid, lith, rock, soil, z, boundaryOutlet, upliftCum, rng, rockfallActivity } = sim;
   const n = grid.size;
+  const Dg = grid.degree;
   const nb = grid.neighbors;
-  const dx = grid.dx;
+  const { dist, area } = grid;
   const rate = (1 / rp.timescale) * (1 + rp.frostFactor * sim.params.climate.frost);
   const pFail = 1 - Math.exp(-rate * dt);
   let events = 0;
@@ -53,33 +54,41 @@ export function rockfall(sim, dt) {
   for (let s = 0; s < n; s++) {
     const i = forward ? s : n - 1 - s;
     if (boundaryOutlet[i]) continue;
+    // the steepest face: largest drop / distance to a neighbour
     let j = -1;
-    let zj = z[i];
-    for (let k = 0; k < 6; k++) {
-      const c = nb[6 * i + k];
-      if (c >= 0 && z[c] < zj) { zj = z[c]; j = c; }
+    let L = 0;
+    let best = 0;
+    for (let k = 0; k < Dg; k++) {
+      const e = Dg * i + k;
+      const c = nb[e];
+      if (c < 0) continue;
+      const S = (z[i] - z[c]) / dist[e];
+      if (S > best) { best = S; j = c; L = dist[e]; }
     }
     if (j < 0) continue;
+    const zj = z[j];
     const drop = z[i] - zj;
     // only the rock part of the face carries load; the soil cap is just weight
     const rockFace = rock[i] - zj;
     if (rockFace <= 0) continue;
-    const beta = Math.atan(drop / dx);
+    const beta = Math.atan(drop / L);
     const { cohesion, phi } = lith.meanStrength(i, zj - upliftCum[i], rock[i] - upliftCum[i]);
     if (drop <= culmannHeight(beta, cohesion, phi, rp.rockDensity)) continue;
     if (rng.next() >= pFail) continue;
 
-    const stableDrop = dx * Math.tan(0.5 * (beta + phi));
-    const remove = Math.min(drop - stableDrop, 0.5 * drop);
+    const stableDrop = L * Math.tan(0.5 * (beta + phi));
+    // never so much that the lower cell ends up higher (half the drop for equal areas)
+    const remove = Math.min(drop - stableDrop, (drop * area[j]) / (area[i] + area[j]));
     if (remove <= 0) continue;
     const fromSoil = Math.min(soil[i], remove);
     soil[i] -= fromSoil;
     rock[i] -= remove - fromSoil;
     z[i] -= remove;
-    soil[j] += remove;
-    z[j] += remove;
+    const v = remove * area[i];
+    soil[j] += v / area[j];
+    z[j] += v / area[j];
     events++;
-    volume += remove * grid.cellArea;
+    volume += v;
     rockfallActivity[i] += remove;
   }
   return { events, volume };

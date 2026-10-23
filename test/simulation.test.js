@@ -67,3 +67,21 @@ test('lattice spacing and extent are independent parameters', () => {
   assert.ok(Math.abs(coarse.grid.width - fine.grid.width) / coarse.grid.width < 0.02);
   assert.equal(fine.grid.size, 4 * coarse.grid.size);
 });
+
+test('results converge as the time step shrinks', () => {
+  // Mean elevation change over the same span with dt, dt/2, dt/4, dt/8: successive
+  // differences must shrink. (Before "strip, then cut" incision they did not: a
+  // sediment layer left by each step shielded the bed by an amount set by dt.)
+  const base = new Simulation({ preset: 'alpine', grid: { cols: 48, rows: 44 } }).run(100);
+  const snap = JSON.parse(JSON.stringify(base.snapshot()));
+  const mean = (s) => s.z.reduce((a, v) => a + v, 0) / s.z.length;
+  const T = 64000;
+  const result = [2000, 1000, 500, 250].map((dt) => {
+    const s = Simulation.fromSnapshot(snap);
+    s.setParams({ time: { dt } });
+    s.run(T / dt);
+    return mean(s);
+  });
+  const d = [1, 2, 3].map((k) => Math.abs(result[k] - result[k - 1]));
+  assert.ok(d[1] < 0.85 * d[0] && d[2] < 0.85 * d[1], `successive differences ${d.map((v) => v.toFixed(2)).join(', ')} m`);
+});

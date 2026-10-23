@@ -173,6 +173,9 @@ export function coast(sim, dt) {
   exposure.fill(0);
   const result = { exported: 0, collapses: 0, cliffRetreat: 0, substeps: 0, diffusivityCapped: false };
   if (sea == null) return result;
+  // The exposure sweep follows lattice directions, and cliff retreat is measured in
+  // lattice spacings, so this process needs the regular hex lattice (see mesh.js).
+  if (!grid.lattice) throw new Error('the coast process needs a hexagonal-lattice mesh (mesh.lattice); disable coast.enabled on other meshes');
 
   const H = cp.waveHeight;
   const halfTide = cp.tidalRange / 2;

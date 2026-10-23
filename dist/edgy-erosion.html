@@ -85,6 +85,7 @@ input[type=range] { width: 100%; padding: 0; accent-color: var(--accent); }
 textarea { width: 100%; height: 18rem; font-family: ui-monospace, Menlo, monospace; font-size: 11px; }
 button { cursor: pointer; padding: 0.35rem 0.8rem; }
 button:hover { border-color: var(--muted); }
+button:disabled, select:disabled, input:disabled { opacity: 0.5; cursor: default; }
 button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .buttons { display: flex; gap: 0.4rem; flex-wrap: wrap; margin-top: 0.4rem; }
@@ -145,6 +146,20 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
           <label>dt (yr)<input id="dt" type="number" min="1" step="any"></label>
           <span id="extent" class="note"></span>
         </div>
+      </section>
+
+      <section>
+        <h2>Zoom</h2>
+        <p id="zoom-path" class="note"></p>
+        <div class="grid3">
+          <label>refine ×<select id="zoom-factor"><option>2</option><option selected>4</option><option>8</option></select></label>
+          <label>cells<select id="zoom-cells"><option>64</option><option selected>96</option><option>128</option></select></label>
+        </div>
+        <div class="buttons">
+          <button id="zoom-in">Zoom in…</button>
+          <button id="zoom-out" disabled>Zoom out</button>
+        </div>
+        <p id="zoom-compare" class="note"></p>
       </section>
 
       <section id="sliders"></section>
@@ -286,6 +301,12 @@ function fbm(x, y, { wavelength, octaves = 4, gain = 0.5, seed = 0 }) {
 //
 // Internally we also use axial coordinates (q, r) where the six neighbour
 // directions are simple constant offsets; see https://www.redblobgames.com/grids/hexagons/
+//
+// HexGrid implements the general mesh contract in mesh.js (degree, area, dist,
+// face, edge flags, bounds), so the processes never assume hexagons. It adds
+// `lattice = true`: neighbour slot k always points along azimuth 60k degrees, which
+// the wave-exposure sweep relies on. `originX/originY` place cell (0, 0) in world
+// coordinates, so nested patches share their parent's coordinate system.
 
 const SQRT3 = Math.sqrt(3);
 
@@ -302,8 +323,10 @@ class HexGrid {
    * @param {number} cols number of cells per row
    * @param {number} rows number of rows
    * @param {number} dx centre-to-centre lattice spacing (m)
+   * @param {number} [originX] world x of the centre of cell (0, 0) (m)
+   * @param {number} [originY] world y of the centre of cell (0, 0) (m)
    */
-  constructor(cols, rows, dx) {
+  constructor(cols, rows, dx, originX = 0, originY = 0) {
     if (!(cols >= 3 && rows >= 3)) throw new Error('grid must be at least 3 x 3');
     if (!(dx > 0)) throw new Error('lattice spacing dx must be positive');
     this.cols = cols | 0;
@@ -316,6 +339,14 @@ class HexGrid {
     /** Extent of the cell centres, plus half a cell of padding on each side. */
     this.width = dx * (this.cols + 0.5);
     this.height = this.rowSpacing * (this.rows - 1) + 2 * this.edgeLength;
+    this.originX = originX;
+    this.originY = originY;
+    this.bounds = {
+      xmin: originX - dx / 2, ymin: originY - this.edgeLength,
+      xmax: originX - dx / 2 + this.width, ymax: originY - this.edgeLength + this.height,
+    };
+    this.degree = 6;
+    this.lattice = true;
 
     const n = this.size;
     this.x = new Float64Array(n);
@@ -328,8 +359,8 @@ class HexGrid {
     for (let r = 0; r < this.rows; r++) {
       for (let c = 0; c < this.cols; c++) {
         const i = r * this.cols + c;
-        this.x[i] = dx * (c + 0.5 * (r & 1));
-        this.y[i] = this.rowSpacing * r;
+        this.x[i] = originX + dx * (c + 0.5 * (r & 1));
+        this.y[i] = originY + this.rowSpacing * r;
         let flags = 0;
         if (c === 0) flags |= 1;
         if (c === this.cols - 1) flags |= 2;
@@ -343,6 +374,14 @@ class HexGrid {
             nc >= 0 && nc < this.cols && nr >= 0 && nr < this.rows ? nr * this.cols + nc : -1;
         }
       }
+    }
+
+    // mesh contract: per-cell area, per-edge centre distance and shared face width
+    this.area = new Float64Array(n).fill(this.cellArea);
+    this.dist = new Float64Array(6 * n);
+    this.face = new Float64Array(6 * n);
+    for (let e = 0; e < 6 * n; e++) {
+      if (this.neighbors[e] >= 0) { this.dist[e] = dx; this.face[e] = this.edgeLength; }
     }
   }
 
@@ -363,6 +402,8 @@ class HexGrid {
    * Uses fractional axial coordinates and cube rounding.
    */
   cellAt(x, y) {
+    x -= this.originX;
+    y -= this.originY;
     const a = this.edgeLength;
     const qf = ((SQRT3 / 3) * x - y / 3) / a;
     const rf = ((2 / 3) * y) / a;
@@ -440,7 +481,12 @@ const DEFAULTS = {
     cols: 128,      // cells per row
     rows: 128,      // number of rows
     dx: 30,         // centre-to-centre lattice spacing (m)
+    origin: [0, 0], // world position of the centre of cell (0, 0) (m)
   },
+  // Rectangle { x, y, width, height } (m) that fractional positions refer to (plateau
+  // margins, plugs, fault lines, dip centre). null = the domain itself. Zoomed patches
+  // inherit their parent's so the geology lines up.
+  frame: null,
   time: {
     dt: 2000,       // years per step
   },
@@ -515,7 +561,6 @@ const DEFAULTS = {
     m: 0.5,                      // drainage-area exponent
     n: 1.0,                      // slope exponent
     soilErodibility: 4e-4,       // K for loose soil/sediment (same units as rock K)
-    soilCoverScale: 0.5,         // soil thickness (m) that shields bedrock from incision (e-folding)
     // 'mfd': drainage area spread over all lower neighbours (smoother hillslopes, no
     // grid-aligned streaks); 'sfd': all to the steepest neighbour (classic D6).
     routing: 'mfd',
@@ -804,7 +849,7 @@ class Lithology {
    * @param {object} params resolved parameters
    * @param {import('./hexgrid.js').HexGrid} grid
    */
-  constructor(params, grid) {
+  constructor(params, grid, frame) {
     this.grid = grid;
     const names = Object.keys(params.rocks);
     this.names = names;
@@ -841,10 +886,13 @@ class Lithology {
     this.basement = idx(st.basement);
 
     const n = grid.size;
-    const W = grid.width;
-    const H = grid.height;
-    const xc = W / 2;
-    const yc = H / 2;
+    // fractional positions and the dip centre refer to the reference frame (see
+    // referenceFrame in simulation.js), by default the domain itself
+    const F = frame || { x: 0, y: 0, width: grid.width, height: grid.height };
+    const W = F.width;
+    const H = F.height;
+    const xc = F.x + W / 2;
+    const yc = F.y + H / 2;
     const tanDip = Math.tan(((st.dip || 0) * Math.PI) / 180);
     const az = ((st.dipDirection || 0) * Math.PI) / 180;
     // screen y points south, so "north" is -y
@@ -877,8 +925,8 @@ class Lithology {
       const rock = idx(b.rock);
       const top = b.top ?? Infinity;
       for (let i = 0; i < n; i++) {
-        const px = grid.x[i] / W;
-        const py = grid.y[i] / H;
+        const px = (grid.x[i] - F.x) / W;
+        const py = (grid.y[i] - F.y) / H;
         let inside = false;
         if (b.shape === 'disc') {
           // radius is a fraction of width; measure in width units on both axes
@@ -960,8 +1008,8 @@ function segmentDistance(px, py, x0, y0, x1, y1) {
 //    cell reached from a higher one is a pit and is raised to just above it; the
 //    raised surface `filled` is the water surface of lakes. A tiny epsilon makes
 //    lake surfaces drain in a definite direction.
-// 2. Each cell drains to its lowest neighbour on the filled surface (single flow
-//    direction; on a hex grid all six neighbours are equidistant, so lowest = steepest).
+// 2. Each cell drains to its steepest-descent neighbour on the filled surface (single
+//    flow direction).
 //    Drainage AREA can optionally be spread over all lower neighbours (multiple flow
 //    direction), which avoids grid-aligned streaks on planar hillslopes; incision and
 //    sediment still follow the single steepest receiver.
@@ -1014,17 +1062,22 @@ class MinHeap {
 const FLAT_EPSILON = 1e-6;
 
 /**
- * @param {import('./hexgrid.js').HexGrid} grid
+ * @param {object} mesh any mesh satisfying the contract in mesh.js
  * @param {Float64Array} z surface elevation
  * @param {Uint8Array} outlet 1 where water leaves the domain (base level / sea)
  * @param {Float64Array} weight per-cell runoff multiplier (precipitation / 1 m/yr)
- * @param {object} out preallocated arrays: filled, receiver, order, area, visited (scratch);
- *   optional out.flowExponent > 0 switches drainage area to multiple flow direction
+ * @param {object} out preallocated arrays: filled, receiver, receiverDist, order, area,
+ *   visited (scratch). Optional: out.flowExponent > 0 switches drainage area to multiple
+ *   flow direction; out.randomExponent > 0 with out.rng draws random receivers;
+ *   out.inflow (Float64Array, m^2) adds drainage area entering from outside the domain.
  */
-function routeFlow(grid, z, outlet, weight, out) {
-  const n = grid.size;
-  const nb = grid.neighbors;
+function routeFlow(mesh, z, outlet, weight, out) {
+  const n = mesh.size;
+  const D = mesh.degree;
+  const nb = mesh.neighbors;
+  const dist = mesh.dist;
   const { filled, receiver, order, area } = out;
+  const rdist = out.receiverDist;
   const visited = out.visited;
   visited.fill(0);
   const heap = out.heap || (out.heap = new MinHeap(n));
@@ -1047,8 +1100,8 @@ function routeFlow(grid, z, outlet, weight, out) {
     const c = heap.pop();
     order[count++] = c;
     const fc = filled[c];
-    for (let k = 0; k < 6; k++) {
-      const j = nb[6 * c + k];
+    for (let k = 0; k < D; k++) {
+      const j = nb[D * c + k];
       if (j < 0 || visited[j]) continue;
       visited[j] = 1;
       const raised = fc + FLAT_EPSILON;
@@ -1056,45 +1109,49 @@ function routeFlow(grid, z, outlet, weight, out) {
       heap.push(j, filled[j]);
     }
   }
+  if (count < n) throw new Error('routeFlow: some cells are not connected to any outlet');
 
+  // Receivers: the steepest descent on the filled surface (drop / distance), or with
+  // randomExponent a random lower neighbour weighted by slope^p (the hex analogue of
+  // the "Rho8" method of Fairfield & Leymarie 1991, Water Resour. Res. 27). Re-drawn
+  // every step, random receivers remove the bias towards the lattice directions while
+  // keeping a single receiver for the implicit solver.
   const rng = out.rng;
   const rp = out.randomExponent ?? 0;
   for (let i = 0; i < n; i++) {
-    if (outlet[i]) continue;
+    if (outlet[i]) { if (rdist) rdist[i] = 0; continue; }
+    const fi = filled[i];
     let best = -1;
-    let bestZ = filled[i];
-    for (let k = 0; k < 6; k++) {
-      const j = nb[6 * i + k];
-      if (j >= 0 && filled[j] < bestZ) { bestZ = filled[j]; best = j; }
+    let bestS = 0;
+    let bestD = 0;
+    let sum = 0;
+    for (let k = 0; k < D; k++) {
+      const e = D * i + k;
+      const j = nb[e];
+      if (j < 0 || filled[j] >= fi) continue;
+      const S = (fi - filled[j]) / dist[e];
+      if (S > bestS) { bestS = S; best = j; bestD = dist[e]; }
+      if (rp > 0) sum += Math.pow(S, rp);
     }
     if (rng && rp > 0) {
-      // Random receiver among the lower neighbours, chosen with probability proportional
-      // to drop^rp (the hex analogue of the "Rho8" method of Fairfield & Leymarie 1991,
-      // Water Resour. Res. 27). Re-drawn every step, it removes the bias towards the six
-      // lattice directions while keeping a single receiver for the implicit solver.
-      const fi = filled[i];
-      let sum = 0;
-      for (let k = 0; k < 6; k++) {
-        const j = nb[6 * i + k];
-        if (j >= 0 && filled[j] < fi) sum += Math.pow(fi - filled[j], rp);
-      }
       let u = rng.next() * sum;
-      for (let k = 0; k < 6; k++) {
-        const j = nb[6 * i + k];
-        if (j >= 0 && filled[j] < fi) {
-          u -= Math.pow(fi - filled[j], rp);
-          if (u <= 0) { best = j; break; }
-        }
+      for (let k = 0; k < D; k++) {
+        const e = D * i + k;
+        const j = nb[e];
+        if (j < 0 || filled[j] >= fi) continue;
+        u -= Math.pow((fi - filled[j]) / dist[e], rp);
+        if (u <= 0) { best = j; bestD = dist[e]; break; }
       }
     }
     receiver[i] = best;
+    if (rdist) rdist[i] = bestD;
   }
 
-  const a = grid.cellArea;
-  for (let i = 0; i < n; i++) area[i] = weight[i] * a;
+  const inflow = out.inflow;
+  for (let i = 0; i < n; i++) area[i] = weight[i] * mesh.area[i] + (inflow ? inflow[i] : 0);
   const p = out.flowExponent ?? 0;
   if (!(p > 0)) {
-    // single flow direction: everything goes to the steepest receiver
+    // single flow direction: everything goes to the receiver
     for (let s = n - 1; s >= 0; s--) {
       const i = order[s];
       const r = receiver[i];
@@ -1106,20 +1163,21 @@ function routeFlow(grid, z, outlet, weight, out) {
   // among all lower neighbours in proportion to slope^p. Large p tends to single flow.
   // Every lower neighbour has lower filled elevation, so it comes earlier in `order`
   // and the upstream-first sweep stays valid.
-  const w = new Float64Array(6);
+  const w = out.mfdWeights || (out.mfdWeights = new Float64Array(D));
   for (let s = n - 1; s >= 0; s--) {
     const i = order[s];
     if (receiver[i] < 0) continue;
     const fi = filled[i];
     let sum = 0;
-    for (let k = 0; k < 6; k++) {
-      const j = nb[6 * i + k];
+    for (let k = 0; k < D; k++) {
+      const e = D * i + k;
+      const j = nb[e];
       const d = j >= 0 ? fi - filled[j] : 0;
-      w[k] = d > 0 ? Math.pow(d, p) : 0;
+      w[k] = d > 0 ? Math.pow(d / dist[e], p) : 0;
       sum += w[k];
     }
     const ai = area[i] / sum;
-    for (let k = 0; k < 6; k++) if (w[k] > 0) area[nb[6 * i + k]] += ai * w[k];
+    for (let k = 0; k < D; k++) if (w[k] > 0) area[nb[D * i + k]] += ai * w[k];
   }
 }
 
@@ -1128,16 +1186,20 @@ function routeFlow(grid, z, outlet, weight, out) {
 // and deposition downstream.
 //
 // INCISION. Channel lowering rate E = K * A^m * S^n, where A is the effective
-// drainage area (upstream area weighted by precipitation / 1 m/yr), S the slope to
-// the receiver, and K an erodibility that blends between soil and bedrock:
+// drainage area (upstream area weighted by precipitation / 1 m/yr) and S the slope
+// to the receiver. Rock has its own K; loose sediment (soil, alluvium, talus) has
+// K_soil, reduced by vegetation. Within a step the river first strips any sediment
+// on its bed at the soil rate, and only then cuts rock, for the remaining time.
 //
-//   K = K_soil * (1 - c) + K_rock * c,      c = exp(-soil / soilCoverScale)
+// Why "strip, then cut" rather than a cover factor exp(-soil/H*) taken from the
+// start of the step (as in SPACE, Shobe, Tucker & Barnhart 2017, Geosci. Model Dev. 10):
+// each step leaves a sediment layer whose thickness scales with dt (from weathering
+// and deposition), and a cover factor computed from it made incision depend strongly
+// on dt -- quartering dt changed 150 kyr of evolution by tens of metres, without
+// converging. Stripping costs a fraction of the step that does not depend on dt.
 //
-// (thick soil -> soil erodibility; bare rock -> rock erodibility; after the SPACE
-// model of Shobe, Tucker & Barnhart 2017, Geosci. Model Dev. 10). Vegetation
-// reduces K_soil. We solve implicitly in time, downstream first, following
-// Braun & Willett 2013 (Geomorphology 180-181), which is unconditionally stable for
-// n = 1; for n != 1 each cell's implicit equation is solved by Newton's method.
+// Each phase is solved implicitly, downstream first (Braun & Willett 2013,
+// Geomorphology 180-181): unconditionally stable for n = 1; Newton's method for n != 1.
 //
 // DEPOSITION. Eroded material travels downstream as a volumetric flux Qs (m^3/yr).
 // Each cell deposits at rate D = G * Qs / A ("xi-q" erosion-deposition model of
@@ -1145,11 +1207,6 @@ function routeFlow(grid, z, outlet, weight, out) {
 // 124). G = 0 recovers pure detachment-limited incision; G ~ 1 gives alluvial
 // valleys and fans. Lakes and the sea trap sediment up to their water level.
 //
-// As in SPACE, the soil term only removes soil and the rock term only removes rock.
-// Simplification: the implicit solve uses the blended K for the total lowering and
-// then splits it in proportion; if the soil runs out mid-step the soil share is
-// simply truncated (the cell lowers a little less than the implicit solution).
-
 /**
  * @param {import('../simulation.js').Simulation} sim
  * @param {number} dt years
@@ -1157,14 +1214,12 @@ function routeFlow(grid, z, outlet, weight, out) {
 function fluvial(sim, dt) {
   const p = sim.params.fluvial;
   const { grid, lith, rock, soil, z, outlet, boundaryOutlet, veg } = sim;
-  const { filled, receiver, order, area } = sim.flow;
+  const { filled, receiver, receiverDist, order, area } = sim.flow;
   const n = grid.size;
-  const L = grid.dx;
-  const ac = grid.cellArea;
+  const cellArea = grid.area;
   const m = p.m;
   const nExp = p.n;
   const Ks = p.soilErodibility;
-  const Hs = p.soilCoverScale;
   const G = p.deposition;
   const vegRed = sim.params.vegetation.erodibilityReduction;
   const sea = sim.seaLevel;
@@ -1182,35 +1237,25 @@ function fluvial(sim, dt) {
     const r = receiver[i];
     const zr = zNew[r];
     if (z[i] <= zr) continue;
-    const cover = Math.exp(-soil[i] / Hs);
-    const kSoil = Ks * Math.exp(-vegRed * veg[i]) * (1 - cover);
-    const kRock = lith.erodibility[sim.surfaceRock[i]] * lith.weakness[i] * cover;
-    const K = kSoil + kRock;
+    const L = receiverDist[i];
     const Am = Math.pow(area[i], m);
-    let zi;
-    if (nExp === 1) {
-      const F = (K * Am * dt) / L;
-      zi = (z[i] + F * zr) / (1 + F);
+    const kSoil = Ks * Math.exp(-vegRed * veg[i]);
+    const kRock = lith.erodibility[sim.surfaceRock[i]] * lith.weakness[i];
+    // Strip, then cut: loose sediment on the bed is entrained at the soil rate first;
+    // only once it is gone does the river cut rock, for the rest of the step.
+    let fromSoil = 0;
+    let fromRock = 0;
+    const zSoil = implicitStep(z[i], zr, kSoil * Am, dt, L, nExp);
+    const soilWanted = z[i] - zSoil;
+    if (soilWanted <= soil[i]) {
+      fromSoil = soilWanted;
     } else {
-      // f(h) = h - h0 + F h^n = 0 with h = zi - zr, h0 = z[i] - zr
-      const F = (K * Am * dt) / Math.pow(L, nExp);
-      const h0 = z[i] - zr;
-      let h = h0;
-      for (let it = 0; it < 30; it++) {
-        const hn1 = Math.pow(h, nExp - 1);
-        const f = h - h0 + F * hn1 * h;
-        const df = 1 + nExp * F * hn1;
-        const hNext = Math.max(h - f / df, h * 1e-3);
-        if (Math.abs(hNext - h) < 1e-9 * (1 + h0)) { h = hNext; break; }
-        h = hNext;
-      }
-      zi = zr + h;
+      fromSoil = soil[i];
+      // time spent stripping, in proportion to the depth stripped
+      const tRest = dt * (1 - soil[i] / soilWanted);
+      const z1 = z[i] - soil[i];
+      if (tRest > 0 && z1 > zr) fromRock = z1 - implicitStep(z1, zr, kRock * Am, tRest, L, nExp);
     }
-    // Split the lowering between soil entrainment and bedrock incision in proportion to
-    // their terms in K. Soil removal cannot exceed the soil present; it never eats into rock.
-    const total = z[i] - zi;
-    const fromSoil = Math.min(soil[i], (total * kSoil) / K);
-    const fromRock = (total * kRock) / K;
     soil[i] -= fromSoil;
     rock[i] -= fromRock;
     eroded[i] = fromSoil + fromRock;
@@ -1219,10 +1264,14 @@ function fluvial(sim, dt) {
 
   // --- sediment routing and deposition, upstream first ---
   const qs = sim.scratch.qs; // incoming sediment flux (m^3/yr)
-  qs.fill(0);
+  if (sim.inflowSediment) qs.set(sim.inflowSediment); // rivers entering from outside the domain
+  else qs.fill(0);
+  const qsOut = sim.qsOut;
+  qsOut.fill(0);
   let exported = 0;
   for (let s = n - 1; s >= 0; s--) {
     const i = order[s];
+    const ac = cellArea[i];
     const supply = qs[i] + (eroded[i] * ac) / dt; // m^3/yr
     if (supply <= 0) continue;
     const maxDepth = (supply * dt) / ac; // all of it, as a thickness on this cell
@@ -1240,6 +1289,7 @@ function fluvial(sim, dt) {
     soil[i] += d;
     zNew[i] += d;
     const out = supply - (d * ac) / dt;
+    qsOut[i] = out;
     const r = receiver[i];
     if (r >= 0) qs[r] += out;
     else exported += out * dt;
@@ -1251,6 +1301,31 @@ function fluvial(sim, dt) {
 
 function clamp(v, lo, hi) {
   return v < lo ? lo : v > hi ? hi : v;
+}
+
+/**
+ * One implicit (backward Euler) step of dz/dt = -KA (z - zr)^n / L^n for a cell whose
+ * receiver has already been updated to zr (Braun & Willett 2013). Exact algebra for
+ * n = 1; Newton's method otherwise. Returns the new elevation, never below zr.
+ */
+function implicitStep(z0, zr, KA, dt, L, n) {
+  if (n === 1) {
+    const F = (KA * dt) / L;
+    return (z0 + F * zr) / (1 + F);
+  }
+  // f(h) = h - h0 + F h^n = 0 with h = z - zr, h0 = z0 - zr
+  const F = (KA * dt) / Math.pow(L, n);
+  const h0 = z0 - zr;
+  let h = h0;
+  for (let it = 0; it < 30; it++) {
+    const hn1 = Math.pow(h, n - 1);
+    const f = h - h0 + F * hn1 * h;
+    const df = 1 + n * F * hn1;
+    const hNext = Math.max(h - f / df, h * 1e-3);
+    if (Math.abs(hNext - h) < 1e-9 * (1 + h0)) { h = hNext; break; }
+    h = hNext;
+  }
+  return zr + h;
 }
 
 // ---- src/processes/hillslope.js ----
@@ -1266,18 +1341,15 @@ function clamp(v, lo, hi) {
 // 1/(1-(S/Sc)^2) is capped at `maxNonlinearity`; anything steeper than Sc is handled
 // by avalanching instead.
 //
-// On the hex lattice, the flux across the edge shared by cells i and j changes the
-// height of each by
-//     dh = q * edgeLength / cellArea * dt = q * 2 / (3 dx) * dt,   with S = dz / dx,
-// which works out to D * f * dz * 2 / (3 dx^2) * dt -- the standard hex-lattice
-// Laplacian. Forward Euler is stable for dt < dx^2 / (3 D f); we substep.
+// Finite volumes (see mesh.js): the flux across the face shared by cells i and j moves
+// volume q * face * dt, with S = dz / dist. On the regular hex grid this is
+// D * f * dz * 2 / (3 dx^2) * dt per cell, the standard isotropic hex Laplacian.
+// Explicit substeps keep forward Euler stable.
 //
 // AVALANCHING. Soil steeper than the angle of repose (slope Sc) slides to lower
 // neighbours until it is not, conserving volume (a "thermal erosion" relaxation as
 // in Musgrave, Kolb & Mace 1989, SIGGRAPH). This is what builds talus slopes under
 // cliffs from rockfall debris.
-
-const LAPLACE = 2 / 3; // hex-lattice Laplacian coefficient (divided by dx^2)
 
 /** Effective critical slope for cell i, raised by vegetation (root cohesion). */
 function criticalSlope(sim, i) {
@@ -1292,10 +1364,11 @@ function criticalSlope(sim, i) {
 function creep(sim, dt) {
   const hp = sim.params.hillslope;
   const vp = sim.params.vegetation;
-  const { grid, soil, z, veg } = sim;
-  const n = grid.size;
-  const nb = grid.neighbors;
-  const dx = grid.dx;
+  const { grid: mesh, soil, z, veg } = sim;
+  const n = mesh.size;
+  const Dg = mesh.degree;
+  const nb = mesh.neighbors;
+  const { dist, face, area } = mesh;
   const D0 = hp.diffusivity;
   const fmax = Math.max(1, hp.maxNonlinearity);
   const h0 = hp.transportDepth;
@@ -1303,48 +1376,57 @@ function creep(sim, dt) {
 
   let vmax = 0;
   for (let i = 0; i < n; i++) if (veg[i] > vmax) vmax = veg[i];
-  const Dmax = D0 * (1 + vp.diffusivityBoost * vmax);
-  const dtStable = (0.5 * dx * dx) / (3 * Dmax * fmax);
+  const Dmax = D0 * (1 + vp.diffusivityBoost * vmax) * fmax;
+  // Forward Euler is stable when dt * sum_j(D face / (dist area_i)) <= 1 for every cell
+  // (Gershgorin); keep a safety factor.
+  let worst = 0;
+  for (let i = 0; i < n; i++) {
+    let sum = 0;
+    for (let k = 0; k < Dg; k++) { const e = Dg * i + k; if (nb[e] >= 0) sum += face[e] / dist[e]; }
+    worst = Math.max(worst, sum / area[i]);
+  }
+  const dtStable = 0.75 / (Dmax * worst);
   const substeps = Math.max(1, Math.ceil(dt / dtStable));
   const h = dt / substeps;
-  const coef = (LAPLACE * h) / (dx * dx);
 
-  const flux = sim.scratch.edgeFlux; // 3 per cell: directions 0 (E), 1 (NE), 2 (NW)
+  const flux = sim.scratch.edgeFlux; // volume moved per edge per substep, indexed like neighbors
   const outTotal = sim.scratch.outTotal;
   for (let sub = 0; sub < substeps; sub++) {
     outTotal.fill(0);
     for (let i = 0; i < n; i++) {
-      for (let k = 0; k < 3; k++) {
-        const j = nb[6 * i + k];
-        const e = 3 * i + k;
-        if (j < 0) { flux[e] = 0; continue; }
+      for (let k = 0; k < Dg; k++) {
+        const e = Dg * i + k;
+        const j = nb[e];
+        flux[e] = 0;
+        if (j <= i) continue; // each edge once, from its lower-numbered cell
         const dz = z[i] - z[j];
         const up = dz > 0 ? i : j;
-        const S = Math.abs(dz) / dx;
-        const Sc = criticalSlope(sim, up);
-        const r = S / Sc;
+        const S = Math.abs(dz) / dist[e];
+        const r = S / criticalSlope(sim, up);
         const f = r < 1 ? Math.min(fmax, 1 / (1 - r * r)) : fmax;
         const D = D0 * (1 + vp.diffusivityBoost * veg[up]);
         const depth = 1 - Math.exp(-soil[up] / h0);
-        const q = D * f * depth * dz * coef; // height moved i -> j (negative: j -> i)
+        const q = D * f * depth * (dz / dist[e]) * face[e] * h; // volume moved i -> j (negative: j -> i)
         flux[e] = q;
         outTotal[up] += Math.abs(q);
       }
     }
     // scale factor so no cell exports more soil than it has
     for (let i = 0; i < n; i++) {
-      outTotal[i] = outTotal[i] > soil[i] ? soil[i] / outTotal[i] : 1;
+      const have = soil[i] * area[i];
+      outTotal[i] = outTotal[i] > have ? have / outTotal[i] : 1;
     }
     for (let i = 0; i < n; i++) {
-      for (let k = 0; k < 3; k++) {
-        const q0 = flux[3 * i + k];
+      for (let k = 0; k < Dg; k++) {
+        const e = Dg * i + k;
+        const q0 = flux[e];
         if (q0 === 0) continue;
-        const j = nb[6 * i + k];
+        const j = nb[e];
         const q = q0 > 0 ? q0 * outTotal[i] : q0 * outTotal[j];
-        soil[i] -= q;
-        soil[j] += q;
-        z[i] -= q;
-        z[j] += q;
+        soil[i] -= q / area[i];
+        z[i] -= q / area[i];
+        soil[j] += q / area[j];
+        z[j] += q / area[j];
       }
     }
     for (let i = 0; i < n; i++) if (soil[i] < 0) { z[i] -= soil[i]; soil[i] = 0; } // round-off only
@@ -1359,15 +1441,17 @@ function creep(sim, dt) {
  * @returns {number} total volume moved (m^3)
  */
 function avalanche(sim) {
-  const { grid, soil, z, boundaryOutlet } = sim;
-  const n = grid.size;
-  const nb = grid.neighbors;
-  const dx = grid.dx;
+  const { grid: mesh, soil, z, boundaryOutlet } = sim;
+  const n = mesh.size;
+  const Dg = mesh.degree;
+  const nb = mesh.neighbors;
+  const { dist, area } = mesh;
   const maxIter = sim.params.hillslope.avalancheIterations;
-  const excess = new Float64Array(6);
   const ws = sim.scratch.avalanche || (sim.scratch.avalanche = {
     list: new Int32Array(n), next: new Int32Array(n), mark: new Uint32Array(n), stamp: 0,
+    excess: new Float64Array(Dg),
   });
+  const excess = ws.excess;
   let list = ws.list;
   let next = ws.next;
   let count = n;
@@ -1380,45 +1464,49 @@ function avalanche(sim) {
     for (let s = 0; s < count; s++) {
       const i = list[forward ? s : count - 1 - s];
       if (soil[i] <= 0 || boundaryOutlet[i]) continue;
-      const lim = criticalSlope(sim, i) * dx;
+      const Sc = criticalSlope(sim, i);
       let sum = 0;
       let emax = 0;
-      for (let k = 0; k < 6; k++) {
-        const j = nb[6 * i + k];
-        let e = 0;
+      let kmax = -1;
+      for (let k = 0; k < Dg; k++) {
+        const e = Dg * i + k;
+        const j = nb[e];
+        let ex = 0;
         if (j >= 0) {
-          e = z[i] - z[j] - lim;
-          if (e < 0) e = 0;
+          ex = z[i] - z[j] - Sc * dist[e];
+          if (ex < 0) ex = 0;
         }
-        excess[k] = e;
-        sum += e;
-        if (e > emax) emax = e;
+        excess[k] = ex;
+        sum += ex;
+        if (ex > emax) { emax = ex; kmax = k; }
       }
       if (emax <= 1e-6) continue;
-      // Move half the largest excess (the amount that would level the steepest pair),
-      // shared among all over-steep neighbours in proportion to their excess.
-      const M = Math.min(soil[i], 0.5 * emax);
-      for (let k = 0; k < 6; k++) {
+      // Move the volume that would level the steepest pair's excess halfway (half the
+      // excess for equal areas), shared among all over-steep neighbours by excess.
+      const jm = nb[Dg * i + kmax];
+      const want = (emax * area[i] * area[jm]) / (area[i] + area[jm]);
+      const M = Math.min(soil[i] * area[i], want); // volume
+      for (let k = 0; k < Dg; k++) {
         if (excess[k] === 0) continue;
-        const j = nb[6 * i + k];
-        const dm = (M * excess[k]) / sum;
-        soil[j] += dm;
-        z[j] += dm;
+        const j = nb[Dg * i + k];
+        const dv = (M * excess[k]) / sum;
+        soil[j] += dv / area[j];
+        z[j] += dv / area[j];
       }
-      soil[i] -= M;
-      z[i] -= M;
+      if (M === soil[i] * area[i]) { z[i] -= soil[i]; soil[i] = 0; } // exact, no round-off sliver
+      else { soil[i] -= M / area[i]; z[i] -= M / area[i]; }
       moved += M;
       // i and its neighbours may now be unstable
       if (ws.mark[i] !== stamp) { ws.mark[i] = stamp; next[nextCount++] = i; }
-      for (let k = 0; k < 6; k++) {
-        const j = nb[6 * i + k];
+      for (let k = 0; k < Dg; k++) {
+        const j = nb[Dg * i + k];
         if (j >= 0 && ws.mark[j] !== stamp) { ws.mark[j] = stamp; next[nextCount++] = j; }
       }
     }
     [list, next] = [next, list];
     count = nextCount;
   }
-  return moved * grid.cellArea;
+  return moved;
 }
 
 // ---- src/processes/rockfall.js ----
@@ -1434,8 +1522,8 @@ function avalanche(sim) {
 // without bound as beta -> phi, so faces no steeper than phi never fail, and
 // strong rock (high C) supports tall vertical cliffs while weak rock does not.
 //
-// On the grid, each cell is compared with its lowest neighbour. The drop between
-// them is the face height and atan(drop / dx) its angle. The face strength is the
+// On the grid, each cell is compared with its steepest-down neighbour. The drop
+// between them is the face height and atan(drop / distance) its angle. The face strength is the
 // thickness-weighted mean over the layers it cuts, so a soft layer at the foot of
 // a cliff weakens it -- undercutting, the engine of escarpment retreat.
 //
@@ -1466,8 +1554,9 @@ function rockfall(sim, dt) {
   const rp = sim.params.rockfall;
   const { grid, lith, rock, soil, z, boundaryOutlet, upliftCum, rng, rockfallActivity } = sim;
   const n = grid.size;
+  const Dg = grid.degree;
   const nb = grid.neighbors;
-  const dx = grid.dx;
+  const { dist, area } = grid;
   const rate = (1 / rp.timescale) * (1 + rp.frostFactor * sim.params.climate.frost);
   const pFail = 1 - Math.exp(-rate * dt);
   let events = 0;
@@ -1477,33 +1566,41 @@ function rockfall(sim, dt) {
   for (let s = 0; s < n; s++) {
     const i = forward ? s : n - 1 - s;
     if (boundaryOutlet[i]) continue;
+    // the steepest face: largest drop / distance to a neighbour
     let j = -1;
-    let zj = z[i];
-    for (let k = 0; k < 6; k++) {
-      const c = nb[6 * i + k];
-      if (c >= 0 && z[c] < zj) { zj = z[c]; j = c; }
+    let L = 0;
+    let best = 0;
+    for (let k = 0; k < Dg; k++) {
+      const e = Dg * i + k;
+      const c = nb[e];
+      if (c < 0) continue;
+      const S = (z[i] - z[c]) / dist[e];
+      if (S > best) { best = S; j = c; L = dist[e]; }
     }
     if (j < 0) continue;
+    const zj = z[j];
     const drop = z[i] - zj;
     // only the rock part of the face carries load; the soil cap is just weight
     const rockFace = rock[i] - zj;
     if (rockFace <= 0) continue;
-    const beta = Math.atan(drop / dx);
+    const beta = Math.atan(drop / L);
     const { cohesion, phi } = lith.meanStrength(i, zj - upliftCum[i], rock[i] - upliftCum[i]);
     if (drop <= culmannHeight(beta, cohesion, phi, rp.rockDensity)) continue;
     if (rng.next() >= pFail) continue;
 
-    const stableDrop = dx * Math.tan(0.5 * (beta + phi));
-    const remove = Math.min(drop - stableDrop, 0.5 * drop);
+    const stableDrop = L * Math.tan(0.5 * (beta + phi));
+    // never so much that the lower cell ends up higher (half the drop for equal areas)
+    const remove = Math.min(drop - stableDrop, (drop * area[j]) / (area[i] + area[j]));
     if (remove <= 0) continue;
     const fromSoil = Math.min(soil[i], remove);
     soil[i] -= fromSoil;
     rock[i] -= remove - fromSoil;
     z[i] -= remove;
-    soil[j] += remove;
-    z[j] += remove;
+    const v = remove * area[i];
+    soil[j] += v / area[j];
+    z[j] += v / area[j];
     events++;
-    volume += remove * grid.cellArea;
+    volume += v;
     rockfallActivity[i] += remove;
   }
   return { events, volume };
@@ -1685,6 +1782,9 @@ function coast(sim, dt) {
   exposure.fill(0);
   const result = { exported: 0, collapses: 0, cliffRetreat: 0, substeps: 0, diffusivityCapped: false };
   if (sea == null) return result;
+  // The exposure sweep follows lattice directions, and cliff retreat is measured in
+  // lattice spacings, so this process needs the regular hex lattice (see mesh.js).
+  if (!grid.lattice) throw new Error('the coast process needs a hexagonal-lattice mesh (mesh.lattice); disable coast.enabled on other meshes');
 
   const H = cp.waveHeight;
   const halfTide = cp.tidalRange / 2;
@@ -1822,6 +1922,135 @@ function coast(sim, dt) {
   return result;
 }
 
+// ---- src/mesh.js ----
+// The mesh contract: what the processes are allowed to know about the grid.
+//
+// Every process is written in finite-volume form against this interface, so a
+// mesh does not have to be hexagonal, regular or flat. A mesh provides:
+//
+//   size            number of cells
+//   degree          stride of the neighbour arrays (the maximum number of neighbours)
+//   neighbors       Int32Array(degree * size); slot k of cell i is neighbors[degree*i + k],
+//                   or -1 if unused (slots may be empty anywhere, not only at the end)
+//   dist            Float64Array(degree * size): distance between the two cell centres (m)
+//   face            Float64Array(degree * size): length of the face the two cells share (m)
+//   area            Float64Array(size): cell area (m^2)
+//   x, y            Float64Array(size): cell centres in world coordinates (m)
+//   edge            Uint8Array(size): which domain sides a cell lies on
+//                   (1 west, 2 east, 4 north, 8 south; 0 for interior cells)
+//   bounds          { xmin, ymin, xmax, ymax } of the domain (m)
+//
+// Optional capabilities:
+//   cellAt(x, y)    cell containing a point, or -1 (needed for drawing and zooming)
+//   lattice         true if slot k always points along azimuth 60k degrees, with
+//                   equal spacing (the hexagonal lattice); the wave-exposure sweep needs it
+//
+// The finite-volume rule every diffusive process uses: a flux q (m^2/yr, per unit face
+// length) across the face between i and j moves volume q * face * dt, which changes
+// the heights by -q*face*dt/area[i] and +q*face*dt/area[j]. For a gradient flux
+// q = D (z_i - z_j)/dist this is the standard two-point flux approximation; on the
+// regular hex grid it reduces to the isotropic hex Laplacian.
+
+
+
+/** Throw if a mesh breaks the contract (sizes, symmetry, positivity). */
+function checkMesh(m) {
+  const fail = (msg) => { throw new Error(`invalid mesh: ${msg}`); };
+  const { size: n, degree: D } = m;
+  if (!(n > 0 && D > 0)) fail('size and degree must be positive');
+  for (const [k, len] of [['neighbors', D * n], ['dist', D * n], ['face', D * n], ['area', n], ['x', n], ['y', n], ['edge', n]]) {
+    if (!m[k] || m[k].length !== len) fail(`${k} must have length ${len}`);
+  }
+  for (let i = 0; i < n; i++) {
+    if (!(m.area[i] > 0)) fail(`cell ${i} has non-positive area`);
+    for (let k = 0; k < D; k++) {
+      const j = m.neighbors[D * i + k];
+      if (j < 0) continue;
+      if (j >= n || j === i) fail(`cell ${i} slot ${k} points at ${j}`);
+      if (!(m.dist[D * i + k] > 0 && m.face[D * i + k] > 0)) fail(`edge ${i}-${j} has non-positive dist or face`);
+      let back = -1;
+      for (let q = 0; q < D; q++) if (m.neighbors[D * j + q] === i) back = D * j + q;
+      if (back < 0) fail(`edge ${i}->${j} has no reverse edge`);
+      if (Math.abs(m.dist[back] - m.dist[D * i + k]) > 1e-9 * m.dist[back] ||
+          Math.abs(m.face[back] - m.face[D * i + k]) > 1e-9 * m.face[back]) fail(`edge ${i}-${j} is not symmetric`);
+    }
+  }
+  return true;
+}
+
+/**
+ * A mesh given directly as arrays. `GraphMesh.irregular(hex, ...)` derives a
+ * deliberately messy one from a hex grid for testing: jittered centres, missing
+ * edges (so neighbour counts vary from 2 to 6, with gaps between slots), and
+ * randomly perturbed face widths and areas. It satisfies the contract but is NOT
+ * a geometrically consistent Voronoi tessellation, so it checks that processes
+ * conserve mass and route water on any mesh, not that they converge to the PDE.
+ */
+class GraphMesh {
+  constructor({ size, degree, neighbors, dist, face, area, x, y, edge, bounds, cellAt }) {
+    Object.assign(this, { size, degree, neighbors, dist, face, area, x, y, edge, bounds });
+    if (cellAt) this.cellAt = cellAt;
+    this.lattice = false;
+    checkMesh(this);
+  }
+
+  static irregular(hex, { jitter = 0.25, drop = 0.15, perturb = 0.3, seed = 1 } = {}) {
+    const rng = new Rng(seed);
+    const n = hex.size;
+    const D = hex.degree;
+    const x = Float64Array.from(hex.x, (v) => v + jitter * hex.dx * (rng.next() - 0.5));
+    const y = Float64Array.from(hex.y, (v) => v + jitter * hex.dx * (rng.next() - 0.5));
+    const neighbors = Int32Array.from(hex.neighbors);
+    const degreeOf = (i) => { let c = 0; for (let k = 0; k < D; k++) if (neighbors[D * i + k] >= 0) c++; return c; };
+    const slot = (i, j) => { for (let k = 0; k < D; k++) if (neighbors[D * i + k] === j) return D * i + k; return -1; };
+    // drop interior edges, keeping every cell at two or more neighbours
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < D; k++) {
+        const j = neighbors[D * i + k];
+        if (j <= i || rng.next() >= drop) continue;
+        if (degreeOf(i) <= 2 || degreeOf(j) <= 2) continue;
+        neighbors[D * i + k] = -1;
+        neighbors[slot(j, i)] = -1;
+      }
+    }
+    // restore edges until every cell is connected to cell 0
+    for (;;) {
+      const seen = new Uint8Array(n);
+      const stack = [0];
+      seen[0] = 1;
+      while (stack.length) {
+        const i = stack.pop();
+        for (let k = 0; k < D; k++) { const j = neighbors[D * i + k]; if (j >= 0 && !seen[j]) { seen[j] = 1; stack.push(j); } }
+      }
+      const lost = seen.indexOf(0);
+      if (lost < 0) break;
+      // give the unreached cell back its original hex edges (slot k pairs with OPPOSITE[k])
+      for (let k = 0; k < D; k++) {
+        const j = hex.neighbors[D * lost + k];
+        if (j >= 0) { neighbors[D * lost + k] = j; neighbors[D * j + OPPOSITE[k]] = lost; }
+      }
+    }
+    const dist = new Float64Array(D * n);
+    const face = new Float64Array(D * n);
+    for (let i = 0; i < n; i++) {
+      for (let k = 0; k < D; k++) {
+        const j = neighbors[D * i + k];
+        if (j < i) continue;
+        const d = Math.hypot(x[j] - x[i], y[j] - y[i]);
+        const f = hex.edgeLength * (1 + perturb * (rng.next() - 0.5));
+        const back = slot(j, i);
+        dist[D * i + k] = dist[back] = d;
+        face[D * i + k] = face[back] = f;
+      }
+    }
+    const area = Float64Array.from(hex.area, (a) => a * (1 + perturb * (rng.next() - 0.5)));
+    return new GraphMesh({
+      size: n, degree: D, neighbors, dist, face, area, x, y,
+      edge: Uint8Array.from(hex.edge), bounds: { ...hex.bounds }, cellAt: (px, py) => hex.cellAt(px, py),
+    });
+  }
+}
+
 // ---- src/simulation.js ----
 // The simulation: state, the order of processes in a time step, and bookkeeping.
 //
@@ -1855,15 +2084,22 @@ function coast(sim, dt) {
 
 
 
+
 class Simulation {
   /**
    * @param {object|string} [params] parameter overrides (see params.js), optionally
    *   with `preset: name`; or just a preset name.
+   * @param {object} [options]
+   * @param {object} [options.mesh] a mesh satisfying the contract in mesh.js, used
+   *   instead of the hex grid described by params.grid (snapshots then cannot rebuild it)
    */
-  constructor(params = {}) {
+  constructor(params = {}, options = {}) {
     this.params = resolveParams(params);
     const g = this.params.grid;
-    this.grid = new HexGrid(g.cols, g.rows, g.dx);
+    const [ox, oy] = g.origin || [0, 0];
+    /** The mesh. Called `grid` for history; any mesh satisfying mesh.js works. */
+    this.grid = options.mesh || new HexGrid(g.cols, g.rows, g.dx, ox, oy);
+    checkMesh(this.grid);
     const n = this.grid.size;
     this.rock = new Float64Array(n);
     this.soil = new Float64Array(n);
@@ -1884,27 +2120,39 @@ class Simulation {
     this.waveExposureField = new Float64Array(n);
     /** Depth (m) of the wave-cut notch at the foot of each sea cliff. Part of the state. */
     this.notch = new Float64Array(n);
+    /** Drainage area (m^2, precipitation-weighted) entering each cell from outside the domain. */
+    this.inflowArea = new Float64Array(n);
+    /** Sediment flux (m^3/yr) entering each cell from outside the domain. */
+    this.inflowSediment = new Float64Array(n);
+    /** Prescribed elevation change rate (m/yr) of open-edge cells; 0 = fixed base level. */
+    this.boundaryRate = new Float64Array(n);
+    /** Sediment flux (m^3/yr) leaving each cell along its river, from the last step. */
+    this.qsOut = new Float64Array(n);
     this.flow = {
       filled: new Float64Array(n),
       receiver: new Int32Array(n),
+      receiverDist: new Float64Array(n),
       order: new Int32Array(n),
       area: new Float64Array(n),
       visited: new Uint8Array(n),
       flowExponent: 0,
+      inflow: this.inflowArea,
     };
     this.qs = new Float64Array(n);
     this.scratch = {
       eroded: new Float64Array(n),
       zNew: new Float64Array(n),
       qs: new Float64Array(n),
-      edgeFlux: new Float64Array(3 * n),
+      edgeFlux: new Float64Array(this.grid.degree * n),
       outTotal: new Float64Array(n),
       zStart: new Float64Array(n),
     };
     this.time = 0;
     this.stepCount = 0;
     this.rng = new Rng(this.params.seed);
-    this.budget = { uplift: 0, exported: 0 };
+    // volume budget (m^3): uplift includes prescribed boundary motion; inflow is
+    // sediment carried in by rivers from outside the domain
+    this.budget = { uplift: 0, exported: 0, inflow: 0 };
     this.last = { substeps: 0, rockfallEvents: 0, rockfallVolume: 0, avalancheVolume: 0, exported: 0, cliffCollapses: 0, coastSubsteps: 0 };
     /** Current sea level (m), or null when there is no sea. */
     this.seaLevel = seaLevelAt(this.params, 0);
@@ -1923,10 +2171,13 @@ class Simulation {
     sim.soil.set(snap.soil);
     sim.upliftCum.set(snap.upliftCum);
     if (snap.notch) sim.notch.set(snap.notch);
+    if (snap.inflowArea) sim.inflowArea.set(snap.inflowArea);
+    if (snap.inflowSediment) sim.inflowSediment.set(snap.inflowSediment);
+    if (snap.boundaryRate) sim.boundaryRate.set(snap.boundaryRate);
     sim.time = snap.time;
     sim.seaLevel = seaLevelAt(sim.params, sim.time);
     sim.stepCount = snap.stepCount;
-    sim.budget = { ...snap.budget };
+    sim.budget = { inflow: 0, ...snap.budget };
     sim._updateDerivedState();
     routeFlow(sim.grid, sim.z, sim.outlet, sim.precipWeight, sim.flow);
     sim.rng.state = snap.rngState >>> 0; // after routing, which may draw random numbers
@@ -1946,7 +2197,28 @@ class Simulation {
       soil: Array.from(this.soil),
       upliftCum: Array.from(this.upliftCum),
       notch: Array.from(this.notch),
+      inflowArea: Array.from(this.inflowArea),
+      inflowSediment: Array.from(this.inflowSediment),
+      boundaryRate: Array.from(this.boundaryRate),
     };
+  }
+
+  /**
+   * Replace the state wholesale (used when zooming in from a parent run). Arrays are
+   * copied; anything omitted is left as it is.
+   */
+  setState({ rock, soil, upliftCum, time, inflowArea, inflowSediment, boundaryRate } = {}) {
+    if (rock) this.rock.set(rock);
+    if (soil) this.soil.set(soil);
+    if (upliftCum) this.upliftCum.set(upliftCum);
+    if (inflowArea) this.inflowArea.set(inflowArea);
+    if (inflowSediment) this.inflowSediment.set(inflowSediment);
+    if (boundaryRate) this.boundaryRate.set(boundaryRate);
+    if (time != null) { this.time = time; this.seaLevel = seaLevelAt(this.params, time); }
+    this.notch.fill(0);
+    this._updateDerivedState();
+    routeFlow(this.grid, this.z, this.outlet, this.precipWeight, this.flow);
+    return this;
   }
 
   /**
@@ -1958,6 +2230,7 @@ class Simulation {
     for (const k of ['cols', 'rows', 'dx']) {
       if (next.grid[k] !== this.params.grid[k]) throw new Error('grid cannot change mid-run; create a new Simulation');
     }
+    if (JSON.stringify(next.grid.origin) !== JSON.stringify(this.params.grid.origin)) throw new Error('grid cannot change mid-run; create a new Simulation');
     validate(next);
     this.params = next;
     this.seaLevel = seaLevelAt(next, this.time);
@@ -1971,18 +2244,25 @@ class Simulation {
     const p = this.params;
     const { grid, rock, soil, z, boundaryOutlet } = this;
     const n = grid.size;
-    const ac = grid.cellArea;
+    const area = grid.area;
     this.scratch.zStart.set(z);
     this.seaLevel = seaLevelAt(p, this.time + dt / 2);
 
     // 1. uplift
     let upliftVol = 0;
     for (let i = 0; i < n; i++) {
-      if (boundaryOutlet[i]) continue;
+      if (boundaryOutlet[i]) {
+        // open edges are fixed base level, or follow a prescribed rate (a zoomed patch
+        // tracking its frozen parent); that is surface motion, not rock uplift
+        const b = this.boundaryRate[i] * dt;
+        rock[i] += b;
+        upliftVol += b * area[i];
+        continue;
+      }
       const u = this.upliftField[i] * dt;
       rock[i] += u;
       this.upliftCum[i] += u;
-      upliftVol += u * ac;
+      upliftVol += u * area[i];
     }
     this.budget.uplift += upliftVol;
     this._updateSurfaceRock();
@@ -2016,7 +2296,12 @@ class Simulation {
 
     // 5. rivers
     let exported = 0;
-    if (p.fluvial.enabled) exported += fluvial(this, dt);
+    if (p.fluvial.enabled) {
+      exported += fluvial(this, dt);
+      let inflow = 0;
+      for (let i = 0; i < n; i++) inflow += this.inflowSediment[i];
+      this.budget.inflow += inflow * dt;
+    }
 
     // 6. creep
     this.last.substeps = p.hillslope.enabled ? creep(this, dt).substeps : 0;
@@ -2051,7 +2336,7 @@ class Simulation {
     // 9. open boundaries: loose material leaves; base level stays fixed
     for (let i = 0; i < n; i++) {
       if (boundaryOutlet[i] && soil[i] > 0) {
-        exported += soil[i] * ac;
+        exported += soil[i] * area[i];
         soil[i] = 0;
       }
       z[i] = rock[i] + soil[i];
@@ -2082,8 +2367,8 @@ class Simulation {
   /** Total volume of rock + soil above z = 0 datum (m^3), for budget checks. */
   volume() {
     let v = 0;
-    for (let i = 0; i < this.grid.size; i++) v += this.rock[i] + this.soil[i];
-    return v * this.grid.cellArea;
+    for (let i = 0; i < this.grid.size; i++) v += (this.rock[i] + this.soil[i]) * this.grid.area[i];
+    return v;
   }
 
   /** Summary numbers for logging. */
@@ -2136,14 +2421,16 @@ class Simulation {
     this.flow.flowExponent = p.fluvial.routing === 'mfd' ? p.fluvial.flowExponent : 0;
     this.flow.randomExponent = p.fluvial.randomReceivers ? p.fluvial.randomExponent : 0;
     this.flow.rng = this.rng;
-    this.lith = new Lithology(p, g);
-    const W = g.width, H = g.height;
+    this.frame = referenceFrame(p, g);
+    this.lith = new Lithology(p, g, this.frame);
+    const F = this.frame;
+    const W = F.width, H = F.height;
     const u = p.uplift;
     const ang = ((u.angle || 0) * Math.PI) / 180;
     const ux = Math.cos(ang), uy = -Math.sin(ang);
     for (let i = 0; i < g.size; i++) {
-      const fx = g.x[i] / W - 0.5;
-      const fy = (g.y[i] / W) - 0.5 * (H / W); // width units, centred
+      const fx = (g.x[i] - F.x) / W - 0.5;
+      const fy = (g.y[i] - F.y) / W - 0.5 * (H / W); // width units, centred
       let f = 1;
       switch (u.pattern) {
         case 'uniform': f = 1; break;
@@ -2164,13 +2451,14 @@ class Simulation {
   _initialTerrain() {
     const p = this.params.initial;
     const g = this.grid;
-    const W = g.width, H = g.height;
+    const F = this.frame;
+    const W = F.width, H = F.height;
     const ang = ((p.angle || 0) * Math.PI) / 180;
     const ux = Math.cos(ang), uy = -Math.sin(ang);
     const noise = p.noise || { amplitude: 0 };
     for (let i = 0; i < g.size; i++) {
-      const fx = g.x[i] / W;
-      const fy = g.y[i] / H;
+      const fx = (g.x[i] - F.x) / W;
+      const fy = (g.y[i] - F.y) / H;
       let shape = 0;
       switch (p.type) {
         case 'flat': shape = 0; break;
@@ -2234,12 +2522,276 @@ class Simulation {
   }
 }
 
+/**
+ * The rectangle that fractional positions in the parameters refer to: plateau margins,
+ * plug locations, fault lines, dip centres, rainfall gradients. By default the domain
+ * itself; a zoomed-in patch inherits its parent's, so the geology lines up.
+ */
+function referenceFrame(params, mesh) {
+  if (params.frame) return { ...params.frame };
+  const b = mesh.bounds;
+  return {
+    x: mesh.originX ?? b.xmin,
+    y: mesh.originY ?? b.ymin,
+    width: mesh.width ?? b.xmax - b.xmin,
+    height: mesh.height ?? b.ymax - b.ymin,
+  };
+}
+
 function clamp01(v) {
   return v < 0 ? 0 : v > 1 ? 1 : v;
 }
 
 function smoothstep(t) {
   return t * t * (3 - 2 * t);
+}
+
+// ---- src/nest.js ----
+// Zooming in: refine a patch of a running simulation at finer spacing.
+//
+// This is coarse-graining in reverse ("backmapping", as in polymer simulation):
+// the parent is frozen, a patch of it is reconstructed on a finer grid, detail the
+// parent could not resolve is added, and the patch then evolves under its own
+// physics with the parent supplying everything that crosses the patch edges.
+//
+// What the child inherits from the frozen parent:
+//   - topography, soil and cumulative uplift, interpolated linearly and corrected
+//     so the child's average over each parent cell equals the parent value
+//     ("mean-preserving"), plus zero-mean roughness scaled to the local parent relief;
+//   - the parameters, the seed and the reference frame, so strata, plugs, fault lines,
+//     weak zones and rainfall line up exactly with the parent's;
+//   - the time and the sea level;
+//   - boundary conditions: every edge cell of the patch is an outlet whose elevation
+//     follows the parent's last rate of change (dz/dt), and rivers that flow into the
+//     patch in the parent enter the child with their drainage area and sediment flux.
+//
+// What it does NOT do: anything the child does never flows back to the parent
+// (one-way coupling), and the parent's rates are frozen at its last step.
+
+
+
+
+/**
+ * Linear interpolation of a per-cell field of a hex-lattice simulation at (x, y):
+ * barycentric on the triangle of cell centres that contains the point.
+ */
+function interpolator(mesh, field) {
+  if (!mesh.lattice) throw new Error('interpolation needs a hexagonal-lattice parent mesh');
+  const D = mesh.degree;
+  const nb = mesh.neighbors;
+  return (x, y) => {
+    const p = mesh.cellAt(x, y);
+    if (p < 0) return NaN;
+    const dx = x - mesh.x[p];
+    const dy = y - mesh.y[p];
+    if (dx === 0 && dy === 0) return field[p];
+    // slot k points along azimuth 60k degrees (y grows southwards, so north is -y)
+    let az = (Math.atan2(-dy, dx) * 180) / Math.PI;
+    if (az < 0) az += 360;
+    const k = Math.floor(az / 60) % 6;
+    const a = nb[D * p + k];
+    const b = nb[D * p + ((k + 1) % 6)];
+    if (a < 0 || b < 0) return field[p]; // at the parent's edge: nearest value
+    // barycentric coordinates of (x, y) in triangle (p, a, b)
+    const x1 = mesh.x[a] - mesh.x[p], y1 = mesh.y[a] - mesh.y[p];
+    const x2 = mesh.x[b] - mesh.x[p], y2 = mesh.y[b] - mesh.y[p];
+    const det = x1 * y2 - x2 * y1;
+    const wa = (dx * y2 - x2 * dy) / det;
+    const wb = (x1 * dy - dx * y1) / det;
+    return (1 - wa - wb) * field[p] + wa * field[a] + wb * field[b];
+  };
+}
+
+/**
+ * Create a finer simulation of a patch of `parent`.
+ * @param {Simulation} parent
+ * @param {object} o
+ * @param {[number, number]} o.center world position of the patch centre (m)
+ * @param {number} [o.factor] refinement: child dx = parent dx / factor
+ * @param {number} [o.cols] [o.rows] child grid size in cells
+ * @param {number} [o.dt] child time step (default parent dt / factor)
+ * @param {number} [o.roughness] amplitude of added detail, as a fraction of the local
+ *   parent relief (max - min over a parent cell and its neighbours)
+ * @param {number} [o.correctionIterations] passes of the mean-preserving correction
+ * @returns {Simulation} the child, with `child.zoom` describing where it came from
+ */
+function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughness = 0.3, correctionIterations = 16 } = {}) {
+  const pg = parent.grid;
+  if (!pg.lattice) throw new Error('zooming needs a hexagonal-lattice parent');
+  const dx = pg.dx / factor;
+  const rowSpacing = (Math.sqrt(3) / 2) * dx;
+  // centre the child grid on `center`, then keep it inside the parent's domain
+  const halfW = (dx * (cols - 1 + 0.5)) / 2;
+  const halfH = (rowSpacing * (rows - 1)) / 2;
+  const b = pg.bounds;
+  const cx = Math.min(Math.max(center[0], b.xmin + halfW + pg.dx), b.xmax - halfW - pg.dx);
+  const cy = Math.min(Math.max(center[1], b.ymin + halfH + pg.dx), b.ymax - halfH - pg.dx);
+  if (!(cx - halfW > b.xmin && cx + halfW < b.xmax && cy - halfH > b.ymin && cy + halfH < b.ymax)) {
+    throw new Error('the requested patch does not fit inside the parent domain; use fewer cells or a larger factor');
+  }
+  const origin = [cx - halfW, cy - halfH];
+
+  const pp = parent.params;
+  const params = deepMerge(pp, {
+    grid: { cols, rows, dx, origin },
+    frame: referenceFrame(pp, pg),
+    time: { dt: dt ?? pp.time.dt / factor },
+    boundary: { open: ['north', 'south', 'east', 'west'], seaLevel: pp.boundary.seaLevel },
+    initial: { type: 'flat', base: 0, height: 0, noise: { amplitude: 0 }, soil: 0 },
+    zoom: { level: (pp.zoom?.level ?? 0) + 1, factor, center: [cx, cy], parentDx: pg.dx },
+  });
+  delete params.preset; // the parameters are now fully explicit
+  const child = new Simulation(params);
+  const cg = child.grid;
+  const n = cg.size;
+
+  // --- topography: linear interpolation, roughness, mean-preserving correction ---
+  const pz = parent.z;
+  const zAt = interpolator(pg, pz);
+  const soilAt = interpolator(pg, parent.soil);
+  const upAt = interpolator(pg, parent.upliftCum);
+  const rateAt = interpolator(pg, parent.dzdt);
+  const relief = new Float64Array(pg.size);
+  for (let p = 0; p < pg.size; p++) {
+    let lo = pz[p], hi = pz[p];
+    for (let k = 0; k < pg.degree; k++) {
+      const q = pg.neighbors[pg.degree * p + k];
+      if (q >= 0) { lo = Math.min(lo, pz[q]); hi = Math.max(hi, pz[q]); }
+    }
+    relief[p] = hi - lo;
+  }
+  const reliefAt = interpolator(pg, relief);
+  const parentOf = new Int32Array(n);
+  const z = new Float64Array(n);
+  const soil = new Float64Array(n);
+  const upliftCum = new Float64Array(n);
+  const boundaryRate = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const x = cg.x[i], y = cg.y[i];
+    parentOf[i] = pg.cellAt(x, y);
+    const detail = fbm(x, y, { wavelength: pg.dx, octaves: 4, seed: (pp.seed | 0) + 4049 });
+    z[i] = zAt(x, y) + roughness * 0.5 * reliefAt(x, y) * detail;
+    soil[i] = Math.max(0, soilAt(x, y));
+    upliftCum[i] = upAt(x, y);
+    if (child.boundaryOutlet[i]) boundaryRate[i] = rateAt(x, y);
+  }
+  // Correct so each parent cell's child-average equals the parent value: interpolate the
+  // per-parent-cell misfit and add it, a few times (a fixed-point iteration).
+  const sum = new Float64Array(pg.size);
+  const cnt = new Float64Array(pg.size);
+  const misfit = new Float64Array(pg.size);
+  const misfitAt = interpolator(pg, misfit);
+  let residual = 0;
+  for (let it = 0; it <= correctionIterations; it++) {
+    sum.fill(0); cnt.fill(0);
+    for (let i = 0; i < n; i++) { sum[parentOf[i]] += z[i]; cnt[parentOf[i]]++; }
+    residual = 0;
+    for (let p = 0; p < pg.size; p++) {
+      misfit[p] = cnt[p] ? pz[p] - sum[p] / cnt[p] : 0;
+      // judge convergence on parent cells the patch covers completely
+      if (cnt[p] >= 0.9 * factor * factor) residual = Math.max(residual, Math.abs(misfit[p]));
+    }
+    if (it === correctionIterations) break;
+    for (let i = 0; i < n; i++) z[i] += misfitAt(cg.x[i], cg.y[i]);
+  }
+
+  // --- rivers entering the patch from the parent ---
+  const inflowArea = new Float64Array(n);
+  const inflowSediment = new Float64Array(n);
+  const inside = (x, y) => { const c = cg.cellAt(x, y); return c >= 0 && !child.boundaryOutlet[c] ? c : -1; };
+  const pf = parent.flow;
+  const pD = pg.degree;
+  const mfd = pf.flowExponent > 0;
+  let enteringArea = 0;
+  for (let p = 0; p < pg.size; p++) {
+    if (pf.receiver[p] < 0 || inside(pg.x[p], pg.y[p]) >= 0) continue;
+    // sediment follows the single receiver
+    const r = pf.receiver[p];
+    const tr = inside(pg.x[r], pg.y[r]);
+    if (tr >= 0) inflowSediment[tr] += parent.qsOut[p];
+    // water: all to the receiver, or shared by slope^p as in the parent's MFD routing
+    if (!mfd) {
+      if (tr >= 0) { inflowArea[tr] += pf.area[p]; enteringArea += pf.area[p]; }
+      continue;
+    }
+    let wsum = 0;
+    const w = [];
+    for (let k = 0; k < pD; k++) {
+      const e = pD * p + k;
+      const q = pg.neighbors[e];
+      const d = q >= 0 ? pf.filled[p] - pf.filled[q] : 0;
+      const wk = d > 0 ? Math.pow(d / pg.dist[e], pf.flowExponent) : 0;
+      w.push([q, wk]);
+      wsum += wk;
+    }
+    for (const [q, wk] of w) {
+      if (wk <= 0) continue;
+      const t = inside(pg.x[q], pg.y[q]);
+      if (t >= 0) { const a = (pf.area[p] * wk) / wsum; inflowArea[t] += a; enteringArea += a; }
+    }
+  }
+
+  // open edges carry no soil; their elevation is the surface itself
+  const rock = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    if (child.boundaryOutlet[i]) soil[i] = 0;
+    rock[i] = z[i] - soil[i];
+  }
+  child.setState({ rock, soil, upliftCum, time: parent.time, inflowArea, inflowSediment, boundaryRate });
+  child.stepCount = 0;
+  child.zoom = {
+    level: params.zoom.level, factor, center: [cx, cy], parentDx: pg.dx,
+    bounds: { ...cg.bounds }, meanResidual: residual, enteringArea, parentTime: parent.time,
+  };
+  return child;
+}
+
+/**
+ * Compare a zoomed child with its frozen parent over the parent cells the patch covers
+ * completely: mean elevation, mean rate of change, and the discharge of the largest
+ * river leaving the patch. These are the cross-scale consistency checks. The parent is
+ * frozen, so its "expected" elevation is extrapolated at its last rate of change over
+ * the time the child has run.
+ */
+function compareWithParent(child, parent) {
+  const pg = parent.grid;
+  const cg = child.grid;
+  const factor = child.zoom.factor;
+  const sumZ = new Float64Array(pg.size);
+  const sumR = new Float64Array(pg.size);
+  const cnt = new Float64Array(pg.size);
+  for (let i = 0; i < cg.size; i++) {
+    if (child.boundaryOutlet[i]) continue;
+    const p = pg.cellAt(cg.x[i], cg.y[i]);
+    sumZ[p] += child.z[i]; sumR[p] += child.dzdt[i]; cnt[p]++;
+  }
+  let nP = 0, parentZ = 0, childZ = 0, parentRate = 0, childRate = 0;
+  for (let p = 0; p < pg.size; p++) {
+    if (cnt[p] < 0.9 * factor * factor) continue;
+    nP++;
+    parentZ += parent.z[p]; childZ += sumZ[p] / cnt[p];
+    parentRate += parent.dzdt[p]; childRate += sumR[p] / cnt[p];
+  }
+  // biggest river leaving: child = largest drainage area arriving at an edge cell;
+  // parent = largest area at a covered cell whose receiver lies outside the patch
+  let childExit = 0;
+  for (let i = 0; i < cg.size; i++) if (child.boundaryOutlet[i]) childExit = Math.max(childExit, child.flow.area[i]);
+  let parentExit = 0;
+  const b = cg.bounds;
+  const within = (x, y) => x > b.xmin && x < b.xmax && y > b.ymin && y < b.ymax;
+  for (let p = 0; p < pg.size; p++) {
+    const r = parent.flow.receiver[p];
+    if (r < 0 || !within(pg.x[p], pg.y[p]) || within(pg.x[r], pg.y[r])) continue;
+    parentExit = Math.max(parentExit, parent.flow.area[p]);
+  }
+  const elapsed = child.time - child.zoom.parentTime;
+  return {
+    parentCells: nP,
+    elapsed,
+    meanElevation: { parent: parentZ / nP, expected: (parentZ + parentRate * elapsed) / nP, child: childZ / nP },
+    meanRate: { parent: parentRate / nP, child: childRate / nP },
+    largestExitArea: { parent: parentExit, child: childExit },
+  };
 }
 
 // ---- src/render.js ----
@@ -2431,9 +2983,11 @@ function cellColors(sim, view = 'terrain', out) {
  * The grid is fitted inside the image preserving aspect ratio.
  */
 function pixelMap(grid, width, height) {
-  const x0 = -grid.dx / 2;
-  const y0 = -grid.edgeLength;
-  const scale = Math.min(width / grid.width, height / grid.height); // pixels per metre
+  if (!grid.cellAt) throw new Error('drawing a map needs a mesh with cellAt()');
+  const b = grid.bounds;
+  const x0 = b.xmin;
+  const y0 = b.ymin;
+  const scale = Math.min(width / (b.xmax - b.xmin), height / (b.ymax - b.ymin)); // pixels per metre
   const map = new Int32Array(width * height);
   for (let py = 0; py < height; py++) {
     for (let px = 0; px < width; px++) {
@@ -2539,6 +3093,11 @@ let running = false;
 let pm;
 let mapImage;
 let sectionRow = null;
+// Zoom: the frozen ancestors of the current simulation, innermost last, each with the
+// options that made its child (so Reset can re-make the child from scratch).
+let stack = [];
+let zoomPending = false;
+let lastPatch = null; // { parent, bounds } of the most recently left child, drawn on its parent
 const mapCanvas = $('map');
 const mapCtx = mapCanvas.getContext('2d');
 const secCanvas = $('section');
@@ -2570,6 +3129,7 @@ function buildPresetMenu() {
   sel.appendChild(custom);
   sel.addEventListener('change', () => {
     if (!sel.value) return;
+    stack = []; lastPatch = null;
     const params = resolveParams({ preset: sel.value });
     fillGridInputs(params);
     restart(params);
@@ -2668,6 +3228,26 @@ function syncControls() {
   $('preset-desc').textContent = sim.params.preset ? PRESETS[sim.params.preset]?.description ?? '' : 'Custom parameters.';
   refreshJson();
   updateExtent();
+  syncZoom();
+}
+
+function syncZoom() {
+  const levels = [...stack.map((f) => f.sim), sim];
+  $('zoom-path').textContent = levels.map((s, k) => `level ${k}: dx ${+s.grid.dx.toPrecision(3)} m`).join(' › ') +
+    (stack.length ? '' : '. Zoom in to refine a patch; the level above freezes and feeds its edges and rivers.');
+  $('zoom-out').disabled = !stack.length;
+  for (const id of ['cols', 'rows', 'dx', 'seed', 'preset']) $(id).disabled = stack.length > 0;
+  $('zoom-in').textContent = zoomPending ? 'Click the map…' : 'Zoom in…';
+}
+
+function setSim(next) {
+  sim = next;
+  $('hover').innerHTML = '&nbsp;';
+  fillGridInputs(sim.params);
+  sectionRow = sim.grid.rows >> 1;
+  resize();
+  syncControls();
+  draw();
 }
 
 function fillGridInputs(params) {
@@ -2747,6 +3327,12 @@ function draw() {
   mapCtx.lineTo(mapCanvas.width, y + 0.5);
   mapCtx.stroke();
   mapCtx.setLineDash([]);
+  if (lastPatch && lastPatch.parent === sim) {
+    const b = lastPatch.bounds;
+    mapCtx.strokeStyle = 'rgba(255,255,255,0.9)';
+    mapCtx.lineWidth = 2;
+    mapCtx.strokeRect((b.xmin - pm.x0) * pm.scale, (b.ymin - pm.y0) * pm.scale, (b.xmax - b.xmin) * pm.scale, (b.ymax - b.ymin) * pm.scale);
+  }
 
   const img = secCtx.createImageData(secCanvas.width, secCanvas.height);
   const info = crossSection(sim, sectionRow, secCanvas.width, secCanvas.height, img.data);
@@ -2759,6 +3345,15 @@ function draw() {
     `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}` +
     (s.seaLevel != null ? `  sea level ${s.seaLevel.toFixed(1)} m  cliff collapses ${s.cliffCollapses}` : '');
   drawLegend(view);
+  if (stack.length) {
+    const c = compareWithParent(sim, stack[stack.length - 1].sim);
+    $('zoom-compare').textContent =
+      `Against the frozen level above, over ${c.parentCells} of its cells: mean elevation ${c.meanElevation.child.toFixed(1)} m ` +
+      `(level above, extrapolated at its last rate: ${c.meanElevation.expected.toFixed(1)} m); largest river leaving ` +
+      `${(c.largestExitArea.child / 1e6).toFixed(3)} km² (level above: ${(c.largestExitArea.parent / 1e6).toFixed(3)} km²).`;
+  } else {
+    $('zoom-compare').textContent = '';
+  }
 }
 
 function drawLegend(view) {
@@ -2807,8 +3402,32 @@ mapCanvas.addEventListener('mousemove', (ev) => {
 mapCanvas.addEventListener('click', (ev) => {
   const i = cellAtEvent(ev);
   if (i < 0) return;
+  if (zoomPending) {
+    zoomPending = false;
+    const opts = { center: [sim.grid.x[i], sim.grid.y[i]], factor: +$('zoom-factor').value, cols: +$('zoom-cells').value, rows: +$('zoom-cells').value };
+    try {
+      const child = zoomIn(sim, opts);
+      stack.push({ sim, opts });
+      setSim(child);
+    } catch (e) {
+      $('zoom-compare').textContent = e.message;
+      syncZoom();
+    }
+    return;
+  }
   sectionRow = sim.grid.row(i);
   draw();
+});
+
+$('zoom-in').addEventListener('click', () => {
+  zoomPending = !zoomPending;
+  syncZoom();
+});
+$('zoom-out').addEventListener('click', () => {
+  if (!stack.length) return;
+  const { sim: parent } = stack.pop();
+  lastPatch = { parent, bounds: { ...sim.grid.bounds } };
+  setSim(parent);
 });
 
 $('run').addEventListener('click', () => {
@@ -2817,6 +3436,11 @@ $('run').addEventListener('click', () => {
 });
 $('step').addEventListener('click', () => { sim.step(); draw(); });
 $('reset').addEventListener('click', () => {
+  if (stack.length) { // re-make this patch from its frozen parent
+    const top = stack[stack.length - 1];
+    setSim(zoomIn(top.sim, top.opts));
+    return;
+  }
   const base = { ...sim.params };
   restart(resolveParams({ ...base, ...gridOverrides(), grid: gridOverrides().grid, time: { ...base.time, dt: +$('dt').value } }));
 });
@@ -2830,6 +3454,7 @@ $('json-refresh').addEventListener('click', refreshJson);
 $('json-apply').addEventListener('click', () => {
   try {
     const p = resolveParams(JSON.parse($('json').value));
+    stack = []; lastPatch = null;
     fillGridInputs(p);
     restart(p);
   } catch (e) {
@@ -2871,6 +3496,7 @@ $('load').addEventListener('change', async (ev) => {
   if (!file) return;
   try {
     const data = JSON.parse(await file.text());
+    stack = []; lastPatch = null; // a loaded run stands alone (a saved patch keeps its edges and inflows)
     if (data.format?.startsWith('edgy-erosion-snapshot')) {
       sim = Simulation.fromSnapshot(data);
       fillGridInputs(sim.params);

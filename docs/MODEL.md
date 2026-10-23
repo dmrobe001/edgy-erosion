@@ -24,6 +24,24 @@ triangular lattice and every cell has six equidistant neighbours.
 | row spacing | (√3/2) dx |
 | domain extent | ≈ dx·(cols + ½) by (√3/2)·dx·rows |
 
+**The processes do not assume hexagons.** They are written against a mesh contract
+(`src/mesh.js`):
+- per cell: area and centre position;
+- per neighbour slot: neighbour index, centre-to-centre distance, and the length of the
+  shared face. The number of neighbours may vary, and slots may be empty.
+
+Diffusive fluxes use the finite-volume rule. A flux q (per unit face length) across the
+face between i and j moves volume `q·face·dt`, which changes the two heights by
+`∓q·face·dt/area`. On the regular hex grid this is exactly the isotropic hex Laplacian
+used before. Two parts still need the regular hex lattice, and they say so if given
+another mesh: the wave-exposure sweep, and zooming in.
+
+`GraphMesh.irregular()` builds a deliberately messy test mesh: jittered centres, 2–6
+neighbours, gaps between slots, and perturbed faces and areas. It checks conservation
+and routing on arbitrary meshes. It is not a true Voronoi tessellation, so it does not
+check convergence to the continuum equations. The grid can sit anywhere in world
+coordinates (`grid.origin`).
+
 Per-cell state (`src/simulation.js`):
 
 ```
@@ -65,9 +83,10 @@ Operator splitting, in this order (`Simulation.step`):
    - Drainage area A is accumulated upstream-first, weighted by precipitation/(1 m/yr). With `routing: 'mfd'` area is shared among all lower neighbours ∝ drop^p (Freeman 1991, Computers & Geosciences 17). [standard]
    - The order in which cells leave the priority queue is a valid "stack" (every cell comes after its receiver), so no separate topological sort is needed.
 5. **Rivers** (`src/processes/fluvial.js`).
-   - Incision follows the stream power law `E = K·A^m·S^n`, with `K = K_soil·exp(−α·veg)·(1−c) + K_rock·w(x,y)·c` and `c = exp(−soil/H*)`. Here `w` is the rock-strength variation field. The soil term removes only soil and the rock term removes only rock, as in SPACE (Shobe, Tucker & Barnhart 2017, Geoscientific Model Development 10). [standard]
-   - The time integration is implicit, downstream-first (Braun & Willett 2013, Geomorphology 180–181), so it is stable for any dt. For n ≠ 1, Newton's method solves each cell's implicit equation. [standard]
-   - Simplification: we solve for the total lowering with the blended K and then split it between soil and rock in proportion. If the soil runs out within the step, the soil share is truncated. [adapted]
+   - Incision follows the stream power law `E = K·A^m·S^n`, where S is the slope to the receiver over the actual centre distance. Rock has `K_rock·w(x,y)`, where `w` is the rock-strength variation field. Loose sediment has `K_soil·exp(−α·veg)`. [standard]
+   - **Strip, then cut.** Within a step, the river first entrains any sediment on its bed at the soil rate, and cuts rock only for the rest of the step. The stripping time is taken in proportion to the depth stripped. [adapted]
+   - Why not the SPACE cover factor `exp(−soil/H*)` (Shobe, Tucker & Barnhart 2017, Geoscientific Model Development 10), which an earlier version used? Each step leaves a sediment layer whose thickness scales with dt, from weathering and deposition. A cover factor read from that layer made incision depend on dt without converging: quartering dt changed 150 kyr of the alpine preset by about 40 m. With strip-then-cut, the time spent stripping is a fraction of the step that does not depend on dt, and results converge (see Checks).
+   - Each phase is implicit, downstream-first (Braun & Willett 2013, Geomorphology 180–181), so it is stable for any dt. For n ≠ 1, Newton's method solves each cell's implicit equation. [standard]
    - Sediment is routed upstream-first as a volume flux Qs. Each cell deposits at rate `D = G·Qs/A` (the ξ–q model: Davy & Lague 2009, JGR 114; dimensionless form from Yuan et al. 2019, JGR Earth Surface 124). We solve this per cell in closed form, explicitly rather than with Yuan's implicit iteration. `G = 0` is pure detachment-limited incision. [adapted]
    - Lakes trap sediment up to their spill level. Lake beds do not incise.
 6. **Creep** (`src/processes/hillslope.js`). Soil flux per unit width is
@@ -152,6 +171,63 @@ Each rock has `erodibility` (stream power K), `cohesion` and `frictionAngle` (Cu
 order-of-magnitude values for landscape-scale rock masses. Rock-mass cohesion is far below
 intact-sample strength.
 
+## Zooming in (nested patches)
+
+`zoomIn(parent, { center, factor, cols, rows })` in `src/nest.js` builds a finer
+simulation of a patch of a running one. Its spacing is the parent's dx/factor. This is
+backmapping, as in coarse-grained polymer simulation: the parent is frozen, the patch is
+rebuilt at fine resolution with detail added, and the patch then runs its own physics.
+
+The child inherits from the frozen parent:
+- **Topography, soil and cumulative uplift**, by linear (barycentric) interpolation on
+  the parent's triangle of centres. Elevation is then made mean-preserving: the child's
+  average over every parent cell equals the parent's value, by repeatedly adding the
+  interpolated misfit (16 passes, residual of millimetres). On top of that goes
+  zero-mean roughness: noise at the parent's spacing, scaled to the local parent relief.
+  [adapted]
+- **Parameters, seed and reference frame.** Strata planes, plugs, fault lines, weak
+  zones and rainfall therefore line up exactly with the parent's. Fractional positions
+  in the parameters refer to the `frame` rectangle, which is the parent's domain.
+- **Time and sea level.**
+- **Edges.** Every edge cell is an outlet whose elevation follows the parent's last rate
+  of change (`boundaryRate`).
+- **Rivers entering the patch.** Parent cells outside the patch that drain into it pass
+  their drainage area (`inflowArea`, shared as in the parent's multiple-flow routing) and
+  sediment flux (`inflowSediment`) to the child cell where they enter.
+
+Coupling is one-way: nothing the child does changes the parent. `compareWithParent`
+reports three things over the parent cells the patch covers:
+- the mean elevation, against the parent extrapolated at its last rate;
+- the mean rate of change;
+- the drainage area of the largest river leaving the patch.
+
+**What the checks found.** Alpine preset, patch on the main river, 150 kyr from the same
+starting state (patch-mean elevation 113.3 m):
+
+| run | patch-mean elevation |
+|---|---|
+| parent, extrapolated at its last rate | 110.6 m |
+| parent run on, dt 2000 yr (its own step) | 111.1 m |
+| parent run on, dt 500 yr | 98.1 m |
+| child, factor 1 (same resolution), dt 500 yr | 99.8 m |
+| child, factor 4 (dx 7.5 m), dt 500 yr | 125.0 m |
+
+How to read it:
+- **The frozen-rate assumption holds** over this span (110.6 against 111.1 m).
+- **The handoff is sound.** The same-resolution child matches the parent run at the same
+  time step to within 1.7 m.
+- **A time-step effect remains** (111.1 against 98.1 m). It is much smaller than before the
+  river fix, and it shrinks with dt, but it is not negligible.
+- **Refining changes the answer.** The factor-4 patch stands about 27 m higher. Finer
+  cells resolve smaller drainage areas, which need steeper slopes to keep pace with
+  uplift. This is the known grid-resolution dependence of stream-power models, not an
+  error in the handoff.
+- **The child reorganises its own drainage.** Its largest exiting river can lose
+  discharge as divides migrate: in `examples/zoom.js` it went from 1.07 to 0.84 km² over
+  150 kyr, against 1.13 km² in the parent.
+
+Building the factor-1 control is what exposed the time-step defect described under Rivers.
+
 ## Checks that are run (`npm test`)
 
 | claim | test |
@@ -167,6 +243,10 @@ intact-sample strength.
 | a widening platform slows retreat; a beach shields a cliff; a lagoon is less exposed than the open coast | `coast.test.js` |
 | marine terraces: with only uplift and waves acting, shoreline angles sit within 6 m of (highstand − tide/2 + U·age), for the three youngest terraces. A 10% error in uplift rate or sea-level period fails the test | `coast.test.js` |
 | same parameters give bit-identical output; snapshots resume exactly | `simulation.test.js` |
+| results converge as dt shrinks: changes over the same span with dt, dt/2, dt/4, dt/8 differ by successively smaller amounts | `simulation.test.js` |
+| the hex grid and an irregular mesh (2–6 neighbours) satisfy the mesh contract; all processes run on the irregular mesh with water draining everywhere and the volume budget closed; creep conserves volume with unequal cell areas | `mesh.test.js` |
+| zoom: interpolation is exact for linear fields; the child preserves parent cell means to < 5 cm; strata, plugs and weak zones line up across scales; the largest river leaves the patch with the parent's discharge to within 10% (without inflows it carries about half); edges follow the parent's rate exactly | `nest.test.js` |
+| zoom: a same-resolution patch matches the parent run on at the same dt to within 1% of relief, and its volume budget (uplift and edge motion + inflow − export) closes | `nest.test.js` |
 
 These are all checks of internal consistency and numerics. **None of them shows that the
 landscapes are geologically realistic.** That is a matter of judgement and of calibrating
@@ -184,9 +264,16 @@ against real topography, which has not been done.
   directions and domes erode into hexagonal stars. Random receivers remove most of this,
   but channels on uniform planar slopes still run parallel. Pinned base-level edges with
   fast uplift also produce boundary escarpments.
-- **Time step.** Operator splitting is first-order. Rockfall is stochastic per step, so
-  when dt is much larger than the failure timescale, every unstable face fails every step.
-  Results converge as dt shrinks, but they are not dt-independent.
+- **Time step.** Operator splitting is first-order, and results converge as dt shrinks,
+  but they are not dt-independent. On the alpine preset, the mean elevation change over
+  150 kyr was −0.9, −6.5, −11.1 and −14.4 m at dt = 2000, 1000, 500 and 250 yr. Coarse
+  steps therefore bias the result by several metres per 100 kyr in fast-eroding
+  landscapes. Rockfall is stochastic per step: when dt is much larger than the failure
+  timescale, every unstable face fails once per step.
+- **Zoomed patches** are one-way coupled and their parent is frozen at its last rates.
+  Refining a patch changes its relief and erosion rate (resolution dependence), so a
+  refined patch drifts from what its parent predicts: about +27 m over 150 kyr in the
+  alpine example above.
 - **Not modelled:** explicit water depth or flood hydraulics; groundwater; chemical
   dissolution (karst); glaciers; wind; isostasy; lateral channel migration and meanders;
   deep-seated landslides; sediment grain size; porosity (rock and soil volumes are
