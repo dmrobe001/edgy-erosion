@@ -107,6 +107,17 @@
       <div class="toolbar"><span>Cross-section <span class="note" id="section-hint">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
       <canvas id="section"></canvas>
       <div id="legend"></div>
+      <div id="detail-wrap">
+        <div class="toolbar">
+          <span>Walking-scale detail <span class="note">(rivers as curves that meander, beaches, floodplains, trees; drag to pan, click the map above to jump)</span></span>
+          <span class="buttons" style="margin:0">
+            <label>m per pixel <select id="detail-pixel"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select></label>
+            <button id="detail-build">Build detail</button>
+          </span>
+        </div>
+        <canvas id="detail" hidden></canvas>
+        <div id="detail-info" class="mono note"></div>
+      </div>
     </section>
   </main>
   <script type="module" src="web/app.js"></script>

@@ -26,7 +26,7 @@ const MODULES = [
   'src/rng.js', 'src/hexgrid.js', 'src/params.js', 'src/lithology.js', 'src/flow.js',
   'src/processes/fluvial.js', 'src/processes/hillslope.js', 'src/processes/rockfall.js', 'src/processes/coast.js',
   'src/processes/earthquakes.js', 'src/mesh.js', 'src/sphere.js', 'src/simulation.js', 'src/planet.js', 'src/nest.js',
-  'src/render.js', 'web/app.js',
+  'src/meander.js', 'src/detail.js', 'src/render.js', 'web/app.js',
 ];
 
 // Every relative import must point at a bundled module, or the page would break at runtime.

@@ -437,6 +437,86 @@ planet over 2 Myr:
   +1679 m.
 - The landscape patch inside it stayed within 2–4% of its own parent's mean.
 
+## Walking-scale detail
+
+`new Detail(sim)` (`src/detail.js`, with `src/meander.js`) turns a landscape
+simulation into a map at walking scale. It renders any window at any pixel size; the
+example uses 0.5–4 m.
+
+**Why a separate layer.** Below a few tens of metres the grid simulation is the wrong
+tool. Every river is one cell wide and follows the lattice, and beaches, bars and levees
+are narrower than a cell. So the simulation stays the large-scale truth (relief,
+drainage, soils, vegetation, rock, sea level, wave exposure), and the detail layer adds
+what it can't resolve. Everything here is [heuristic]: procedural detail conditioned on
+the simulation, chosen to look plausible, except the meander model, which is [standard].
+
+What the layer does:
+- **Base surface.** The coarse fields are resampled on a regular grid and read back with
+  Catmull–Rom bicubic interpolation, which removes the hexagons.
+  - **Warp.** They are read through a gentle domain warp (1.5 coarse spacings,
+    wavelength 12 spacings), so straight, lattice-parallel valleys bend. Rivers get the
+    inverse warp and stay in their valleys.
+  - **Micro-relief** is fractal noise scaled to the local relief, flattened near sea
+    level so estuaries and tidal flats stay smooth.
+- **Rivers as curves.**
+  - **Tracing.** Channels are traced from the simulation's single-receiver drainage tree
+    as polylines from each channel head, along the main stem, to a junction or the sea.
+    Channels that reach the sea continue down a flooded inlet to open water.
+  - **Width and depth** come from bankfull discharge (Leopold & Maddock 1953):
+    W = 4 Q^0.5, D = 0.4 Q^0.35, with Q = bankfullFactor × runoff × precipitation-weighted
+    area. Width never shrinks and the water surface never rises downstream.
+  - **Smoothing.** The coarse zigzag is removed by Chaikin corner-cutting, and smaller
+    streams get a little sideways noise.
+- **Meandering.** Rivers at least 6 m wide on gentle reaches migrate by the
+  Howard & Knutson (1984) model (`migrate` in `src/meander.js`).
+  - **The rule.** Each bank erodes at a rate set by local curvature and, more strongly,
+    by curvature upstream (the flow's momentum carries the fastest water to the outer bank
+    downstream of a bend's apex): R1 = Ω C W + Γ ∫ C(s − ξ) W G(ξ) dξ / ∫ G, with
+    G = exp(−2 Cf ξ / D), Ω = −1, Γ = 2.5.
+  - **Behaviour.** Bends grow, skew and migrate down-valley, and necks that close to
+    within a width are cut off as oxbows.
+  - **Seeding.** The instability is convective: bends grow as they travel downstream, so
+    without new disturbances the upper reach straightens. Random bank strength (a fixed
+    noise field) and a small random bank collapse each iteration keep seeding bends.
+  - **Numerics.** Curvature is smoothed, and each step is capped at 0.15 widths so loops
+    cannot jump across each other between cutoff checks.
+  - **Confinement.** Migration is limited to a belt 7 widths either side of the valley
+    line. Inside the belt it ignores the coarse terrain: meandering stands in for the
+    lateral erosion the grid model lacks.
+  - **Stopping.** It stops at sinuosity 2.7 unless cutoffs hold it lower. Tributaries
+    rejoin wherever their river now runs, winding across the floodplain.
+- **Channels** are carved with an asymmetric cross-section: deep at the outer bank of a
+  bend, a point bar on the inner side. At low flow (0.55 D below bankfull) the bars stand
+  out of the water. On a big river, sand tops the point bars; outer banks are cut banks,
+  vegetated to the edge. Natural levees fall away from the banks.
+- **Floodplains.** A meander belt is levelled towards the river, but not planed flat:
+  some old relief survives, the plain rises gently away from the river, and it is bounded
+  by valley walls. Right beside the channel the ground is always levelled, so a bend that
+  swings into high ground cuts a bluff. Cover is meadow, wet woodland or marsh. Distance
+  to the river comes from an exact Euclidean feature transform (Felzenszwalb &
+  Huttenlocher 2012) on a grid extended by the belt width, so tiles join up.
+- **Oxbows.** The newest cut-off bends are lakes, older ones marsh. Parts the live
+  channel has since crossed are dropped, and older ones are not drawn.
+- **Beaches** form on sandy, gentle coasts, judged from the simulation's soil and slope.
+  - **Offshore:** an equilibrium shoreface, h = A y^(2/3) with A = 0.12 m^(1/3) (Dean 1977).
+  - **Onshore:** a beach face rising at 0.07 to a berm at tide/2 + 0.6 × wave height, then
+    dunes. Beach width (15–60 m), dune width and dune height grow with the simulation's
+    wave exposure. Distance to the shore comes from an exact distance transform on a
+    padded window.
+- **Land cover** comes from the simulation's vegetation, broken into stands and clearings
+  by noise. It is wetter along rivers, drier on steep south-west-facing slopes, bare on
+  steep or thin-soiled slopes, and cliff where the fine slope exceeds 1.2. Rock colour
+  comes from the strata at each pixel's own elevation, so outcrops follow contours.
+  Forest is drawn as crowns about 6 m across.
+
+**Tiles join exactly.** A pixel's value depends only on its world position: noise is
+seeded by world coordinates, the river network is built once per patch, and the
+transforms run on padded windows. A test renders a window whole and as two halves and
+finds identical elevations and cover. Panning within a patch is therefore seamless.
+
+**Speed.** Building the network and the meanders takes 0.5–3 s. A 900 × 700 tile takes
+about 2 s at 1 m per pixel in Node; the browser renders the visible window on demand.
+
 ## Checks that are run (`npm test`)
 
 | claim | test |
@@ -461,6 +541,8 @@ planet over 2 Myr:
 | planet: isostasy gives the reference continent, the ridge depth, √age subsidence and 0.15 m of rebound per metre eroded; crust volume closes to 1e-10 of the total; a single rotating plate makes and destroys no crust and keeps its continent's area within 3% while turning by ωt; two plates spreading for 40 Myr give an age–distance slope matching the 4 cm/yr half rate to 10% (measured 4.07), and a trench where they converge; deterministic | `planet.test.js` |
 | planet → patch: block means kept (< 0.5 m), sea level equal, uplift and rainfall fields carried over | `planet.test.js` |
 | planet → patch faults: a convergent boundary becomes a north–south thrust with the prescribed 4 cm/yr closing (to 10%), slip = coupling × closing / cos(dip), the overriding plate raised; smooth field + expected fault uplift equals the planet's uplift exactly; over 2 Myr of earthquakes the patch's mean change matches the planet's uplift to 10% | `planet.test.js` |
+| detail: meander migration grows bends from a straight channel to sinuosity > 1.5, cuts off necks into oxbows, keeps its end points fixed and its belt, and never lets two stretches of channel overlap | `detail.test.js` |
+| detail: rivers get W = aW Q^0.5, never narrow or rise downstream, and the biggest meanders; a rendered window has rivers several pixels wide; the same window rendered whole and as two halves is identical in elevation and cover | `detail.test.js` |
 | the expected-uplift field of a fault, including the taper past a fault end inside the domain, matches a 2-Myr stochastic run to 3% in every band (measured about 1%) | `earthquakes.test.js` |
 
 These are all checks of internal consistency and numerics. **None of them shows that the
@@ -507,6 +589,15 @@ against real topography, which has not been done.
   and faults are fixed straight lines. On a planet patch, a fault is frozen where the
   boundary was at the hand-off, although the real boundary would move with the plates.
   The coupling that sets its slip rate is a guess.
+- **Detail** is procedural, not simulated: rivers carve and meander only in the detail
+  layer, and nothing feeds back to the simulation. The coarse valleys are often narrower
+  than a meander belt, so belts are opened up by fiat. Meander patterns depend on random
+  seeding, and some bends grow into elongated hairpins. Creeks narrower than a pixel are
+  drawn as thin lines. Panning across patch boundaries (adjacent zoomed patches) is not
+  handled yet.
+- **Sea** is the water below sea level connected to the open sea (the domain's edge, or
+  the largest body of water on a planet). Inland hollows below sea level are lakes. The
+  wave process still treats them as water.
 - **Not modelled:** explicit water depth or flood hydraulics; groundwater; chemical
   dissolution (karst); glaciers; wind; isostasy at landscape scale; lateral channel migration and meanders;
   deep-seated landslides; sediment grain size; porosity (rock and soil volumes are

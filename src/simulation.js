@@ -123,6 +123,7 @@ export class Simulation {
     this._buildBoundaries();
     this._buildDerived();
     this._initialTerrain();
+    this._applyInflows();
     this._updateDerivedState();
     routeFlow(this.grid, this.z, this.outlet, this.precipWeight, this.flow);
   }
@@ -499,6 +500,30 @@ export class Simulation {
     for (let i = 0; i < g.size; i++) if (this.boundaryOutlet[i]) this.rock[i] = Math.min(this.rock[i], p.base);
   }
 
+  /**
+   * Rivers entering the domain from outside, from params.boundary.inflows:
+   * [{ x, y, area (m^2, precipitation-weighted), sediment (m^3/yr) }] at fractional
+   * positions; each enters at the nearest cell that is not an outlet. Applied once, at
+   * construction (it is state: a zoomed patch gets its inflows from its parent instead).
+   */
+  _applyInflows() {
+    const list = this.params.boundary.inflows || [];
+    const g = this.grid;
+    const F = this.frame;
+    for (const f of list) {
+      const px = F.x + f.x * F.width, py = F.y + f.y * F.height;
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < g.size; i++) {
+        if (this.boundaryOutlet[i]) continue;
+        const d = (g.x[i] - px) ** 2 + (g.y[i] - py) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best < 0) continue;
+      this.inflowArea[best] += f.area || 0;
+      this.inflowSediment[best] += f.sediment || 0;
+    }
+  }
+
   _updateSurfaceRock() {
     const { rock, upliftCum, lith, surfaceRock } = this;
     // sample just below the surface so a cell sitting exactly on a boundary uses the rock beneath
@@ -514,14 +539,57 @@ export class Simulation {
     const sea = this.seaLevel;
     let any = false;
     let lowest = 0;
+    const open = sea != null ? this._openSea(sea) : null;
     for (let i = 0; i < this.grid.size; i++) {
-      this.outlet[i] = this.boundaryOutlet[i] || (sea != null && this.z[i] < sea) ? 1 : 0;
+      this.outlet[i] = this.boundaryOutlet[i] || (open && open[i]) ? 1 : 0;
       if (this.outlet[i]) any = true;
       if (this.z[i] < this.z[lowest]) lowest = i;
     }
     // No open edge and no sea left (e.g. the sea floor was uplifted or the sea fell
     // away): the lowest cell becomes the terminal sink of an internally drained basin.
     if (!any) this.outlet[lowest] = 1;
+  }
+
+  /**
+   * The sea: cells below sea level connected to the open sea, which is where below-sea
+   * cells touch the domain's edge (on a mesh without edges, the largest such body of
+   * water). A hollow below sea level inland is a lake, not sea.
+   */
+  _openSea(sea) {
+    const g = this.grid, n = g.size, D = g.degree, nb = g.neighbors, z = this.z;
+    const open = this._seaMask || (this._seaMask = new Uint8Array(n));
+    const label = this._seaLabel || (this._seaLabel = new Int32Array(n));
+    open.fill(0);
+    label.fill(0);
+    const stack = [];
+    // label every body of below-sea water; note which touch the domain's edge
+    let next = 1, best = 0, bestLabel = 0;
+    const touchesEdge = [false];
+    for (let s0 = 0; s0 < n; s0++) {
+      if (z[s0] >= sea || label[s0]) continue;
+      const id = next++;
+      touchesEdge[id] = false;
+      label[s0] = id;
+      stack.length = 0;
+      stack.push(s0);
+      let count = 0;
+      while (stack.length) {
+        const i = stack.pop();
+        count++;
+        if (g.edge[i]) touchesEdge[id] = true;
+        for (let k = 0; k < D; k++) {
+          const j = nb[D * i + k];
+          if (j >= 0 && !label[j] && z[j] < sea) { label[j] = id; stack.push(j); }
+        }
+      }
+      if (count > best) { best = count; bestLabel = id; }
+    }
+    const anyEdge = touchesEdge.some(Boolean);
+    for (let i = 0; i < n; i++) {
+      const id = label[i];
+      if (id && (anyEdge ? touchesEdge[id] : id === bestLabel)) open[i] = 1;
+    }
+    return open;
   }
 
   _updateDerivedState() {

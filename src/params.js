@@ -50,6 +50,9 @@ export const DEFAULTS = {
     open: ['north', 'south', 'east', 'west'],
     // Cells below this elevation are sea: water and sediment sinks. null = no sea.
     seaLevel: null,
+    // Rivers entering from outside the domain: [{ x, y, area, sediment }], positions as
+    // fractions of the domain, area in m^2 (precipitation-weighted), sediment in m^3/yr.
+    inflows: [],
   },
   initial: {
     // 'flat' | 'plateau' | 'dome' | 'ramp' | 'ridge'
@@ -339,6 +342,23 @@ export const PRESETS = {
       waveHeight: 3, tidalRange: 3,
       waves: [{ from: 0, weight: 3 }, { from: 30, weight: 1 }, { from: 330, weight: 1 }],
     },
+  },
+  'river-coast': {
+    description: 'A humid coastal plain crossed by two large rivers from inland, ending at a sandy, wave-washed coast: alluvial valleys, a delta front, beaches. Made to be detailed down to walking scale.',
+    grid: { cols: 160, rows: 160, dx: 25 },
+    time: { dt: 100 },
+    initial: { type: 'ramp', base: -12, height: 55, angle: 90, noise: { amplitude: 5, wavelength: 900 }, soil: 4 },
+    uplift: { rate: 5e-5 },
+    boundary: {
+      open: ['south'], seaLevel: 0,
+      inflows: [{ x: 0.3, y: 0, area: 3e9, sediment: 4e4 }, { x: 0.82, y: 0, area: 6e8, sediment: 8e3 }],
+    },
+    strata: { layers: [{ rock: 'sandstone', thickness: 12 }, { rock: 'limestone', thickness: 8 }], top: 40, repeat: true, dip: 1, dipDirection: 270 },
+    climate: { precipitation: 1.1, frost: 0.1 },
+    vegetation: { cover: 'auto' },
+    fluvial: { deposition: 1.5 },
+    hillslope: { diffusivity: 0.02 },
+    coast: { waveHeight: 1.2, tidalRange: 1.5, beachShielding: 0.5, waves: [{ from: 270, weight: 3 }, { from: 240, weight: 1 }, { from: 300, weight: 1 }] },
   },
   'marine-terraces': {
     description: 'A sandstone coast rising 1 mm/yr under 41-kyr glacial sea-level cycles: each highstand cuts a platform that uplift lifts into a staircase of terraces.',

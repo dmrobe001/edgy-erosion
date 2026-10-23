@@ -14,4 +14,5 @@ jobs:
       - run: npm test
       - run: node bin/erode.js --preset fault-scarp --cols 48 --rows 48 --steps 20 --out out/ci
       - run: node bin/erode.js --preset earthquake-scarp --cols 48 --rows 48 --steps 20 --out out/ci-quake
+      - run: node examples/detail.js out/ci-detail
       - run: node scripts/build-single.js out/ci/single.html

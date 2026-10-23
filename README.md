@@ -65,6 +65,11 @@ Rebuild it after changing `src/` or `web/`.
   finer) on it, inheriting its topography, uplift and rainfall. Plate boundaries crossing
   the patch become faults (thrusts where plates converge, normal faults where they
   part) that slip in earthquakes. Zoom again to reach landscape scale.
+- **Walking-scale detail** (below the cross-section): *Build detail* turns the current
+  landscape into a map at 0.5–4 m per pixel. Rivers become curves with real widths that
+  meander, with point bars, oxbows and floodplains; sandy coasts get beaches and dunes;
+  forests get tree crowns. Drag to pan; click the map above to jump. Try the
+  `river-coast` preset.
 - **Earthquake!** (for presets with faults, e.g. `earthquake-scarp`) slips the first
   fault in a magnitude-7 event; ruptures flash yellow on the map.
 - **Export** saves the current view as PNG, or a snapshot (full state plus parameters)
@@ -128,7 +133,18 @@ sim.earthquake(0, 7.2);        // or trigger one now
 sim.quakes.events;             // the catalogue
 ```
 
-See `examples/basic.js`, `examples/zoom.js` and `examples/planet.js` for runnable scripts. `src/render.js` turns state into RGBA
+Walking-scale maps from a landscape run:
+
+```js
+import { Simulation, Detail, detailColors } from './src/index.js';
+const sim = new Simulation('river-coast');
+sim.run(200);
+const detail = new Detail(sim);                // rivers as curves; big ones meander
+const tile = detail.render({ x0: 600, y0: 900, width: 900, height: 700, pixel: 1 });
+const rgba = detailColors(detail, tile);       // tile.z, tile.cover, tile.level as arrays too
+```
+
+See `examples/basic.js`, `examples/zoom.js`, `examples/planet.js` and `examples/detail.js` for runnable scripts. `src/render.js` turns state into RGBA
 pixels without a canvas, and `bin/erode.js` uses it to write PNGs from Node.
 
 ### Command line
@@ -158,6 +174,7 @@ snapshot, so a run can be continued. Run `node bin/erode.js --help` for details.
 | `volcanic-necks` | soft sediment cut by basalt dikes and plugs: walls and towers emerge as the land wears down |
 | `coastal-plateau` | layered plateau meeting the sea: deltas and drowned valleys |
 | `rocky-coast` | bands of hard and soft rock meeting the sea end-on: headlands, bays, sea cliffs, platforms |
+| `river-coast` | a humid coastal plain with two large rivers from inland and a sandy coast; made for walking-scale detail |
 | `marine-terraces` | a coast rising 1 mm/yr under 41-kyr sea-level cycles: a staircase of uplifted wave-cut platforms |
 
 Planet presets (`src/planet.js`): `earth-like` (a third continental crust in scattered
@@ -213,6 +230,8 @@ src/                 the simulation (browser + Node)
   hexgrid.js         hex lattice geometry and neighbours
   nest.js            zooming in: refine a patch of a frozen parent (or of a planet)
   sphere.js          the icosahedral geodesic mesh, projections
+  detail.js          walking-scale maps: rivers as curves, channels, floodplains, beaches, cover
+  meander.js         meander migration of river centre lines (Howard & Knutson)
   planet.js          plates, isostasy, sea level, surface processes on the sphere
   flow.js            lakes, flow directions, drainage area
   lithology.js       rock type at any place and depth

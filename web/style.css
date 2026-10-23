@@ -107,3 +107,6 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
   #viewer { padding: 0.5rem 16px 1rem; }
   #controls { padding-left: 16px; padding-right: 16px; }
 }
+#detail-wrap { margin-top: 0.8rem; overflow: hidden; border-radius: 4px; }
+#detail { cursor: grab; touch-action: none; image-rendering: auto; }
+#detail:active { cursor: grabbing; }

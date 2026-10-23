@@ -114,6 +114,9 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
   #viewer { padding: 0.5rem 16px 1rem; }
   #controls { padding-left: 16px; padding-right: 16px; }
 }
+#detail-wrap { margin-top: 0.8rem; overflow: hidden; border-radius: 4px; }
+#detail { cursor: grab; touch-action: none; image-rendering: auto; }
+#detail:active { cursor: grabbing; }
 </style>
 </head>
 <body>
@@ -217,6 +220,17 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
       <div class="toolbar"><span>Cross-section <span class="note" id="section-hint">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
       <canvas id="section"></canvas>
       <div id="legend"></div>
+      <div id="detail-wrap">
+        <div class="toolbar">
+          <span>Walking-scale detail <span class="note">(rivers as curves that meander, beaches, floodplains, trees; drag to pan, click the map above to jump)</span></span>
+          <span class="buttons" style="margin:0">
+            <label>m per pixel <select id="detail-pixel"><option>0.5</option><option selected>1</option><option>2</option><option>4</option></select></label>
+            <button id="detail-build">Build detail</button>
+          </span>
+        </div>
+        <canvas id="detail" hidden></canvas>
+        <div id="detail-info" class="mono note"></div>
+      </div>
     </section>
   </main>
 
@@ -551,6 +565,9 @@ const DEFAULTS = {
     open: ['north', 'south', 'east', 'west'],
     // Cells below this elevation are sea: water and sediment sinks. null = no sea.
     seaLevel: null,
+    // Rivers entering from outside the domain: [{ x, y, area, sediment }], positions as
+    // fractions of the domain, area in m^2 (precipitation-weighted), sediment in m^3/yr.
+    inflows: [],
   },
   initial: {
     // 'flat' | 'plateau' | 'dome' | 'ramp' | 'ridge'
@@ -840,6 +857,23 @@ const PRESETS = {
       waveHeight: 3, tidalRange: 3,
       waves: [{ from: 0, weight: 3 }, { from: 30, weight: 1 }, { from: 330, weight: 1 }],
     },
+  },
+  'river-coast': {
+    description: 'A humid coastal plain crossed by two large rivers from inland, ending at a sandy, wave-washed coast: alluvial valleys, a delta front, beaches. Made to be detailed down to walking scale.',
+    grid: { cols: 160, rows: 160, dx: 25 },
+    time: { dt: 100 },
+    initial: { type: 'ramp', base: -12, height: 55, angle: 90, noise: { amplitude: 5, wavelength: 900 }, soil: 4 },
+    uplift: { rate: 5e-5 },
+    boundary: {
+      open: ['south'], seaLevel: 0,
+      inflows: [{ x: 0.3, y: 0, area: 3e9, sediment: 4e4 }, { x: 0.82, y: 0, area: 6e8, sediment: 8e3 }],
+    },
+    strata: { layers: [{ rock: 'sandstone', thickness: 12 }, { rock: 'limestone', thickness: 8 }], top: 40, repeat: true, dip: 1, dipDirection: 270 },
+    climate: { precipitation: 1.1, frost: 0.1 },
+    vegetation: { cover: 'auto' },
+    fluvial: { deposition: 1.5 },
+    hillslope: { diffusivity: 0.02 },
+    coast: { waveHeight: 1.2, tidalRange: 1.5, beachShielding: 0.5, waves: [{ from: 270, weight: 3 }, { from: 240, weight: 1 }, { from: 300, weight: 1 }] },
   },
   'marine-terraces': {
     description: 'A sandstone coast rising 1 mm/yr under 41-kyr glacial sea-level cycles: each highstand cuts a platform that uplift lifts into a staircase of terraces.',
@@ -2883,6 +2917,7 @@ class Simulation {
     this._buildBoundaries();
     this._buildDerived();
     this._initialTerrain();
+    this._applyInflows();
     this._updateDerivedState();
     routeFlow(this.grid, this.z, this.outlet, this.precipWeight, this.flow);
   }
@@ -3259,6 +3294,30 @@ class Simulation {
     for (let i = 0; i < g.size; i++) if (this.boundaryOutlet[i]) this.rock[i] = Math.min(this.rock[i], p.base);
   }
 
+  /**
+   * Rivers entering the domain from outside, from params.boundary.inflows:
+   * [{ x, y, area (m^2, precipitation-weighted), sediment (m^3/yr) }] at fractional
+   * positions; each enters at the nearest cell that is not an outlet. Applied once, at
+   * construction (it is state: a zoomed patch gets its inflows from its parent instead).
+   */
+  _applyInflows() {
+    const list = this.params.boundary.inflows || [];
+    const g = this.grid;
+    const F = this.frame;
+    for (const f of list) {
+      const px = F.x + f.x * F.width, py = F.y + f.y * F.height;
+      let best = -1, bd = Infinity;
+      for (let i = 0; i < g.size; i++) {
+        if (this.boundaryOutlet[i]) continue;
+        const d = (g.x[i] - px) ** 2 + (g.y[i] - py) ** 2;
+        if (d < bd) { bd = d; best = i; }
+      }
+      if (best < 0) continue;
+      this.inflowArea[best] += f.area || 0;
+      this.inflowSediment[best] += f.sediment || 0;
+    }
+  }
+
   _updateSurfaceRock() {
     const { rock, upliftCum, lith, surfaceRock } = this;
     // sample just below the surface so a cell sitting exactly on a boundary uses the rock beneath
@@ -3274,14 +3333,57 @@ class Simulation {
     const sea = this.seaLevel;
     let any = false;
     let lowest = 0;
+    const open = sea != null ? this._openSea(sea) : null;
     for (let i = 0; i < this.grid.size; i++) {
-      this.outlet[i] = this.boundaryOutlet[i] || (sea != null && this.z[i] < sea) ? 1 : 0;
+      this.outlet[i] = this.boundaryOutlet[i] || (open && open[i]) ? 1 : 0;
       if (this.outlet[i]) any = true;
       if (this.z[i] < this.z[lowest]) lowest = i;
     }
     // No open edge and no sea left (e.g. the sea floor was uplifted or the sea fell
     // away): the lowest cell becomes the terminal sink of an internally drained basin.
     if (!any) this.outlet[lowest] = 1;
+  }
+
+  /**
+   * The sea: cells below sea level connected to the open sea, which is where below-sea
+   * cells touch the domain's edge (on a mesh without edges, the largest such body of
+   * water). A hollow below sea level inland is a lake, not sea.
+   */
+  _openSea(sea) {
+    const g = this.grid, n = g.size, D = g.degree, nb = g.neighbors, z = this.z;
+    const open = this._seaMask || (this._seaMask = new Uint8Array(n));
+    const label = this._seaLabel || (this._seaLabel = new Int32Array(n));
+    open.fill(0);
+    label.fill(0);
+    const stack = [];
+    // label every body of below-sea water; note which touch the domain's edge
+    let next = 1, best = 0, bestLabel = 0;
+    const touchesEdge = [false];
+    for (let s0 = 0; s0 < n; s0++) {
+      if (z[s0] >= sea || label[s0]) continue;
+      const id = next++;
+      touchesEdge[id] = false;
+      label[s0] = id;
+      stack.length = 0;
+      stack.push(s0);
+      let count = 0;
+      while (stack.length) {
+        const i = stack.pop();
+        count++;
+        if (g.edge[i]) touchesEdge[id] = true;
+        for (let k = 0; k < D; k++) {
+          const j = nb[D * i + k];
+          if (j >= 0 && !label[j] && z[j] < sea) { label[j] = id; stack.push(j); }
+        }
+      }
+      if (count > best) { best = count; bestLabel = id; }
+    }
+    const anyEdge = touchesEdge.some(Boolean);
+    for (let i = 0; i < n; i++) {
+      const id = label[i];
+      if (id && (anyEdge ? touchesEdge[id] : id === bestLabel)) open[i] = 1;
+    }
+    return open;
   }
 
   _updateDerivedState() {
@@ -4504,7 +4606,7 @@ function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughn
     grid: { cols, rows, dx, origin },
     frame: referenceFrame(pp, pg),
     time: { dt: dt ?? pp.time.dt / factor },
-    boundary: { open: ['north', 'south', 'east', 'west'], seaLevel: pp.boundary.seaLevel },
+    boundary: { open: ['north', 'south', 'east', 'west'], seaLevel: pp.boundary.seaLevel, inflows: [] },
     initial: { type: 'flat', base: 0, height: 0, noise: { amplitude: 0 }, soil: 0 },
     zoom: { level: (pp.zoom?.level ?? 0) + 1, factor, center: [cx, cy], parentDx: pg.dx },
   });
@@ -4559,7 +4661,7 @@ function zoomFromPlanet(planet, { lon, lat, dx, factor = 32, cols = 128, rows = 
     grid: { cols, rows, dx, origin: [-halfW, -halfH] },
     frame: null,
     time: { dt: dt ?? planet.params.time.dt / fac },
-    boundary: { open: ['north', 'south', 'east', 'west'], seaLevel: planet.seaLevel },
+    boundary: { open: ['north', 'south', 'east', 'west'], seaLevel: planet.seaLevel, inflows: [] },
     initial: { type: 'flat', base: 0, height: 0, noise: { amplitude: 0 }, soil: 0 },
     uplift: { rate: 0, pattern: 'uniform' },
     // waves and cliff collapse are calibrated for cells of tens of metres
@@ -5005,6 +5107,1102 @@ function compareWithParent(child, parent) {
     meanRate: { parent: parentRate / m, child: childRate / m },
     largestExitArea: { parent: parentExit, child: childExit },
   };
+}
+
+// ---- src/meander.js ----
+// Meandering rivers as moving centre lines.
+//
+// A river wider than a few grid cells is better represented as a curve than as cells:
+// its centre line is a polyline whose nodes carry width W, depth D and water-surface
+// elevation. Bends migrate by the kinematic model of Howard & Knutson (1984, Water
+// Resour. Res. 20), itself a simplification of Ikeda, Parker & Sawai (1981, J. Fluid
+// Mech. 112): the bank at a node erodes at a rate set by the local curvature and, with
+// more weight, by the curvature upstream, because the flow's momentum carries the
+// fastest water to the outer bank some distance downstream of each bend's apex:
+//
+//   R1(s) = Omega C(s) W + Gamma * integral_0^inf C(s - xi) W G(xi) dxi / integral G
+//   G(xi) = exp(-2 Cf xi / D),   Omega = -1, Gamma = 2.5, Cf ~ 0.01
+//
+// Nodes move sideways towards the outer bank by (migration rate) x R1 x (bank
+// erodibility). This makes bends grow, skew downstream and migrate down-valley. When
+// a loop's neck closes (two parts of the line come within about one width of each
+// other) the loop is cut off and left behind as an oxbow lake.
+//
+// Bank erodibility comes from a callback, so the river can be confined by valley walls,
+// stopped at the sea, or slowed on steep (bedrock) reaches.
+
+
+/** Resample a polyline at roughly even spacing ds(node), interpolating every attribute. */
+function resample(nodes, spacing) {
+  const out = [nodes[0]];
+  let carry = 0;
+  for (let k = 1; k < nodes.length; k++) {
+    const a = nodes[k - 1], b = nodes[k];
+    const L = Math.hypot(b.x - a.x, b.y - a.y);
+    if (L === 0) continue;
+    let s = spacing(a) - carry;
+    while (s < L) {
+      const t = s / L;
+      out.push(lerpNode(a, b, t));
+      s += spacing(out[out.length - 1]);
+    }
+    carry = L - (s - spacing(out[out.length - 1]));
+  }
+  const last = nodes[nodes.length - 1];
+  const prev = out[out.length - 1];
+  if (Math.hypot(last.x - prev.x, last.y - prev.y) < 0.3 * spacing(last) && out.length > 1) out[out.length - 1] = last;
+  else out.push(last);
+  return out;
+}
+
+function lerpNode(a, b, t) {
+  const n = {};
+  for (const key of Object.keys(a)) n[key] = typeof a[key] === 'number' ? a[key] + (b[key] - a[key]) * t : a[key];
+  return n;
+}
+
+/** Chaikin corner cutting, keeping the end points: removes the zigzag of grid paths. */
+function chaikin(nodes, iterations = 3) {
+  let p = nodes;
+  for (let it = 0; it < iterations; it++) {
+    if (p.length < 3) return p;
+    const q = [p[0]];
+    for (let k = 0; k < p.length - 1; k++) {
+      q.push(lerpNode(p[k], p[k + 1], 0.25), lerpNode(p[k], p[k + 1], 0.75));
+    }
+    q.push(p[p.length - 1]);
+    p = q;
+  }
+  return p;
+}
+
+/** Signed curvature (1/m) at each node; > 0 turning left (counter-clockwise in x-right, y-up). */
+function curvature(nodes) {
+  const n = nodes.length;
+  const c = new Float64Array(n);
+  for (let k = 1; k < n - 1; k++) {
+    const ax = nodes[k].x - nodes[k - 1].x, ay = nodes[k].y - nodes[k - 1].y;
+    const bx = nodes[k + 1].x - nodes[k].x, by = nodes[k + 1].y - nodes[k].y;
+    const ang = Math.atan2(ax * by - ay * bx, ax * bx + ay * by);
+    c[k] = ang / (0.5 * (Math.hypot(ax, ay) + Math.hypot(bx, by)) || 1);
+  }
+  return c;
+}
+
+/**
+ * Migrate a river centre line.
+ * @param {object[]} nodes [{x, y, w, d, zw}] from upstream to downstream; ends stay fixed
+ * @param {object} o
+ * @param {number} [o.iterations]
+ * @param {number} [o.step] node displacement per iteration, in widths, per unit of R1
+ * @param {(x:number, y:number, node:object) => number} [o.erodibility] bank erodibility 0..1
+ * @param {number} [o.seed]
+ * @param {number} [o.heterogeneity] amplitude (natural-log units) of random bank strength
+ * @param {number} [o.kick] size of the random bank collapse each iteration, in widths
+ * @returns {{nodes: object[], oxbows: {nodes: object[], iteration: number}[], sinuosity: number}}
+ */
+function migrate(nodes, { iterations = 600, step = 0.5, erodibility = () => 1, seed = 1, cf = 0.025, maxSinuosity = 2.2, heterogeneity = 1.0, kick = 0.3 } = {}) {
+  const rng = new Rng(seed);
+  const spacing = (nd) => 0.5 * nd.w;
+  let line = resample(nodes, spacing);
+  // seed bends: a few random waves along the line, 8-30 widths long, 0.3 widths high
+  // (the unstable band of the model; noise at node scale would only be damped)
+  const waves = Array.from({ length: 4 }, () => ({ k: (2 * Math.PI) / (8 + 22 * rng.next()), ph: 2 * Math.PI * rng.next() }));
+  let arc = 0;
+  for (let k = 1; k < line.length - 1; k++) {
+    const a = line[k - 1], b = line[k + 1];
+    arc += Math.hypot(line[k].x - a.x, line[k].y - a.y) / line[k].w;
+    const tx = b.x - a.x, ty = b.y - a.y, L = Math.hypot(tx, ty) || 1;
+    let r = 0;
+    for (const wv of waves) r += Math.sin(wv.k * arc + wv.ph);
+    r *= 0.15 * line[k].w * Math.min(1, k / 8, (line.length - 1 - k) / 8);
+    line[k] = { ...line[k], x: line[k].x - (ty / L) * r, y: line[k].y + (tx / L) * r };
+  }
+  const startLen = pathLength(line);
+  const straight = Math.hypot(line[line.length - 1].x - line[0].x, line[line.length - 1].y - line[0].y) || 1;
+  const oxbows = [];
+  for (let it = 0; it < iterations; it++) {
+    line = resample(line, spacing);
+    const n = line.length;
+    if (n < 5) break;
+    const c0 = curvature(line);
+    // smooth the curvature (a few [1 2 1] passes): damps node-scale wiggles, which the
+    // explicit update would otherwise amplify, and lets the step be large
+    let c = c0;
+    for (let pass = 0; pass < 4; pass++) {
+      const s2 = new Float64Array(n);
+      for (let k = 1; k < n - 1; k++) s2[k] = 0.25 * c[k - 1] + 0.5 * c[k] + 0.25 * c[k + 1];
+      c = s2;
+    }
+    // upstream-weighted curvature (the convolution, truncated where G < 1%)
+    const move = new Float64Array(n);
+    for (let k = 1; k < n - 1; k++) {
+      const nd = line[k];
+      const ds = 0.5 * nd.w;
+      const alpha = (2 * cf) / Math.max(nd.d, 0.1);
+      let sum = 0, norm = 0;
+      for (let j = 1; j <= k; j++) {
+        const g = Math.exp(-alpha * j * ds);
+        if (g < 0.01) break;
+        sum += c[k - j] * line[k - j].w * g;
+        norm += g;
+      }
+      const r1 = -1 * c[k] * nd.w + (norm > 0 ? (2.5 * sum) / norm : 0);
+      const taper = Math.min(1, k / 4, (n - 1 - k) / 4); // fixed ends
+      // banks are not uniform (old fills, clay plugs, tree roots): a fixed random field of
+      // bank strength, a few widths across, keeps seeding new bends along the whole river
+      const het = Math.exp(heterogeneity * fbm(nd.x, nd.y, { wavelength: 4 * nd.w, octaves: 3, seed: seed + 71 }));
+      // capped at 0.15 widths per iteration, so that no two stretches of river can jump
+      // across each other between neck-cutoff checks
+      const m = step * nd.w * r1 * taper * het * erodibility(nd.x, nd.y, nd);
+      move[k] = Math.max(-0.15 * nd.w, Math.min(0.15 * nd.w, m));
+    }
+    // move towards the outer bank: for a left turn (c > 0) that is the right-hand side
+    const next = line.map((nd) => ({ ...nd }));
+    for (let k = 1; k < n - 1; k++) {
+      if (move[k] === 0) continue;
+      const tx = line[k + 1].x - line[k - 1].x, ty = line[k + 1].y - line[k - 1].y;
+      const L = Math.hypot(tx, ty) || 1;
+      // right-hand normal of (tx, ty) in x-right/y-up axes is (ty, -tx)
+      next[k].x += (ty / L) * move[k];
+      next[k].y += (-tx / L) * move[k];
+    }
+    // bank collapses: a random small sideways kick somewhere along the river each
+    // iteration keeps bends forming upstream (the model's instability is convective:
+    // bends grow as they travel downstream, so without new disturbances the upper
+    // reach would straighten)
+    {
+      const k0 = 1 + Math.floor(rng.next() * (n - 2));
+      const amp = kick * line[k0].w * (rng.next() < 0.5 ? -1 : 1);
+      const span = 3;
+      for (let k = Math.max(1, k0 - 3 * span); k < Math.min(n - 1, k0 + 3 * span); k++) {
+        const g = amp * Math.exp(-(((k - k0) / span) ** 2));
+        const tx = line[k + 1].x - line[k - 1].x, ty = line[k + 1].y - line[k - 1].y;
+        const L = Math.hypot(tx, ty) || 1;
+        next[k].x += (ty / L) * g * erodibility(next[k].x, next[k].y, next[k]);
+        next[k].y += (-tx / L) * g * erodibility(next[k].x, next[k].y, next[k]);
+      }
+    }
+    line = next;
+    // neck cutoffs
+    line = cutoffs(line, oxbows, it);
+    if (pathLength(line) / straight > maxSinuosity) break;
+  }
+  // round off the corners the last cutoffs left (two passes of [1 2 1] on the positions)
+  for (let pass = 0; pass < 2; pass++) {
+    const prev = line.map((nd) => ({ ...nd }));
+    for (let k = 1; k < line.length - 1; k++) {
+      line[k].x = 0.25 * prev[k - 1].x + 0.5 * prev[k].x + 0.25 * prev[k + 1].x;
+      line[k].y = 0.25 * prev[k - 1].y + 0.5 * prev[k].y + 0.25 * prev[k + 1].y;
+    }
+  }
+  return { nodes: line, oxbows, sinuosity: pathLength(line) / straight, lengthening: pathLength(line) / startLen };
+}
+
+function pathLength(line) {
+  let L = 0;
+  for (let k = 1; k < line.length; k++) L += Math.hypot(line[k].x - line[k - 1].x, line[k].y - line[k - 1].y);
+  return L;
+}
+
+/** Cut loops whose necks have closed to within a width; the loops become oxbows. */
+function cutoffs(line, oxbows, iteration) {
+  let n = line.length;
+  let wmax = 0;
+  for (const nd of line) wmax = Math.max(wmax, nd.w);
+  const cell = wmax;
+  const grid = new Map();
+  const keyOf = (x, y) => `${Math.floor(x / cell)},${Math.floor(y / cell)}`;
+  for (let k = 0; k < n; k++) {
+    const kk = keyOf(line[k].x, line[k].y);
+    if (!grid.has(kk)) grid.set(kk, []);
+    grid.get(kk).push(k);
+  }
+  for (let k = 0; k < n; k++) {
+    const nd = line[k];
+    const gx = Math.floor(nd.x / cell), gy = Math.floor(nd.y / cell);
+    let cut = -1;
+    for (let dx = -1; dx <= 1 && cut < 0; dx++) {
+      for (let dy = -1; dy <= 1; dy++) {
+        const list = grid.get(`${gx + dx},${gy + dy}`);
+        if (!list) continue;
+        for (const j of list) {
+          // far apart along the river (more than ~3 widths of channel between them) but close in space
+          if (j <= k + 12) continue;
+          if (Math.hypot(line[j].x - nd.x, line[j].y - nd.y) < 0.9 * nd.w && j > cut) cut = j;
+        }
+      }
+    }
+    if (cut > 0) {
+      oxbows.push({ nodes: line.slice(k, cut + 1), iteration });
+      return line.slice(0, k + 1).concat(line.slice(cut));
+    }
+  }
+  return line;
+}
+
+// ---- src/detail.js ----
+// Detail: from a landscape simulation to a map at walking scale (metres per pixel).
+//
+// Below a few tens of metres the grid simulation is the wrong tool: every river is one
+// cell wide and runs along the lattice, and beaches, bars and levees are narrower than
+// a cell. This module keeps the simulation as the large-scale truth (relief, drainage,
+// soils, vegetation, rock, sea level, wave exposure) and adds what it cannot resolve:
+//
+//   rivers     traced from the simulation's drainage network as curves, given a width
+//              and depth from their discharge (downstream hydraulic geometry, Leopold &
+//              Maddock 1953: W = aW Q^0.5, D = aD Q^0.35 at bankfull), smoothed out of
+//              the lattice, and, where wide and gentle, left to meander (meander.js),
+//              which leaves oxbow lakes behind;
+//   channels   carved into the surface with an asymmetric cross-section (deep at the
+//              outer bank of a bend, a point bar on the inside), low-flow water that
+//              exposes the bars, natural levees and a flattened floodplain around
+//              meandering rivers;
+//   beaches    on sandy, gentle, wave-exposed coasts: an equilibrium shoreface offshore
+//              (h = A y^(2/3), Dean 1977), a beach face rising to a berm, and dunes
+//              behind, their width growing with wave exposure;
+//   texture    micro-relief scaled to the local relief, and land cover (forest with
+//              crowns, grass, scrub, bare rock, cliffs, marsh) from the simulation's
+//              vegetation, soil and slope.
+// [heuristic] All of this is procedural detail conditioned on the simulation, chosen to
+// look plausible, not computed physics (the meander model aside).
+//
+// Everything a pixel gets depends only on its world position (noise is seeded by world
+// coordinates; the river network is built once for the whole patch), so tiles rendered
+// separately join up exactly: render any window, at any pixel size, and pan.
+
+
+
+
+const SECONDS_PER_YEAR = 3.156e7;
+const FLOODPLAIN = 254; // provisional cover while rendering
+
+/** Land-cover classes of a rendered tile. */
+const COVER = {
+  deepWater: 0, shallowWater: 1, river: 2, lake: 3, wetSand: 4, sand: 5, gravel: 6, marsh: 7,
+  duneGrass: 8, grass: 9, scrub: 10, forest: 11, rock: 12, cliff: 13,
+};
+
+const DETAIL_DEFAULTS = {
+  seed: 1,
+  minWidth: 0.6,          // m: narrowest stream drawn (bankfull width)
+  runoff: 0.5,            // share of precipitation that becomes river flow
+  bankfullFactor: 4,      // bankfull discharge / mean discharge
+  widthCoefficient: 4,    // aW in W = aW Q^0.5 (m, Q in m^3/s)
+  depthCoefficient: 0.4,  // aD in D = aD Q^0.35
+  meanderMinWidth: 6,     // m: rivers at least this wide may meander...
+  meanderMaxSlope: 0.012, // ...where gentler than this (generous: coarse valleys are steep)
+  belt: 7,                // meander belt half-width, in channel widths: the floodplain the detail opens up
+  warp: 1.5,              // bend the coarse grid's straight valleys, by this many coarse spacings
+  meanderIterations: 2500,
+  sinuosity: 2.7,         // meandering stops at this sinuosity, if neck cutoffs have not held it lower
+  oxbowsShown: 5,         // newest cut-off bends drawn per river: half as lakes, half as marsh
+  wiggle: 0.3,            // sideways noise on smaller streams, in coarse cell spacings
+  microRelief: 0.4,       // m: smallest micro-relief amplitude
+  beachWidth: [15, 60],   // m: beach width on sheltered .. fully exposed sandy coast
+  duneWidth: [20, 70],    // m
+  duneHeight: [1.5, 6],   // m
+  shoreface: 0.12,        // Dean's A (m^(1/3)), fine sand
+};
+
+/** A field of a hex simulation resampled on a regular grid and read back bicubically. */
+class Raster {
+  constructor(sim, field) {
+    const g = sim.grid;
+    const b = g.bounds;
+    this.h = g.dx;
+    this.x0 = b.xmin;
+    this.y0 = b.ymin;
+    this.nx = Math.ceil((b.xmax - b.xmin) / this.h) + 1;
+    this.ny = Math.ceil((b.ymax - b.ymin) / this.h) + 1;
+    this.data = new Float64Array(this.nx * this.ny);
+    const at = interpolator(g, field);
+    for (let j = 0; j < this.ny; j++) {
+      for (let i = 0; i < this.nx; i++) {
+        // clamp into the cell-centre hull so edge nodes take the nearest values
+        const x = Math.min(Math.max(this.x0 + i * this.h, g.x[0]), g.x[g.size - 1]);
+        const y = Math.min(Math.max(this.y0 + j * this.h, g.y[0]), g.y[g.size - 1]);
+        let v = at(x, y);
+        if (!Number.isFinite(v)) v = field[Math.max(0, g.cellAt(x, y))];
+        this.data[j * this.nx + i] = v;
+      }
+    }
+  }
+
+  /** Catmull-Rom bicubic value at world (x, y): smooth, so the hexagons disappear. */
+  sample(x, y) {
+    if (this.warp) { const w = this.warp(x, y); x += w[0]; y += w[1]; }
+    return this._sample(x, y);
+  }
+
+  /** As sample, at coordinates already warped. */
+  _sample(x, y) {
+    const fx = (x - this.x0) / this.h, fy = (y - this.y0) / this.h;
+    const ix = Math.floor(fx), iy = Math.floor(fy);
+    const tx = fx - ix, ty = fy - iy;
+    const { nx, ny, data } = this;
+    let v = 0;
+    for (let m = -1; m <= 2; m++) {
+      const jy = Math.min(ny - 1, Math.max(0, iy + m));
+      const wy = cr(ty, m);
+      let row = 0;
+      for (let k = -1; k <= 2; k++) {
+        const jx = Math.min(nx - 1, Math.max(0, ix + k));
+        row += cr(tx, k) * data[jy * nx + jx];
+      }
+      v += wy * row;
+    }
+    return v;
+  }
+
+  /** Bilinear value (for fields where overshoot would matter). */
+  linear(x, y) {
+    if (this.warp) { const w = this.warp(x, y); x += w[0]; y += w[1]; }
+    return this._linear(x, y);
+  }
+
+  /** As linear, at coordinates already warped. */
+  _linear(x, y) {
+    const fx = Math.min(this.nx - 1.001, Math.max(0, (x - this.x0) / this.h));
+    const fy = Math.min(this.ny - 1.001, Math.max(0, (y - this.y0) / this.h));
+    const ix = Math.floor(fx), iy = Math.floor(fy), tx = fx - ix, ty = fy - iy;
+    const d = this.data, n = this.nx;
+    return (1 - ty) * ((1 - tx) * d[iy * n + ix] + tx * d[iy * n + ix + 1]) + ty * ((1 - tx) * d[(iy + 1) * n + ix] + tx * d[(iy + 1) * n + ix + 1]);
+  }
+
+  /** Slope magnitude from the bilinear field (central differences at the grid spacing). */
+  slope(x, y) {
+    if (this.warp) { const w = this.warp(x, y); x += w[0]; y += w[1]; }
+    return Math.hypot(...this._gradient(x, y));
+  }
+
+  /** Gradient [d/dx, d/dy] at coordinates already warped. */
+  _gradient(x, y) {
+    const h = this.h;
+    return [(this._linear(x + h, y) - this._linear(x - h, y)) / (2 * h), (this._linear(x, y + h) - this._linear(x, y - h)) / (2 * h)];
+  }
+}
+
+/** Catmull-Rom weight of tap k (-1..2) at fraction t. */
+function cr(t, k) {
+  const t2 = t * t, t3 = t2 * t;
+  switch (k) {
+    case -1: return 0.5 * (-t3 + 2 * t2 - t);
+    case 0: return 0.5 * (3 * t3 - 5 * t2 + 2);
+    case 1: return 0.5 * (-3 * t3 + 4 * t2 + t);
+    default: return 0.5 * (t3 - t2);
+  }
+}
+
+function smooth01(a, b, x) {
+  const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+  return t * t * (3 - 2 * t);
+}
+
+class Detail {
+  /**
+   * @param {import('./simulation.js').Simulation} sim a hex-lattice landscape simulation
+   * @param {object} [options] see DETAIL_DEFAULTS
+   */
+  constructor(sim, options = {}) {
+    if (!sim.grid.lattice) throw new Error('detailing needs a hex-lattice simulation');
+    this.sim = sim;
+    this.o = { ...DETAIL_DEFAULTS, ...options };
+    this.seed = (this.o.seed ?? sim.params.seed) | 0;
+    this.bounds = { ...sim.grid.bounds };
+    const g0 = sim.grid;
+    this.hull = { x0: g0.x[0], x1: g0.x[g0.size - 1], y0: g0.y[0], y1: g0.y[g0.size - 1] };
+    this.sea = sim.seaLevel;
+    const t0 = Date.now();
+    this.z = new Raster(sim, sim.z);
+    this.water = new Raster(sim, sim.flow.filled);
+    this.soil = new Raster(sim, sim.soil);
+    this.veg = new Raster(sim, sim.veg);
+    this.waves = new Raster(sim, sim.waveExposureField);
+    const lakeDepth = Float64Array.from(sim.flow.filled, (f, i) => f - sim.z[i]);
+    this.lake = new Raster(sim, lakeDepth);
+    // A gentle warp of where the coarse fields are read: straight, lattice-parallel valleys
+    // bend (amplitude warp x coarse spacing, wavelength 12 spacings). Rivers get the
+    // inverse warp, so they stay in their valleys.
+    const A = this.o.warp * sim.grid.dx, Lw = 12 * sim.grid.dx, ws = this.seed;
+    this.warp = A > 0 ? (x, y) => [A * fbm(x, y, { wavelength: Lw, octaves: 2, seed: ws + 301 }), A * fbm(x, y, { wavelength: Lw, octaves: 2, seed: ws + 302 })] : null;
+    for (const r of [this.z, this.water, this.soil, this.veg, this.waves, this.lake]) r.warp = this.warp;
+    this.rockColor = sim.lith.color.map((c) => { const v = parseInt(c.slice(1), 16); return [(v >> 16) & 255, (v >> 8) & 255, v & 255]; });
+    this._buildRivers();
+    this.buildTime = Date.now() - t0;
+  }
+
+  /** Bankfull hydraulics from a drainage area (m^2, precipitation-weighted). */
+  hydraulics(area) {
+    const o = this.o;
+    const Q = (o.bankfullFactor * o.runoff * area) / SECONDS_PER_YEAR; // m^3/s
+    return { Q, w: o.widthCoefficient * Math.sqrt(Q), d: o.depthCoefficient * Math.pow(Q, 0.35) };
+  }
+
+  _buildRivers() {
+    const sim = this.sim, g = sim.grid, o = this.o;
+    const { receiver, filled, order } = sim.flow;
+    const n = g.size;
+    // drainage area along the single-receiver tree (the simulation may spread area over
+    // several lower neighbours, which would start wide "rivers" with no stream feeding them)
+    const area = new Float64Array(n);
+    for (let i = 0; i < n; i++) area[i] = sim.precipWeight[i] * g.area[i] + sim.inflowArea[i];
+    for (let s2 = n - 1; s2 >= 0; s2--) { const i = order[s2]; if (receiver[i] >= 0) area[receiver[i]] += area[i]; }
+    // channel cells: wide enough to draw, and not sea or open edge
+    const minQ = (o.minWidth / o.widthCoefficient) ** 2;
+    const minArea = (minQ * SECONDS_PER_YEAR) / (o.bankfullFactor * o.runoff);
+    const isChannel = new Uint8Array(n);
+    for (let i = 0; i < n; i++) if (area[i] >= minArea && !sim.outlet[i]) isChannel[i] = 1;
+    // each channel cell's main donor: the upstream channel cell with the most area
+    const main = new Int32Array(n).fill(-1);
+    for (let i = 0; i < n; i++) {
+      if (!isChannel[i]) continue;
+      const r = receiver[i];
+      if (r >= 0 && isChannel[r] && (main[r] < 0 || area[i] > area[main[r]])) main[r] = i;
+    }
+    // polylines start at channel heads (no channel upstream) and run downstream while
+    // they are the main donor of the next cell; a tributary ends where it joins a bigger
+    // river, whose own line continues through the junction
+    const lines = [];
+    const lineOf = new Int32Array(n).fill(-1);
+    const starts = [];
+    for (let i = 0; i < n; i++) if (isChannel[i] && main[i] < 0) starts.push(i);
+    starts.sort((a, b) => area[b] - area[a]); // big rivers first
+    for (const s of starts) {
+      const cells = [s];
+      let c = s, joins = -1;
+      const estuary = () => {
+        // at the sea: carry the channel on downhill across the shallows (an estuary, or a
+        // channel across the shoreface) until the water is deep enough to hide it
+        // Follow the lowest neighbour that leads away from where the river met the sea,
+        // so it runs out along a flooded inlet rather than along the shore.
+        const hd = this.hydraulics(area[c]).d;
+        const sx = g.x[c], sy = g.y[c];
+        for (let step = 0; step < 60 && this.sea != null && sim.z[c] > this.sea - 2 * hd - 0.5; step++) {
+          const here = Math.hypot(g.x[c] - sx, g.y[c] - sy);
+          let lo = -1;
+          for (let q = 0; q < 6; q++) {
+            const j = g.neighbors[6 * c + q];
+            if (j < 0 || cells.includes(j) || Math.hypot(g.x[j] - sx, g.y[j] - sy) <= here) continue;
+            if (lo < 0 || sim.z[j] < sim.z[lo]) lo = j;
+          }
+          if (lo < 0 || sim.z[lo] > sim.z[c] + 0.3) break;
+          cells.push(lo);
+          c = lo;
+        }
+      };
+      for (;;) {
+        const r = receiver[c];
+        if (r < 0) { if (sim.outlet[c] && !sim.boundaryOutlet[c]) estuary(); break; }
+        cells.push(r); // the receiver ends this line (sea, edge or junction) or continues it
+        if (!isChannel[r]) {
+          if (sim.outlet[r] && !sim.boundaryOutlet[r]) { c = r; estuary(); }
+          break;
+        }
+        if (main[r] !== c) { joins = r; break; }
+        c = r;
+      }
+      const id = lines.length;
+      for (const cell of cells) if (lineOf[cell] < 0) lineOf[cell] = id;
+      lines.push({ cells, joins });
+    }
+    // geometry: coarse cell centres, smoothed out of the lattice, with a little sideways
+    // noise, and hydraulics from drainage area
+    const rivers = [];
+    for (const L of lines) {
+      if (L.cells.length < 2) continue;
+      let zw = Infinity, a = 0;
+      let nodes = L.cells.map((c) => {
+        zw = Math.min(zw, filled[c]); // water surface never rises downstream...
+        a = Math.max(a, area[c]);     // ...and discharge never falls (sea cells carry none of their own)
+        const h = this.hydraulics(a);
+        return { x: g.x[c], y: g.y[c], w: h.w, d: h.d, q: h.Q, zw };
+      });
+      nodes = chaikin(nodes, 3);
+      const coarse = g.dx;
+      nodes = resample(nodes, () => coarse / 3);
+      // sideways noise along the line, fading where the river is wide
+      let arc = 0;
+      for (let k = 1; k < nodes.length - 1; k++) {
+        arc += Math.hypot(nodes[k].x - nodes[k - 1].x, nodes[k].y - nodes[k - 1].y);
+        const tx = nodes[k + 1].x - nodes[k - 1].x, ty = nodes[k + 1].y - nodes[k - 1].y;
+        const len = Math.hypot(tx, ty) || 1;
+        const amp = o.wiggle * coarse * Math.min(1, k / 3, (nodes.length - 1 - k) / 3) / (1 + nodes[k].w / coarse);
+        const off = amp * fbm(arc, L.cells[0], { wavelength: 2.5 * coarse, octaves: 3, seed: this.seed + 5 });
+        nodes[k] = { ...nodes[k], x: nodes[k].x + (ty / len) * off, y: nodes[k].y - (tx / len) * off };
+      }
+      if (this.warp) {
+        nodes = nodes.map((nd) => {
+          const w1 = this.warp(nd.x, nd.y);
+          const w2 = this.warp(nd.x - w1[0], nd.y - w1[1]);
+          return { ...nd, x: nd.x - w2[0], y: nd.y - w2[1] };
+        });
+      }
+      rivers.push({ nodes, joins: L.joins, first: L.cells[0], oxbows: [], meandering: false });
+    }
+    // meander the wide, gentle ones, inside a belt around the valley line
+    const sea = this.sea;
+    const b = this.bounds;
+    rivers.forEach((r, idx) => {
+      const nodes = r.nodes;
+      const wmax = Math.max(...nodes.map((nd) => nd.w));
+      if (wmax < o.meanderMinWidth) return;
+      // local slope of the water surface, over about five widths
+      for (let k = 0; k < nodes.length; k++) {
+        const a = nodes[Math.max(0, k - 3)], c = nodes[Math.min(nodes.length - 1, k + 3)];
+        let len = 0;
+        for (let m = Math.max(1, k - 2); m <= Math.min(nodes.length - 1, k + 3); m++) len += Math.hypot(nodes[m].x - nodes[m - 1].x, nodes[m].y - nodes[m - 1].y);
+        nodes[k].s = (a.zw - c.zw) / Math.max(len, 1);
+      }
+      if (!nodes.some((nd) => nd.w >= o.meanderMinWidth && nd.s < o.meanderMaxSlope)) return;
+      // the valley line the belt is centred on, in a spatial hash
+      const cell = 2 * wmax;
+      const hash = new Map();
+      for (const nd of nodes) {
+        const key = `${Math.floor(nd.x / cell)},${Math.floor(nd.y / cell)}`;
+        if (!hash.has(key)) hash.set(key, []);
+        hash.get(key).push(nd);
+      }
+      const reach = Math.ceil((o.belt * wmax) / cell) + 1;
+      const distToValley = (x, y) => {
+        const gx = Math.floor(x / cell), gy = Math.floor(y / cell);
+        let d2 = Infinity;
+        for (let dx = -reach; dx <= reach; dx++) {
+          for (let dy = -reach; dy <= reach; dy++) {
+            const list = hash.get(`${gx + dx},${gy + dy}`);
+            if (list) for (const v of list) d2 = Math.min(d2, (v.x - x) ** 2 + (v.y - y) ** 2);
+          }
+        }
+        return Math.sqrt(d2);
+      };
+      const erodibility = (x, y, nd) => {
+        if (x < b.xmin + nd.w || x > b.xmax - nd.w || y < b.ymin + nd.w || y > b.ymax - nd.w) return 0;
+        if (nd.w < o.meanderMinWidth) return 0;
+        if (sea != null && this.z.sample(x, y) < sea - 0.5) return 0; // not out into open water
+        // inside a belt around the valley line, whatever the coarse terrain says: meandering
+        // stands in for the lateral erosion the grid model lacks, and the belt becomes a
+        // floodplain when rendered [heuristic]
+        const belt = o.belt * nd.w;
+        return (1 - smooth01(0.6 * belt, belt, distToValley(x, y))) * (1 - smooth01(0.5 * o.meanderMaxSlope, o.meanderMaxSlope, nd.s));
+      };
+      const res = migrate(nodes, { iterations: o.meanderIterations, maxSinuosity: o.sinuosity, erodibility, seed: this.seed + 31 * idx });
+      r.nodes = res.nodes;
+      // keep only the parts of cut-off bends that the live channel has not since crossed
+      const live = new Map();
+      for (const nd of r.nodes) {
+        const key = `${Math.floor(nd.x / cell)},${Math.floor(nd.y / cell)}`;
+        if (!live.has(key)) live.set(key, []);
+        live.get(key).push(nd);
+      }
+      const nearLive = (p) => {
+        const gx = Math.floor(p.x / cell), gy = Math.floor(p.y / cell);
+        for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
+          const list = live.get(`${gx + dx},${gy + dy}`);
+          if (list) for (const v of list) if ((v.x - p.x) ** 2 + (v.y - p.y) ** 2 < (1.3 * Math.max(v.w, p.w)) ** 2) return true;
+        }
+        return false;
+      };
+      r.oxbows = [];
+      for (const ox of res.oxbows) {
+        let piece = [];
+        for (const nd of ox.nodes) {
+          if (nearLive(nd)) { if (piece.length >= 6) r.oxbows.push({ nodes: piece, iteration: ox.iteration }); piece = []; } else piece.push(nd);
+        }
+        if (piece.length >= 6) r.oxbows.push({ nodes: piece, iteration: ox.iteration });
+      }
+      r.meandering = true;
+      r.sinuosity = res.sinuosity;
+    });
+    // tributaries re-attach to wherever their river now runs
+    for (const r of rivers) {
+      if (r.joins < 0) continue;
+      // the nearest node of any bigger river to the tributary's end
+      const end = r.nodes[r.nodes.length - 1];
+      let best = null, bd = Infinity;
+      for (const h of rivers) {
+        if (h === r || h.nodes[0].w < end.w * 0.5) continue;
+        for (const nd of h.nodes) {
+          const d = (nd.x - end.x) ** 2 + (nd.y - end.y) ** 2;
+          if (d < bd) { bd = d; best = nd; }
+        }
+      }
+      if (!best || bd > (o.belt * best.w + 3 * this.sim.grid.dx) ** 2) continue;
+      // the creek winds across the floodplain to wherever the river now runs
+      const L = Math.sqrt(bd);
+      const steps = Math.max(1, Math.ceil(L / (this.sim.grid.dx / 3)));
+      const ux = (best.x - end.x) / (L || 1), uy = (best.y - end.y) / (L || 1);
+      const extra = [];
+      for (let q = 1; q <= steps; q++) {
+        const t = q / steps;
+        const off = q < steps ? 0.15 * L * Math.sin(Math.PI * t) * fbm(t * 3, r.first, { wavelength: 1, octaves: 2, seed: this.seed + 9 }) : 0;
+        extra.push({ ...end, x: end.x + ux * L * t - uy * off, y: end.y + uy * L * t + ux * off, zw: Math.min(end.zw, best.zw) });
+      }
+      r.nodes = r.nodes.concat(extra);
+    }
+    for (const r of rivers) {
+      const c = curvature(r.nodes);
+      r.nodes.forEach((nd, k) => { nd.c = c[k]; });
+      r.wmax = Math.max(...r.nodes.map((nd) => nd.w));
+    }
+    // small rivers first, so bigger ones win where they overlap
+    rivers.sort((a, b2) => a.wmax - b2.wmax);
+    this.rivers = rivers;
+    this.oxbowCount = rivers.reduce((s, r) => s + r.oxbows.length, 0);
+  }
+
+  /**
+   * Render a window of the map.
+   * @param {object} o
+   * @param {number} o.x0 world x of the window's left edge (m)
+   * @param {number} o.y0 world y of the window's top edge (m)
+   * @param {number} o.width pixels
+   * @param {number} o.height pixels
+   * @param {number} o.pixel metres per pixel
+   * @returns {{x0, y0, width, height, pixel, z: Float32Array, level: Float32Array, cover: Uint8Array, rock: Uint8Array, shadeZ: Float32Array}}
+   */
+  render({ x0, y0, width, height, pixel }) {
+    const o = this.o;
+    // beaches need the distance to the shore, so work on a padded window
+    const pad = Math.ceil((o.beachWidth[1] + o.duneWidth[1] + 40) / pixel) + 2;
+    const W = width + 2 * pad, H = height + 2 * pad;
+    const N = W * H;
+    const X0 = x0 - pad * pixel, Y0 = y0 - pad * pixel;
+    const z = new Float32Array(N), level = new Float32Array(N).fill(-Infinity);
+    const cover = new Uint8Array(N).fill(255), soil = new Float32Array(N), veg = new Float32Array(N), slopeC = new Float32Array(N), aspectC = new Float32Array(N);
+    const sea = this.sea;
+    const coarse = this.sim.grid.dx;
+    const seed = this.seed;
+    // 1. base surface: smooth interpolation plus micro-relief scaled to the local relief
+    // (octaves down to about two pixels: finer would only alias)
+    const octaves = Math.max(2, Math.min(7, Math.round(Math.log2((1.5 * coarse) / (2 * pixel))) + 1));
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const k = j * W + i;
+        const x = X0 + (i + 0.5) * pixel, y = Y0 + (j + 0.5) * pixel;
+        let xw = x, yw = y;
+        if (this.warp) { const w = this.warp(x, y); xw += w[0]; yw += w[1]; }
+        const gr = this.z._gradient(xw, yw);
+        const s = Math.hypot(gr[0], gr[1]);
+        const zc = this.z._sample(xw, yw);
+        // micro-relief, scaled to the local relief; low flats by the sea stay flat (tidal
+        // flats, estuaries) rather than breaking up into speckled islands
+        let amp = o.microRelief + 0.25 * coarse * Math.min(s, 1);
+        if (sea != null) amp = Math.min(amp, 0.1 + amp * smooth01(0.5, 5, zc - sea));
+        z[k] = zc + amp * fbm(x, y, { wavelength: 1.5 * coarse, octaves, seed: seed + 101 });
+        soil[k] = Math.max(0, this.soil._linear(xw, yw));
+        if (x < this.hull.x0 || x > this.hull.x1 || y < this.hull.y0 || y > this.hull.y1) soil[k] = Math.max(soil[k], 0.1); // ragged hex edge
+        veg[k] = Math.min(1, Math.max(0, this.veg._linear(xw, yw)));
+        slopeC[k] = s;
+        aspectC[k] = (gr[0] - gr[1]) * Math.SQRT1_2; // > 0 facing south-west (uphill to the north-east)
+        // lakes the simulation filled
+        if (this.lake._linear(xw, yw) > 0.3) {
+          const lv = this.water._linear(xw, yw);
+          if (lv > z[k]) { level[k] = lv; cover[k] = COVER.lake; }
+        }
+      }
+    }
+    // 2. beaches and shorefaces on sandy coasts
+    if (sea != null) this._beaches({ z, level, cover, soil, slopeC, W, H, X0, Y0, pixel });
+    // 3. rivers and oxbows (river: 0..1 nearness to a river, for riparian vegetation)
+    const river = this._rivers({ z, level, cover, W, H, X0, Y0, pixel });
+    // 4. land cover and the sea
+    const tide = this.sim.params.coast?.tidalRange ?? 1;
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const k = j * W + i;
+        if (sea != null && z[k] < sea && level[k] < sea) level[k] = sea;
+        if (level[k] > z[k]) {
+          if (cover[k] === 255 || cover[k] === FLOODPLAIN || cover[k] === COVER.wetSand || cover[k] === COVER.sand) cover[k] = level[k] - z[k] > 3 ? COVER.deepWater : COVER.shallowWater;
+          continue;
+        }
+        if (cover[k] === FLOODPLAIN) {
+          const x = X0 + (i + 0.5) * pixel, y = Y0 + (j + 0.5) * pixel;
+          const f = fbm(x, y, { wavelength: 90, octaves: 3, seed: seed + 41 });
+          cover[k] = f > 0.25 ? COVER.forest : f < -0.35 ? COVER.marsh : COVER.grass;
+          continue;
+        }
+        if (cover[k] !== 255) continue; // already sand, gravel, marsh...
+        const x = X0 + (i + 0.5) * pixel, y = Y0 + (j + 0.5) * pixel;
+        // fine-scale slope, from this tile's surface
+        const zl = z[j * W + Math.max(0, i - 1)], zr = z[j * W + Math.min(W - 1, i + 1)];
+        const zu = z[Math.max(0, j - 1) * W + i], zd = z[Math.min(H - 1, j + 1) * W + i];
+        const s = Math.hypot(zr - zl, zd - zu) / (2 * pixel);
+        if (sea != null && z[k] < sea + tide / 2 && soil[k] > 0.2) { cover[k] = COVER.wetSand; continue; }
+        if (s > 1.2) { cover[k] = COVER.cliff; continue; }
+        // bare rock on steep ground, or thin soil on slopes; gentle bare valley floors are
+        // alluvium the coarse grid could not hold, so they get cover like their neighbours
+        if (s > 0.8 || (soil[k] < 0.08 && slopeC[k] > 0.08)) { cover[k] = COVER.rock; continue; }
+        // vegetation: the simulation's cover, broken into stands and clearings, wetter
+        // (more trees) along rivers and drier on steep, sunny (south-west facing) slopes
+        const patch = 0.35 * fbm(x, y, { wavelength: 260, octaves: 4, seed: seed + 7 });
+        const riparian = river[k] > 0 ? 0.25 * river[k] : 0;
+        const aspect = 0.6 * Math.max(0, aspectC[k]);
+        const v = veg[k] + patch + riparian - aspect;
+        cover[k] = v > 0.6 ? COVER.forest : v > 0.3 ? COVER.grass : COVER.scrub;
+      }
+    }
+    // rock type at the surface, for colour
+    const rock = new Uint8Array(N);
+    const g = this.sim.grid;
+    for (let j = 0; j < H; j += 1) {
+      for (let i = 0; i < W; i++) {
+        // clamped into the cell-centre hull, so the ragged hex edge takes its neighbours' rock
+        let px = X0 + (i + 0.5) * pixel, py = Y0 + (j + 0.5) * pixel;
+        if (this.warp) { const w = this.warp(px, py); px += w[0]; py += w[1]; }
+        const c = g.cellAt(Math.min(Math.max(px, g.x[0]), g.x[g.size - 1]), Math.min(Math.max(py, g.y[0]), g.y[g.size - 1]));
+        // the strata at this pixel's own elevation, so outcrops follow the contours
+        rock[j * W + i] = c >= 0 ? this.sim.lith.rockAt(c, z[j * W + i] - this.sim.upliftCum[c] - 0.5) : 0;
+      }
+    }
+    // crop the padding
+    const crop = (a, T) => { const out = new T(width * height); for (let j = 0; j < height; j++) out.set(a.subarray((j + pad) * W + pad, (j + pad) * W + pad + width), j * width); return out; };
+    return {
+      x0, y0, width, height, pixel,
+      z: crop(z, Float32Array), level: crop(level, Float32Array), cover: crop(cover, Uint8Array), rock: crop(rock, Uint8Array),
+    };
+  }
+
+  _beaches({ z, level, cover, soil, slopeC, W, H, X0, Y0, pixel }) {
+    const o = this.o;
+    const sea = this.sea;
+    const N = W * H;
+    const wet = new Uint8Array(N);
+    for (let k = 0; k < N; k++) wet[k] = z[k] < sea && level[k] === -Infinity ? 1 : 0;
+    const dLand = edt(wet, W, H, 1); // land pixels: distance to the sea (pixels)
+    const dSea = edt(wet, W, H, 0);  // sea pixels: distance to land
+    const cp = this.sim.params.coast || {};
+    const berm = (cp.tidalRange ?? 1) / 2 + 0.6 * (cp.waveHeight ?? 1);
+    const maxReach = (o.beachWidth[1] + o.duneWidth[1]) / pixel;
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const k = j * W + i;
+        const isSea = wet[k];
+        const dpx = Math.sqrt(isSea ? dSea[k] : dLand[k]);
+        if (!isSea && dpx > maxReach) continue;
+        if (isSea && dpx * pixel > 500) continue;
+        const x = X0 + (i + 0.5) * pixel, y = Y0 + (j + 0.5) * pixel;
+        // sandy where the simulation has sediment on gentle ground
+        const sand = smooth01(0.1, 1.0, this.soil.linear(x, y)) * (1 - smooth01(0.1, 0.3, slopeC[k]));
+        if (sand <= 0.02) continue;
+        const expo = Math.min(1, Math.max(0.2, this.waves.linear(x, y) * 1.5));
+        const yd = dpx * pixel;
+        if (isSea) {
+          // equilibrium shoreface, blending back into the simulated sea floor offshore
+          const dean = sea - o.shoreface * Math.pow(yd, 2 / 3);
+          const w = sand * (1 - smooth01(150, 500, yd));
+          z[k] = z[k] + (dean - z[k]) * w;
+          continue;
+        }
+        const bw = o.beachWidth[0] + (o.beachWidth[1] - o.beachWidth[0]) * expo;
+        const dw = (o.duneWidth[0] + (o.duneWidth[1] - o.duneWidth[0]) * expo) * sand;
+        const zBeach = sea + Math.min(berm, 0.07 * yd);
+        if (yd < bw) {
+          z[k] = z[k] + (zBeach - z[k]) * sand;
+          if (sand > 0.4) cover[k] = COVER.sand;
+        } else if (yd < bw + dw) {
+          const t = (yd - bw) / dw;
+          const ridges = Math.max(0, fbm(x, y, { wavelength: 45, octaves: 3, seed: this.seed + 211 }) + 0.25);
+          const dh = (o.duneHeight[0] + (o.duneHeight[1] - o.duneHeight[0]) * expo) * ridges * Math.sin(Math.PI * Math.min(1, t * 1.3));
+          const target = sea + berm + dh;
+          const wgt = sand * (1 - smooth01(0.6, 1, t));
+          z[k] = z[k] + (target - z[k]) * wgt;
+          if (wgt > 0.3) cover[k] = dh > 1 && fbm(x, y, { wavelength: 25, octaves: 2, seed: this.seed + 17 }) > 0 ? COVER.sand : COVER.duneGrass;
+        }
+      }
+    }
+  }
+
+  _rivers({ z, level, cover, W, H, X0, Y0, pixel }) {
+    const N = W * H;
+    // nearest river influence per pixel, in units of that river's half-width
+    const best = new Float32Array(N).fill(Infinity);
+    const half = new Float32Array(N), depth = new Float32Array(N), zw = new Float32Array(N);
+    const side = new Float32Array(N), curv = new Float32Array(N), reach = new Float32Array(N), kind = new Uint8Array(N);
+    const xmax = X0 + W * pixel, ymax = Y0 + H * pixel;
+    const stamp = (nodes, F, k0, scaleD, age) => {
+      for (let s = 1; s < nodes.length; s++) {
+        const a = nodes[s - 1], b = nodes[s];
+        const hw = 0.5 * Math.max(a.w, b.w);
+        const R = hw * (1 + F) + pixel;
+        const bx0 = Math.min(a.x, b.x) - R, bx1 = Math.max(a.x, b.x) + R;
+        const by0 = Math.min(a.y, b.y) - R, by1 = Math.max(a.y, b.y) + R;
+        if (bx1 < X0 || bx0 > xmax || by1 < Y0 || by0 > ymax) continue;
+        const i0 = Math.max(0, Math.floor((bx0 - X0) / pixel)), i1 = Math.min(W - 1, Math.ceil((bx1 - X0) / pixel));
+        const j0 = Math.max(0, Math.floor((by0 - Y0) / pixel)), j1 = Math.min(H - 1, Math.ceil((by1 - Y0) / pixel));
+        const ex = b.x - a.x, ey = b.y - a.y, L2 = ex * ex + ey * ey || 1;
+        for (let j = j0; j <= j1; j++) {
+          const py = Y0 + (j + 0.5) * pixel;
+          for (let i = i0; i <= i1; i++) {
+            const px = X0 + (i + 0.5) * pixel;
+            let t = ((px - a.x) * ex + (py - a.y) * ey) / L2;
+            t = t < 0 ? 0 : t > 1 ? 1 : t;
+            const cx = a.x + t * ex, cy = a.y + t * ey;
+            const d = Math.hypot(px - cx, py - cy);
+            const hwt = 0.5 * (a.w + t * (b.w - a.w));
+            const u = d / hwt;
+            const k = j * W + i;
+            if (u >= 1 + F || u >= best[k]) continue;
+            best[k] = u;
+            half[k] = hwt;
+            depth[k] = scaleD * (a.d + t * (b.d - a.d));
+            zw[k] = a.zw + t * (b.zw - a.zw);
+            // which side of the centre line (left = +1), for the asymmetric section
+            side[k] = (ex * (py - a.y) - ey * (px - a.x)) > 0 ? 1 : -1;
+            curv[k] = a.c + t * (b.c - a.c);
+            reach[k] = F;
+            kind[k] = k0 + (age > 0 ? Math.min(age, 3) : 0);
+          }
+        }
+      }
+    };
+    // floodplains of meandering rivers first: distance to the nearest centre line by a
+    // feature transform on a grid extended by the belt width (so tiles join up)
+    const near = new Float32Array(N);
+    this._floodplains({ z, cover, near, W, H, X0, Y0, pixel });
+    for (const r of this.rivers) {
+      const F = 1.2;
+      // oxbows: the newest are lakes, older ones marsh; older still have filled in and
+      // are not drawn (on the ground they would be faint scroll bars in the floodplain)
+      r.oxbows.forEach((ox, n) => {
+        const ageRank = r.oxbows.length - n; // 1 = newest
+        if (ageRank > this.o.oxbowsShown) return;
+        const age = ageRank <= this.o.oxbowsShown / 2 ? 1 : 2;
+        stamp(ox.nodes, 0.4, 1, age === 1 ? 0.7 : 0.35, age);
+      });
+      stamp(r.nodes, F, 0, 1, 0);
+    }
+    const sea = this.sea;
+    for (let k = 0; k < N; k++) {
+      const u = best[k];
+      if (u === Infinity) continue;
+      if (sea != null && z[k] < sea - 0.3) continue; // out at sea the channel is under water anyway
+      const D = depth[k], zk = zw[k];
+      if (kind[k] === 0) {
+        if (u < 1) {
+          // asymmetric bed: deeper towards the outer bank of a bend, a point bar inside.
+          // For a left turn (curvature > 0) the outer bank is on the right (side = -1).
+          const bend = Math.max(-1, Math.min(1, curv[k] * half[k] * 10));
+          const outer = -side[k] * bend * u; // > 0 towards the outer bank
+          const shape = Math.max(0, (1 - u * u) * (1 + 0.8 * outer));
+          const bed = zk - D * (0.15 + shape);
+          z[k] = Math.min(z[k], bed);
+          const low = zk - 0.55 * D; // low-flow stage: bars stand out of the water
+          if (low > z[k]) { if (low > level[k]) level[k] = low; cover[k] = COVER.river; } else cover[k] = half[k] > 8 ? COVER.sand : COVER.gravel;
+        } else {
+          // banks, natural levees, and the floodplain the river has levelled
+          const F = reach[k];
+          const levee = 0.3 * D * Math.exp(-(u - 1) * 2.5) * (half[k] > 0.5 * this.o.meanderMinWidth ? 1 : 0.4);
+          const target = zk + levee;
+          const wgt = 1 - smooth01(0, F, u - 1);
+          z[k] = z[k] > target ? z[k] + (target - z[k]) * wgt : z[k] + (target - z[k]) * wgt * 0.5;
+          // fresh sand on the inside of bends (the top of the point bar); the outer bank is
+          // a cut bank, vegetated to its edge
+          const bendB = Math.max(-1, Math.min(1, curv[k] * half[k] * 10));
+          const inner = side[k] * bendB > 0.15;
+          if (half[k] > 0.5 * this.o.meanderMinWidth && u < 1 + 0.8 * Math.abs(bendB) && inner && (cover[k] === 255 || cover[k] === FLOODPLAIN)) cover[k] = COVER.sand;
+        }
+      } else if (u < 1) {
+        // oxbow: an abandoned bend, deep (lake), filling (marsh) or nearly gone (scar)
+        const age = kind[k] - 1;
+        const bed = zk - D * (1 - u * u) - 0.2;
+        z[k] = Math.min(z[k], bed);
+        if (age <= 1) {
+          const lv = zk - 0.1;
+          if (lv > z[k]) { level[k] = Math.max(level[k], lv); cover[k] = COVER.lake; } else cover[k] = COVER.marsh;
+        } else cover[k] = COVER.marsh;
+      }
+    }
+    for (let k = 0; k < N; k++) if (best[k] < Infinity) near[k] = Math.max(near[k], 1 - Math.min(1, best[k] / (1 + reach[k])));
+    return near;
+  }
+
+  /** Level the meander belts into floodplains (meadow, wet woodland, marsh). */
+  _floodplains({ z, cover, near, W, H, X0, Y0, pixel }) {
+    const rivers = this.rivers.filter((r) => r.meandering);
+    if (!rivers.length) return;
+    const F = 2 * this.o.belt; // in half-widths
+    let wmax = 0;
+    for (const r of rivers) wmax = Math.max(wmax, r.wmax);
+    const M = Math.min(1500, Math.ceil((0.5 * wmax * (1 + F)) / pixel) + 1);
+    const We = W + 2 * M, He = H + 2 * M;
+    const site = new Int32Array(We * He).fill(-1);
+    const sZw = [], sHalf = [], sDepth = [];
+    const ex0 = X0 - M * pixel, ey0 = Y0 - M * pixel;
+    for (const r of rivers) {
+      for (let s2 = 1; s2 < r.nodes.length; s2++) {
+        const a = r.nodes[s2 - 1], b = r.nodes[s2];
+        const L = Math.hypot(b.x - a.x, b.y - a.y);
+        const steps = Math.max(1, Math.ceil(L / (0.5 * pixel)));
+        for (let q = 0; q <= steps; q++) {
+          const t = q / steps;
+          const i = Math.floor((a.x + t * (b.x - a.x) - ex0) / pixel), j = Math.floor((a.y + t * (b.y - a.y) - ey0) / pixel);
+          if (i < 0 || j < 0 || i >= We || j >= He) continue;
+          const k = j * We + i;
+          if (site[k] >= 0) continue;
+          site[k] = sZw.length;
+          sZw.push(a.zw + t * (b.zw - a.zw));
+          sHalf.push(0.5 * (a.w + t * (b.w - a.w)));
+          sDepth.push(a.d + t * (b.d - a.d));
+        }
+      }
+    }
+    if (!sZw.length) return;
+    const { d2, nearest } = featureTransform(site, We, He);
+    for (let j = 0; j < H; j++) {
+      for (let i = 0; i < W; i++) {
+        const ke = (j + M) * We + (i + M);
+        const id = nearest[ke];
+        if (id < 0) continue;
+        const u = (Math.sqrt(d2[ke]) * pixel) / sHalf[id];
+        if (u >= 1 + F) continue;
+        const k = j * W + i;
+        // levelled, not planed flat: some of the old relief survives, and the plain rises
+        // gently away from the river
+        // and bounded by the valley walls: ground well above the river is left alone
+        const reachUp = sDepth[id] + 0.6 * sHalf[id] + 1;
+        // (but right beside the channel the ground is always levelled: where a bend swings
+        // into high ground it cuts a bluff, not a slot)
+        const far = smooth01(2, 4, u);
+        const walls = 1 - far * smooth01(0.5 * reachUp, 1.5 * reachUp, z[k] - sZw[id]);
+        const wgt = (1 - 0.15 * far) * (1 - smooth01(0.3 * F, F, u - 1)) * walls;
+        const target = sZw[id] + 0.1 + 0.002 * u * sHalf[id];
+        if (z[k] > target) z[k] += (target - z[k]) * wgt;
+        if (wgt > 0.45 && cover[k] === 255) cover[k] = FLOODPLAIN;
+        near[k] = Math.max(near[k], 0.6 * wgt);
+      }
+    }
+  }
+}
+
+/**
+ * Squared Euclidean distance (pixels^2) from every pixel to the nearest pixel whose mask
+ * value equals `target`: the exact separable transform of Felzenszwalb & Huttenlocher
+ * (2012, Theory of Computing 8).
+ */
+function edt(mask, W, H, target) {
+  const INF = 1e20;
+  const f = new Float64Array(Math.max(W, H));
+  const d = new Float64Array(W * H);
+  for (let k = 0; k < W * H; k++) d[k] = mask[k] === target ? 0 : INF;
+  const v = new Int32Array(Math.max(W, H));
+  const zz = new Float64Array(Math.max(W, H) + 1);
+  const out = new Float64Array(Math.max(W, H));
+  const pass = (n, get, set) => {
+    for (let q = 0; q < n; q++) f[q] = get(q);
+    let k = 0;
+    v[0] = 0; zz[0] = -INF; zz[1] = INF;
+    for (let q = 1; q < n; q++) {
+      let s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      while (s <= zz[k]) { k--; s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]); }
+      k++; v[k] = q; zz[k] = s; zz[k + 1] = INF;
+    }
+    k = 0;
+    for (let q = 0; q < n; q++) { while (zz[k + 1] < q) k++; out[q] = (q - v[k]) ** 2 + f[v[k]]; }
+    for (let q = 0; q < n; q++) set(q, out[q]);
+  };
+  for (let x = 0; x < W; x++) pass(H, (q) => d[q * W + x], (q, val) => { d[q * W + x] = val; });
+  for (let y = 0; y < H; y++) pass(W, (q) => d[y * W + q], (q, val) => { d[y * W + q] = val; });
+  return d;
+}
+
+/**
+ * Exact Euclidean feature transform: for every pixel, the squared distance (pixels^2) to
+ * the nearest site (site >= 0) and that site's id. Felzenszwalb & Huttenlocher's
+ * separable algorithm, carrying the site along.
+ */
+function featureTransform(site, W, H) {
+  const INF = 1e20;
+  const n = W * H;
+  const d2 = new Float64Array(n);
+  const nearest = new Int32Array(n);
+  for (let k = 0; k < n; k++) { d2[k] = site[k] >= 0 ? 0 : INF; nearest[k] = site[k]; }
+  const len = Math.max(W, H);
+  const f = new Float64Array(len), id = new Int32Array(len), v = new Int32Array(len), zz = new Float64Array(len + 1);
+  const outD = new Float64Array(len), outI = new Int32Array(len);
+  const pass = (count, base, stride) => {
+    for (let q = 0; q < count; q++) { f[q] = d2[base + q * stride]; id[q] = nearest[base + q * stride]; }
+    let k = 0;
+    v[0] = 0; zz[0] = -INF; zz[1] = INF;
+    for (let q = 1; q < count; q++) {
+      let s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]);
+      while (s <= zz[k]) { k--; s = ((f[q] + q * q) - (f[v[k]] + v[k] * v[k])) / (2 * q - 2 * v[k]); }
+      k++; v[k] = q; zz[k] = s; zz[k + 1] = INF;
+    }
+    k = 0;
+    for (let q = 0; q < count; q++) { while (zz[k + 1] < q) k++; outD[q] = (q - v[k]) ** 2 + f[v[k]]; outI[q] = id[v[k]]; }
+    for (let q = 0; q < count; q++) { d2[base + q * stride] = outD[q]; nearest[base + q * stride] = outI[q]; }
+  };
+  for (let x = 0; x < W; x++) pass(H, x, W);
+  for (let y = 0; y < H; y++) pass(W, y * W, 1);
+  for (let k = 0; k < n; k++) if (d2[k] >= INF) nearest[k] = -1;
+  return { d2, nearest };
+}
+
+const COVER_RGB = [
+  [22, 52, 98], [52, 102, 150], [58, 108, 140], [52, 96, 128], [176, 160, 120], [222, 206, 158], [168, 160, 146], [104, 116, 82],
+  [168, 172, 112], [128, 152, 84], [150, 140, 96], [58, 92, 50], [150, 142, 132], [104, 96, 90],
+];
+
+/**
+ * Colour a rendered tile: land cover, lit by a hillshade of the detailed surface; water
+ * by depth; forest canopies broken into crowns.
+ * @returns {Uint8ClampedArray} RGBA
+ */
+function detailColors(detail, tile, rgba) {
+  const { width: W, height: H, pixel, z, level, cover, rock, x0, y0 } = tile;
+  rgba = rgba || new Uint8ClampedArray(4 * W * H);
+  const L = [-0.5, -0.5, Math.SQRT1_2];
+  const seed = detail.seed;
+  for (let j = 0; j < H; j++) {
+    for (let i = 0; i < W; i++) {
+      const k = j * W + i;
+      const zl = z[j * W + Math.max(0, i - 1)], zr = z[j * W + Math.min(W - 1, i + 1)];
+      const zu = z[Math.max(0, j - 1) * W + i], zd = z[Math.min(H - 1, j + 1) * W + i];
+      const gx = (zr - zl) / (2 * pixel), gy = (zd - zu) / (2 * pixel);
+      const shade = Math.max(0, (-gx * L[0] - gy * L[1] + L[2]) / Math.sqrt(gx * gx + gy * gy + 1));
+      const c = cover[k];
+      let col;
+      if (level[k] > z[k]) {
+        const dep = level[k] - z[k];
+        const base = COVER_RGB[c] || COVER_RGB[COVER.shallowWater];
+        const t = Math.min(1, dep / (c === COVER.river ? 4 : c === COVER.lake ? 2 : 12));
+        // shallow water shows a sandy bed
+        col = [0, 1, 2].map((m) => base[m] * t + COVER_RGB[COVER.sand][m] * (1 - t) * 0.6 + base[m] * (1 - t) * 0.4);
+        col = col.map((v) => v * (0.9 + 0.15 * shade));
+      } else {
+        col = c === COVER.rock || c === COVER.cliff ? detail.rockColor[rock[k]].map((v) => v * (c === COVER.cliff ? 0.75 : 1)) : (COVER_RGB[c] || COVER_RGB[COVER.grass]).slice();
+        if (c === COVER.forest) {
+          // tree crowns: cellular (Worley-like) noise, crowns ~6 m across
+          const wx = (x0 + (i + 0.5) * pixel) / 6, wy = (y0 + (j + 0.5) * pixel) / 6;
+          const f = crown(wx, wy, seed);
+          col = col.map((v) => v * (0.7 + 0.55 * f));
+        } else if (c === COVER.grass || c === COVER.scrub || c === COVER.duneGrass) {
+          const n = fbm(x0 + i * pixel, y0 + j * pixel, { wavelength: 18, octaves: 2, seed: seed + 3 });
+          col = col.map((v) => v * (0.93 + 0.12 * n));
+        }
+        col = col.map((v) => v * (0.45 + 0.7 * shade));
+      }
+      rgba[4 * k] = col[0]; rgba[4 * k + 1] = col[1]; rgba[4 * k + 2] = col[2]; rgba[4 * k + 3] = 255;
+    }
+  }
+  return rgba;
+}
+
+/** Brightness of a tree crown at (x, y) in crown units: 1 at a crown's centre, 0 between. */
+function crown(x, y, seed) {
+  const ix = Math.floor(x), iy = Math.floor(y);
+  let d1 = 9;
+  for (let a = -1; a <= 1; a++) {
+    for (let b = -1; b <= 1; b++) {
+      const cx = ix + a, cy = iy + b;
+      let h = Math.imul(cx, 0x27d4eb2d) ^ Math.imul(cy, 0x165667b1) ^ Math.imul(seed, 0x9e3779b1);
+      h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+      const px = cx + ((h >>> 8) & 255) / 255, py = cy + ((h >>> 16) & 255) / 255;
+      const d = (px - x) ** 2 + (py - y) ** 2;
+      if (d < d1) d1 = d;
+    }
+  }
+  return Math.max(0, 1 - Math.sqrt(d1) * 1.4);
 }
 
 // ---- src/render.js ----
@@ -5515,6 +6713,9 @@ let stack = [];
 let zoomPending = false;
 let lastPatch = null; // { parent, bounds | outline } of the most recently left child, drawn on its parent
 let globe = { lon: 0, lat: 15 };
+// walking-scale detail of the current landscape: built on demand, panned by dragging
+let detail = null;
+let detailView = { x: 0, y: 0 };
 const mapCanvas = $('map');
 const mapCtx = mapCanvas.getContext('2d');
 const secCanvas = $('section');
@@ -5688,6 +6889,7 @@ function syncControls() {
   refreshJson();
   updateExtent();
   syncZoom();
+  syncDetailControls();
 }
 
 function levelName(s) {
@@ -5707,6 +6909,7 @@ function syncZoom() {
 
 function setSim(next) {
   sim = next;
+  clearDetail();
   $('hover').innerHTML = '&nbsp;';
   if (isPlanet(sim)) fillPlanetInputs(sim.params); else fillGridInputs(sim.params);
   sectionRow = isPlanet(sim) ? null : sim.grid.rows >> 1;
@@ -5757,6 +6960,7 @@ function planetOverrides() {
 }
 
 function restart(params) {
+  clearDetail();
   try {
     sim = params.subdivisions != null ? new Planet(params) : new Simulation(params);
   } catch (e) {
@@ -5890,6 +7094,7 @@ function draw() {
   } else {
     $('zoom-compare').textContent = '';
   }
+  if (detail) drawDetailFrame();
 }
 
 /** The plate boundaries a planet patch inherited, and the faults made from them. */
@@ -6060,6 +7265,14 @@ mapCanvas.addEventListener('click', (ev) => {
   if (isPlanet(sim)) sectionLat = deg(sim.mesh.lat[i]);
   else sectionRow = sim.grid.row(i);
   draw();
+  if (detail) {
+    const r = mapCanvas.getBoundingClientRect();
+    detailView = {
+      x: pm.x0 + (((ev.clientX - r.left) / r.width) * mapCanvas.width) / pm.scale,
+      y: pm.y0 + (((ev.clientY - r.top) / r.height) * mapCanvas.height) / pm.scale,
+    };
+    renderDetail();
+  }
 });
 
 /** Outline of a planet patch as longitude/latitude points, for drawing on the planet. */
@@ -6187,6 +7400,105 @@ $('load').addEventListener('change', async (ev) => {
   } catch (e) {
     $('json-error').textContent = e.message;
   }
+});
+
+// ------------------------------------------------------------------ walking-scale detail
+
+const detCanvas = $('detail');
+const detCtx = detCanvas.getContext('2d');
+
+function clearDetail() {
+  detail = null;
+  detCanvas.hidden = true;
+  $('detail-info').textContent = '';
+  $('detail-build').disabled = false;
+}
+
+function syncDetailControls() {
+  const planet = isPlanet(sim);
+  $('detail-build').disabled = planet;
+  if (planet) $('detail-info').textContent = 'Detail works on a landscape: zoom in from the planet first.';
+}
+
+$('detail-build').addEventListener('click', () => {
+  if (isPlanet(sim)) return;
+  $('detail-info').textContent = 'Building the river network and letting the big rivers meander…';
+  setTimeout(() => {
+    try {
+      const t0 = performance.now();
+      detail = new Detail(sim);
+      const big = detail.rivers[detail.rivers.length - 1];
+      detail.summary = `built at t = ${(sim.time / 1000).toFixed(1)} kyr in ${((performance.now() - t0) / 1000).toFixed(1)} s: ` +
+        `${detail.rivers.length} streams` + (big ? `, the widest ${big.wmax.toFixed(0)} m` + (big.meandering ? ` (sinuosity ${big.sinuosity.toFixed(2)})` : '') : '') +
+        `, ${detail.oxbowCount} cut-off bends. Rebuild after running on.`;
+      // start on the widest river's tightest bend, or the middle
+      const b = detail.bounds;
+      detailView = { x: (b.xmin + b.xmax) / 2, y: (b.ymin + b.ymax) / 2 };
+      if (big) {
+        let best = big.nodes[Math.floor(big.nodes.length / 2)];
+        for (const nd of big.nodes) if (Math.abs(nd.c) > Math.abs(best.c)) best = nd;
+        detailView = { x: best.x, y: best.y };
+      }
+      renderDetail();
+    } catch (e) {
+      $('detail-info').textContent = e.message;
+    }
+  }, 20);
+});
+$('detail-pixel').addEventListener('change', () => { if (detail) renderDetail(); });
+
+function renderDetail() {
+  if (!detail) return;
+  const W = Math.round(Math.max(200, $('detail-wrap').clientWidth));
+  const H = Math.round(Math.min(560, W * 0.6));
+  if (detCanvas.width !== W || detCanvas.height !== H) { detCanvas.width = W; detCanvas.height = H; }
+  detCanvas.hidden = false;
+  const p = +$('detail-pixel').value;
+  const t0 = performance.now();
+  const tile = detail.render({ x0: detailView.x - (W / 2) * p, y0: detailView.y - (H / 2) * p, width: W, height: H, pixel: p });
+  const img = detCtx.createImageData(W, H);
+  detailColors(detail, tile, img.data);
+  detCtx.putImageData(img, 0, 0);
+  // a 50 m scale bar
+  const bar = 50 / p;
+  detCtx.fillStyle = 'rgba(0,0,0,0.55)';
+  detCtx.fillRect(10, H - 26, bar + 12, 18);
+  detCtx.fillStyle = '#fff';
+  detCtx.fillRect(16, H - 15, bar, 3);
+  detCtx.font = '11px system-ui, sans-serif';
+  detCtx.fillText('50 m', 16, H - 18);
+  $('detail-info').textContent = `${detail.summary}  View ${(W * p).toFixed(0)} × ${(H * p).toFixed(0)} m, rendered in ${(performance.now() - t0).toFixed(0)} ms.`;
+  draw(); // outlines the window on the map
+}
+
+/** Outline the detail window on the main map. */
+function drawDetailFrame() {
+  if (!detail || isPlanet(sim)) return;
+  const p = +$('detail-pixel').value;
+  const w = detCanvas.width * p, h = detCanvas.height * p;
+  mapCtx.strokeStyle = 'rgba(255,240,120,0.95)';
+  mapCtx.lineWidth = 2;
+  mapCtx.strokeRect((detailView.x - w / 2 - pm.x0) * pm.scale, (detailView.y - h / 2 - pm.y0) * pm.scale, w * pm.scale, h * pm.scale);
+}
+
+let detDrag = null;
+detCanvas.addEventListener('pointerdown', (ev) => {
+  detDrag = { x: ev.clientX, y: ev.clientY, vx: detailView.x, vy: detailView.y };
+  detCanvas.setPointerCapture(ev.pointerId);
+});
+detCanvas.addEventListener('pointermove', (ev) => {
+  if (!detDrag) return;
+  const r = detCanvas.getBoundingClientRect();
+  const p = +$('detail-pixel').value * (detCanvas.width / r.width);
+  detailView = { x: detDrag.vx - (ev.clientX - detDrag.x) * p, y: detDrag.vy - (ev.clientY - detDrag.y) * p };
+  // while dragging, slide the last image; render properly on release
+  detCanvas.style.transform = `translate(${ev.clientX - detDrag.x}px, ${ev.clientY - detDrag.y}px)`;
+});
+detCanvas.addEventListener('pointerup', () => {
+  if (!detDrag) return;
+  detDrag = null;
+  detCanvas.style.transform = '';
+  renderDetail();
 });
 
 let resizeTimer;

@@ -7,7 +7,7 @@
 import {
   Simulation, PRESETS, VIEWS, resolveParams, cellColors, pixelMap, paint, crossSection, zoomIn, compareWithParent,
   Planet, PLANET_PRESETS, PLANET_VIEWS, resolvePlanetParams, planetColors, spherePixelMap, planetSection, plateColor,
-  zoomFromPlanet, azimuthalProjection, lonLatToVector,
+  zoomFromPlanet, azimuthalProjection, lonLatToVector, Detail, detailColors,
 } from '../src/index.js';
 
 const $ = (id) => document.getElementById(id);
@@ -70,6 +70,9 @@ let stack = [];
 let zoomPending = false;
 let lastPatch = null; // { parent, bounds | outline } of the most recently left child, drawn on its parent
 let globe = { lon: 0, lat: 15 };
+// walking-scale detail of the current landscape: built on demand, panned by dragging
+let detail = null;
+let detailView = { x: 0, y: 0 };
 const mapCanvas = $('map');
 const mapCtx = mapCanvas.getContext('2d');
 const secCanvas = $('section');
@@ -243,6 +246,7 @@ function syncControls() {
   refreshJson();
   updateExtent();
   syncZoom();
+  syncDetailControls();
 }
 
 function levelName(s) {
@@ -262,6 +266,7 @@ function syncZoom() {
 
 function setSim(next) {
   sim = next;
+  clearDetail();
   $('hover').innerHTML = '&nbsp;';
   if (isPlanet(sim)) fillPlanetInputs(sim.params); else fillGridInputs(sim.params);
   sectionRow = isPlanet(sim) ? null : sim.grid.rows >> 1;
@@ -312,6 +317,7 @@ function planetOverrides() {
 }
 
 function restart(params) {
+  clearDetail();
   try {
     sim = params.subdivisions != null ? new Planet(params) : new Simulation(params);
   } catch (e) {
@@ -445,6 +451,7 @@ function draw() {
   } else {
     $('zoom-compare').textContent = '';
   }
+  if (detail) drawDetailFrame();
 }
 
 /** The plate boundaries a planet patch inherited, and the faults made from them. */
@@ -615,6 +622,14 @@ mapCanvas.addEventListener('click', (ev) => {
   if (isPlanet(sim)) sectionLat = deg(sim.mesh.lat[i]);
   else sectionRow = sim.grid.row(i);
   draw();
+  if (detail) {
+    const r = mapCanvas.getBoundingClientRect();
+    detailView = {
+      x: pm.x0 + (((ev.clientX - r.left) / r.width) * mapCanvas.width) / pm.scale,
+      y: pm.y0 + (((ev.clientY - r.top) / r.height) * mapCanvas.height) / pm.scale,
+    };
+    renderDetail();
+  }
 });
 
 /** Outline of a planet patch as longitude/latitude points, for drawing on the planet. */
@@ -742,6 +757,105 @@ $('load').addEventListener('change', async (ev) => {
   } catch (e) {
     $('json-error').textContent = e.message;
   }
+});
+
+// ------------------------------------------------------------------ walking-scale detail
+
+const detCanvas = $('detail');
+const detCtx = detCanvas.getContext('2d');
+
+function clearDetail() {
+  detail = null;
+  detCanvas.hidden = true;
+  $('detail-info').textContent = '';
+  $('detail-build').disabled = false;
+}
+
+function syncDetailControls() {
+  const planet = isPlanet(sim);
+  $('detail-build').disabled = planet;
+  if (planet) $('detail-info').textContent = 'Detail works on a landscape: zoom in from the planet first.';
+}
+
+$('detail-build').addEventListener('click', () => {
+  if (isPlanet(sim)) return;
+  $('detail-info').textContent = 'Building the river network and letting the big rivers meander…';
+  setTimeout(() => {
+    try {
+      const t0 = performance.now();
+      detail = new Detail(sim);
+      const big = detail.rivers[detail.rivers.length - 1];
+      detail.summary = `built at t = ${(sim.time / 1000).toFixed(1)} kyr in ${((performance.now() - t0) / 1000).toFixed(1)} s: ` +
+        `${detail.rivers.length} streams` + (big ? `, the widest ${big.wmax.toFixed(0)} m` + (big.meandering ? ` (sinuosity ${big.sinuosity.toFixed(2)})` : '') : '') +
+        `, ${detail.oxbowCount} cut-off bends. Rebuild after running on.`;
+      // start on the widest river's tightest bend, or the middle
+      const b = detail.bounds;
+      detailView = { x: (b.xmin + b.xmax) / 2, y: (b.ymin + b.ymax) / 2 };
+      if (big) {
+        let best = big.nodes[Math.floor(big.nodes.length / 2)];
+        for (const nd of big.nodes) if (Math.abs(nd.c) > Math.abs(best.c)) best = nd;
+        detailView = { x: best.x, y: best.y };
+      }
+      renderDetail();
+    } catch (e) {
+      $('detail-info').textContent = e.message;
+    }
+  }, 20);
+});
+$('detail-pixel').addEventListener('change', () => { if (detail) renderDetail(); });
+
+function renderDetail() {
+  if (!detail) return;
+  const W = Math.round(Math.max(200, $('detail-wrap').clientWidth));
+  const H = Math.round(Math.min(560, W * 0.6));
+  if (detCanvas.width !== W || detCanvas.height !== H) { detCanvas.width = W; detCanvas.height = H; }
+  detCanvas.hidden = false;
+  const p = +$('detail-pixel').value;
+  const t0 = performance.now();
+  const tile = detail.render({ x0: detailView.x - (W / 2) * p, y0: detailView.y - (H / 2) * p, width: W, height: H, pixel: p });
+  const img = detCtx.createImageData(W, H);
+  detailColors(detail, tile, img.data);
+  detCtx.putImageData(img, 0, 0);
+  // a 50 m scale bar
+  const bar = 50 / p;
+  detCtx.fillStyle = 'rgba(0,0,0,0.55)';
+  detCtx.fillRect(10, H - 26, bar + 12, 18);
+  detCtx.fillStyle = '#fff';
+  detCtx.fillRect(16, H - 15, bar, 3);
+  detCtx.font = '11px system-ui, sans-serif';
+  detCtx.fillText('50 m', 16, H - 18);
+  $('detail-info').textContent = `${detail.summary}  View ${(W * p).toFixed(0)} × ${(H * p).toFixed(0)} m, rendered in ${(performance.now() - t0).toFixed(0)} ms.`;
+  draw(); // outlines the window on the map
+}
+
+/** Outline the detail window on the main map. */
+function drawDetailFrame() {
+  if (!detail || isPlanet(sim)) return;
+  const p = +$('detail-pixel').value;
+  const w = detCanvas.width * p, h = detCanvas.height * p;
+  mapCtx.strokeStyle = 'rgba(255,240,120,0.95)';
+  mapCtx.lineWidth = 2;
+  mapCtx.strokeRect((detailView.x - w / 2 - pm.x0) * pm.scale, (detailView.y - h / 2 - pm.y0) * pm.scale, w * pm.scale, h * pm.scale);
+}
+
+let detDrag = null;
+detCanvas.addEventListener('pointerdown', (ev) => {
+  detDrag = { x: ev.clientX, y: ev.clientY, vx: detailView.x, vy: detailView.y };
+  detCanvas.setPointerCapture(ev.pointerId);
+});
+detCanvas.addEventListener('pointermove', (ev) => {
+  if (!detDrag) return;
+  const r = detCanvas.getBoundingClientRect();
+  const p = +$('detail-pixel').value * (detCanvas.width / r.width);
+  detailView = { x: detDrag.vx - (ev.clientX - detDrag.x) * p, y: detDrag.vy - (ev.clientY - detDrag.y) * p };
+  // while dragging, slide the last image; render properly on release
+  detCanvas.style.transform = `translate(${ev.clientX - detDrag.x}px, ${ev.clientY - detDrag.y}px)`;
+});
+detCanvas.addEventListener('pointerup', () => {
+  if (!detDrag) return;
+  detDrag = null;
+  detCanvas.style.transform = '';
+  renderDetail();
 });
 
 let resizeTimer;

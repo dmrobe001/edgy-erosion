@@ -12,3 +12,5 @@ export { checkMesh, GraphMesh } from './mesh.js';
 export { SphereMesh, azimuthalProjection, lonLatToVector, vectorToLonLat } from './sphere.js';
 export { Planet, PLANET_DEFAULTS, PLANET_PRESETS, resolvePlanetParams } from './planet.js';
 export { zoomIn, zoomFromPlanet, compareWithParent, interpolator, regionalErosionParams } from './nest.js';
+export { Detail, DETAIL_DEFAULTS, COVER, detailColors } from './detail.js';
+export { migrate } from './meander.js';
