@@ -168,6 +168,19 @@ export const DEFAULTS = {
     closureDepth: 10,            // depth (m) below which waves barely move sediment (e-folding)
     maxSubsteps: 60,             // cap on diffusion substeps per step (D is reduced if it binds)
   },
+  // Faults that slip in discrete earthquakes (see processes/earthquakes.js). Positions are
+  // fractions of the reference frame and may lie outside [0, 1] (a fault longer than the
+  // domain). The side LEFT of the trace direction (x0,y0)->(x1,y1) is raised.
+  // e.g. { x0: -1, y0: 0.5, x1: 2, y1: 0.45, dip: 60, slipRate: 2e-3 }
+  earthquakes: {
+    enabled: true,
+    faults: [],
+    bValue: 1.0,                 // Gutenberg-Richter b: 10x fewer events per magnitude unit
+    minMagnitude: 5.5,           // smallest surface-rupturing event
+    maxMagnitude: 7.5,           // largest event
+    upliftShare: 0.3,            // share of the throw taken by the raised side (rest: the other side drops)
+    coseismicWeakening: 0.3,     // cliffs' critical height cut by this x shaking during an event
+  },
   rockfall: {
     enabled: true,
     rockDensity: 2600,           // kg/m^3
@@ -250,6 +263,26 @@ export const PRESETS = {
     strata: { layers: [{ rock: 'limestone', thickness: 1e9 }] },
     climate: { precipitation: 0.4, frost: 0.5 },
     vegetation: { halfSaturation: 0.8 },
+  },
+  'earthquake-scarp': {
+    description: 'A normal fault slipping in earthquakes of magnitude 5.5 to 7.3: each one adds a fresh step to a growing range front that creep and gullies wear back, with shaken cliffs collapsing.',
+    time: { dt: 250 },
+    initial: { type: 'flat', height: 0, base: 0, noise: { amplitude: 5, wavelength: 800 }, soil: 0.5 },
+    uplift: { rate: 0 },
+    boundary: { open: ['south', 'east', 'west'] },
+    strata: {
+      layers: [{ rock: 'limestone', thickness: 40 }, { rock: 'shale', thickness: 25 }],
+      top: 0, repeat: true, dip: 8, dipDirection: 270,
+    },
+    earthquakes: {
+      faults: [{ x0: -2, y0: 0.42, x1: 3, y1: 0.5, dip: 60, slipRate: 2.5e-3 }],
+      maxMagnitude: 7.3,
+      upliftShare: 1, // throw measured against the basin, which sediment keeps level
+    },
+    climate: { precipitation: 0.4, frost: 0.5 },
+    vegetation: { halfSaturation: 0.8 },
+    fluvial: { deposition: 1.0 },
+    rockfall: { timescale: 2000 },
   },
   'badlands': {
     description: 'Weak shale and siltstone, no vegetation, dry climate with intense storms: dense gullies and sharp knife-edge ridges.',
@@ -377,6 +410,14 @@ export function validate(p) {
   });
   needRock(p.strata.basement, 'strata.basement');
   p.bodies.forEach((b, k) => needRock(b.rock, `bodies[${k}]`));
+  const eq = p.earthquakes;
+  if (!(eq.maxMagnitude > eq.minMagnitude)) fail('earthquakes.maxMagnitude must exceed minMagnitude');
+  if (!(eq.bValue > 0)) fail('earthquakes.bValue must be positive');
+  eq.faults.forEach((f, k) => {
+    for (const c of ['x0', 'y0', 'x1', 'y1']) if (!Number.isFinite(f[c])) fail(`earthquakes.faults[${k}].${c} must be a number`);
+    if (!(f.slipRate >= 0)) fail(`earthquakes.faults[${k}].slipRate must be >= 0`);
+    if (f.dip != null && !(f.dip > 0 && f.dip <= 90)) fail(`earthquakes.faults[${k}].dip must be in (0, 90]`);
+  });
   const sides = ['north', 'south', 'east', 'west'];
   for (const s of p.boundary.open) if (!sides.includes(s)) fail(`boundary.open: unknown side "${s}"`);
   if (!p.boundary.open.length && p.boundary.seaLevel == null) {

@@ -84,6 +84,8 @@ export function fluvial(sim, dt) {
   else qs.fill(0);
   const qsOut = sim.qsOut;
   qsOut.fill(0);
+  const lost = sim.exportedAt; // volume (m^3) leaving the domain at each outlet this step
+  if (lost) lost.fill(0);
   let exported = 0;
   for (let s = n - 1; s >= 0; s--) {
     const i = order[s];
@@ -108,7 +110,10 @@ export function fluvial(sim, dt) {
     qsOut[i] = out;
     const r = receiver[i];
     if (r >= 0) qs[r] += out;
-    else exported += out * dt;
+    else {
+      exported += out * dt;
+      if (lost) lost[i] = out * dt;
+    }
   }
   sim.qs = qs;
   for (let i = 0; i < n; i++) z[i] = rock[i] + soil[i];

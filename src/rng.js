@@ -72,3 +72,43 @@ export function fbm(x, y, { wavelength, octaves = 4, gain = 0.5, seed = 0 }) {
   }
   return sum / norm;
 }
+
+/** Integer hash of a 3-D lattice point and a seed, returning a float in [-1, 1]. */
+function hash3(ix, iy, iz, seed) {
+  let h = Math.imul(ix, 0x27d4eb2d) ^ Math.imul(iy, 0x165667b1) ^ Math.imul(iz, 0x1b873593) ^ Math.imul(seed, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 2147483647.5 - 1;
+}
+
+/** Value noise on the unit cube lattice (trilinear with C2 fade), range ~[-1, 1]. */
+export function valueNoise3(x, y, z, seed) {
+  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+  const u = fade(x - x0), v = fade(y - y0), w = fade(z - z0);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const c = (dx, dy, dz) => hash3(x0 + dx, y0 + dy, z0 + dz, seed);
+  return lerp(
+    lerp(lerp(c(0, 0, 0), c(1, 0, 0), u), lerp(c(0, 1, 0), c(1, 1, 0), u), v),
+    lerp(lerp(c(0, 0, 1), c(1, 0, 1), u), lerp(c(0, 1, 1), c(1, 1, 1), u), v),
+    w,
+  );
+}
+
+/**
+ * Fractal noise in 3-D, for fields on a sphere (sample it at points of the sphere, so
+ * there is no seam at the date line and no pinching at the poles).
+ */
+export function fbm3(x, y, z, { wavelength, octaves = 4, gain = 0.5, seed = 0 }) {
+  let sum = 0;
+  let amp = 1;
+  let norm = 0;
+  let f = 1 / wavelength;
+  for (let k = 0; k < octaves; k++) {
+    sum += amp * valueNoise3(x * f, y * f, z * f, seed + 1013 * k);
+    norm += amp;
+    amp *= gain;
+    f *= 2;
+  }
+  return sum / norm;
+}

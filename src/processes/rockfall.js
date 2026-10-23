@@ -21,6 +21,10 @@
 // swap order) and dumped as loose debris (soil) on the lower cell, where the
 // avalanche step spreads it into a talus slope.
 //
+// Earthquake shaking (sim.shaking, 0..1, see earthquakes.js) lowers the critical height
+// by a factor (1 - coseismicWeakening x shaking) and raises the failure probability
+// for the step towards 1, so strong shaking brings down cliffs that were close to failing.
+//
 // Grid-scale caveat: cliffs lower than about dx * tan(phi) cannot be represented as
 // unstable faces, so rockfall only "switches on" when dx is small compared with the
 // cliff heights the rock can sustain.
@@ -47,6 +51,8 @@ export function rockfall(sim, dt) {
   const { dist, area } = grid;
   const rate = (1 / rp.timescale) * (1 + rp.frostFactor * sim.params.climate.frost);
   const pFail = 1 - Math.exp(-rate * dt);
+  const shaking = sim.shaking;
+  const weaken = sim.params.earthquakes?.coseismicWeakening ?? 0;
   let events = 0;
   let volume = 0;
 
@@ -73,8 +79,9 @@ export function rockfall(sim, dt) {
     if (rockFace <= 0) continue;
     const beta = Math.atan(drop / L);
     const { cohesion, phi } = lith.meanStrength(i, zj - upliftCum[i], rock[i] - upliftCum[i]);
-    if (drop <= culmannHeight(beta, cohesion, phi, rp.rockDensity)) continue;
-    if (rng.next() >= pFail) continue;
+    const sh = shaking ? shaking[i] : 0;
+    if (drop <= culmannHeight(beta, cohesion, phi, rp.rockDensity) * (1 - weaken * sh)) continue;
+    if (rng.next() >= pFail + (1 - pFail) * sh) continue;
 
     const stableDrop = L * Math.tan(0.5 * (beta + phi));
     // never so much that the lower cell ends up higher (half the drop for equal areas)

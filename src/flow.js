@@ -15,7 +15,7 @@
 //    cell appears after its receiver. That pop order is the "stack": iterate it
 //    forwards to go downstream-first, backwards to go upstream-first.
 
-class MinHeap {
+export class MinHeap {
   constructor(capacity) {
     this.idx = new Int32Array(capacity);
     this.key = new Float64Array(capacity);

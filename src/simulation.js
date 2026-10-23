@@ -8,6 +8,7 @@
 //
 // ONE STEP of length dt:
 //   1. uplift       rock rises by U(x, y) dt (except at fixed base-level outlets)
+//   1b. earthquakes faults slip in sudden events; shaking primes cliffs to fail
 //   2. weathering   bedrock converts to soil at P0 exp(-soil / h*)   (Heimsath et al. 1997, Nature 388)
 //   3. vegetation   cover from climate and soil depth
 //   4. flow         lakes, flow directions, drainage area
@@ -31,6 +32,7 @@ import { fluvial } from './processes/fluvial.js';
 import { creep, avalanche } from './processes/hillslope.js';
 import { rockfall } from './processes/rockfall.js';
 import { coast, seaLevelAt } from './processes/coast.js';
+import { earthquakes, triggerEarthquake } from './processes/earthquakes.js';
 
 export class Simulation {
   /**
@@ -75,6 +77,18 @@ export class Simulation {
     this.boundaryRate = new Float64Array(n);
     /** Sediment flux (m^3/yr) leaving each cell along its river, from the last step. */
     this.qsOut = new Float64Array(n);
+    /** Sediment volume (m^3) that left the domain through each outlet cell in the last step. */
+    this.exportedAt = new Float64Array(n);
+    /** Ground shaking 0..1 from this step's earthquakes (0 when there were none). */
+    this.shaking = new Float32Array(n);
+    /** Earthquake catalogue: the most recent events, and counts. */
+    this.quakes = { events: [], count: 0, lastStep: 0 };
+    /**
+     * Per-cell fields given directly instead of derived from the parameters (null = derive):
+     * uplift rate (m/yr) and precipitation (m/yr). A patch zoomed in from a planet gets
+     * them from the planet. Part of the state (snapshots keep them).
+     */
+    this.fields = { uplift: null, precipitation: null };
     this.flow = {
       filled: new Float64Array(n),
       receiver: new Int32Array(n),
@@ -97,6 +111,8 @@ export class Simulation {
     this.time = 0;
     this.stepCount = 0;
     this.rng = new Rng(this.params.seed);
+    // a separate stream, so switching earthquakes on does not reshuffle everything else
+    this.quakeRng = new Rng(((this.params.seed | 0) ^ 0x5eed9a7e) >>> 0);
     // volume budget (m^3): uplift includes prescribed boundary motion; inflow is
     // sediment carried in by rivers from outside the domain
     this.budget = { uplift: 0, exported: 0, inflow: 0 };
@@ -121,6 +137,9 @@ export class Simulation {
     if (snap.inflowArea) sim.inflowArea.set(snap.inflowArea);
     if (snap.inflowSediment) sim.inflowSediment.set(snap.inflowSediment);
     if (snap.boundaryRate) sim.boundaryRate.set(snap.boundaryRate);
+    if (snap.fields) sim.setFields(snap.fields);
+    if (snap.quakeRngState != null) sim.quakeRng.state = snap.quakeRngState >>> 0;
+    if (snap.quakeCount != null) sim.quakes.count = snap.quakeCount;
     sim.time = snap.time;
     sim.seaLevel = seaLevelAt(sim.params, sim.time);
     sim.stepCount = snap.stepCount;
@@ -139,6 +158,8 @@ export class Simulation {
       time: this.time,
       stepCount: this.stepCount,
       rngState: this.rng.state,
+      quakeRngState: this.quakeRng.state,
+      quakeCount: this.quakes.count,
       budget: { ...this.budget },
       rock: Array.from(this.rock),
       soil: Array.from(this.soil),
@@ -147,7 +168,43 @@ export class Simulation {
       inflowArea: Array.from(this.inflowArea),
       inflowSediment: Array.from(this.inflowSediment),
       boundaryRate: Array.from(this.boundaryRate),
+      fields: {
+        uplift: this.fields.uplift && Array.from(this.fields.uplift),
+        precipitation: this.fields.precipitation && Array.from(this.fields.precipitation),
+      },
     };
+  }
+
+  /**
+   * Give per-cell fields directly instead of deriving them from the parameters:
+   * `uplift` (m/yr) and/or `precipitation` (m/yr), arrays of one value per cell; null
+   * returns a field to its parametric form. They survive setParams.
+   */
+  setFields({ uplift, precipitation } = {}) {
+    const n = this.grid.size;
+    const take = (a, name) => {
+      if (a == null) return null;
+      if (a.length !== n) throw new Error(`setFields: ${name} needs ${n} values`);
+      return Float64Array.from(a);
+    };
+    if (uplift !== undefined) this.fields.uplift = take(uplift, 'uplift');
+    if (precipitation !== undefined) this.fields.precipitation = take(precipitation, 'precipitation');
+    this._buildDerived();
+    this._updateDerivedState();
+    return this;
+  }
+
+  /**
+   * Slip fault k (index into params.earthquakes.faults) now, with magnitude M; returns
+   * the event. Optional `center`: rupture centre along the fault (m from its first point).
+   */
+  earthquake(k, M, center) {
+    if (!this.params.earthquakes.faults[k]) throw new Error(`no fault ${k}`);
+    this.shaking.fill(0);
+    const ev = triggerEarthquake(this, k, M, center);
+    this._updateDerivedState();
+    routeFlow(this.grid, this.z, this.outlet, this.precipWeight, this.flow);
+    return ev;
   }
 
   /**
@@ -212,6 +269,11 @@ export class Simulation {
       upliftVol += u * area[i];
     }
     this.budget.uplift += upliftVol;
+
+    // 1b. earthquakes (shaking from them lasts this step)
+    this.shaking.fill(0);
+    this.quakes.lastStep = 0;
+    if (p.earthquakes.enabled && p.earthquakes.faults.length) earthquakes(this, dt);
     this._updateSurfaceRock();
 
     // 2. weathering
@@ -386,9 +448,10 @@ export class Simulation {
         case 'fault': f = -fx * uy + fy * ux + (u.offset || 0) < 0 ? 1 : 0; break;
         default: throw new Error(`unknown uplift pattern "${u.pattern}"`);
       }
-      this.upliftField[i] = this.boundaryOutlet[i] ? 0 : u.rate * f;
+      this.upliftField[i] = this.boundaryOutlet[i] ? 0 : this.fields.uplift ? this.fields.uplift[i] : u.rate * f;
 
-      const P = Math.max(0, p.climate.precipitation * (1 + p.climate.precipitationGradient * (fx)));
+      const P = this.fields.precipitation ? Math.max(0, this.fields.precipitation[i])
+        : Math.max(0, p.climate.precipitation * (1 + p.climate.precipitationGradient * (fx)));
       this.precipWeight[i] = P; // relative to a 1 m/yr reference
       const vc = p.vegetation.cover;
       this.vegMax[i] = vc === 'auto' ? P / (P + p.vegetation.halfSaturation) : Math.max(0, Math.min(1, +vc));
