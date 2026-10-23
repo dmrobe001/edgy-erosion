@@ -30,6 +30,7 @@
 }
 
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 
 body {
   margin: 0;
@@ -118,7 +119,7 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
 <body>
   <header>
     <h1>Edgy Erosion</h1>
-    <span class="sub">landscape evolution on a hexagonal grid: rivers, soil, layered rock, cliffs and rockfall</span>
+    <span class="sub">landscape evolution from plates to cliffs: tectonics, earthquakes, rivers, soil, layered rock and rockfall</span>
   </header>
   <main>
     <aside id="controls">
@@ -131,10 +132,24 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
           <button id="run" class="primary">Run</button>
           <button id="step">Step</button>
           <button id="reset">Reset</button>
+          <button id="quake" hidden title="Slip the first fault now in a magnitude 7 earthquake">Earthquake!</button>
         </div>
       </section>
 
-      <section>
+      <section id="planet-grid" hidden>
+        <h2>Planet <span class="note">(applies on Reset)</span></h2>
+        <div class="grid3">
+          <label>subdivisions<input id="subdivisions" type="number" min="4" max="96" step="1"></label>
+          <label>plates<input id="plates" type="number" min="1" max="30" step="1"></label>
+          <label>seed<input id="planet-seed" type="number" step="1"></label>
+        </div>
+        <div class="grid3">
+          <label>dt (yr)<input id="planet-dt" type="number" min="1000" step="any"></label>
+          <span id="planet-extent" class="note" style="grid-column: span 2"></span>
+        </div>
+      </section>
+
+      <section id="landscape-grid">
         <h2>Grid <span class="note">(applies on Reset)</span></h2>
         <div class="grid3">
           <label>cols<input id="cols" type="number" min="8" max="1024" step="1"></label>
@@ -194,11 +209,12 @@ canvas { display: block; width: 100%; image-rendering: pixelated; background: va
     <section id="viewer">
       <div class="toolbar">
         <label>View <select id="view"></select></label>
+        <label id="projection-wrap" hidden>Projection <select id="projection"><option value="map">map</option><option value="globe">globe (drag to turn)</option></select></label>
         <span id="stats" class="mono"></span>
       </div>
       <div id="map-wrap"><canvas id="map"></canvas></div>
       <div id="hover" class="mono">&nbsp;</div>
-      <div class="toolbar"><span>Cross-section <span class="note">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
+      <div class="toolbar"><span>Cross-section <span class="note" id="section-hint">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
       <canvas id="section"></canvas>
       <div id="legend"></div>
     </section>
@@ -274,6 +290,46 @@ function fbm(x, y, { wavelength, octaves = 4, gain = 0.5, seed = 0 }) {
   let f = 1 / wavelength;
   for (let k = 0; k < octaves; k++) {
     sum += amp * valueNoise(x * f, y * f, seed + 1013 * k);
+    norm += amp;
+    amp *= gain;
+    f *= 2;
+  }
+  return sum / norm;
+}
+
+/** Integer hash of a 3-D lattice point and a seed, returning a float in [-1, 1]. */
+function hash3(ix, iy, iz, seed) {
+  let h = Math.imul(ix, 0x27d4eb2d) ^ Math.imul(iy, 0x165667b1) ^ Math.imul(iz, 0x1b873593) ^ Math.imul(seed, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  h ^= h >>> 16;
+  return (h >>> 0) / 2147483647.5 - 1;
+}
+
+/** Value noise on the unit cube lattice (trilinear with C2 fade), range ~[-1, 1]. */
+function valueNoise3(x, y, z, seed) {
+  const x0 = Math.floor(x), y0 = Math.floor(y), z0 = Math.floor(z);
+  const u = fade(x - x0), v = fade(y - y0), w = fade(z - z0);
+  const lerp = (a, b, t) => a + (b - a) * t;
+  const c = (dx, dy, dz) => hash3(x0 + dx, y0 + dy, z0 + dz, seed);
+  return lerp(
+    lerp(lerp(c(0, 0, 0), c(1, 0, 0), u), lerp(c(0, 1, 0), c(1, 1, 0), u), v),
+    lerp(lerp(c(0, 0, 1), c(1, 0, 1), u), lerp(c(0, 1, 1), c(1, 1, 1), u), v),
+    w,
+  );
+}
+
+/**
+ * Fractal noise in 3-D, for fields on a sphere (sample it at points of the sphere, so
+ * there is no seam at the date line and no pinching at the poles).
+ */
+function fbm3(x, y, z, { wavelength, octaves = 4, gain = 0.5, seed = 0 }) {
+  let sum = 0;
+  let amp = 1;
+  let norm = 0;
+  let f = 1 / wavelength;
+  for (let k = 0; k < octaves; k++) {
+    sum += amp * valueNoise3(x * f, y * f, z * f, seed + 1013 * k);
     norm += amp;
     amp *= gain;
     f *= 2;
@@ -613,6 +669,19 @@ const DEFAULTS = {
     closureDepth: 10,            // depth (m) below which waves barely move sediment (e-folding)
     maxSubsteps: 60,             // cap on diffusion substeps per step (D is reduced if it binds)
   },
+  // Faults that slip in discrete earthquakes (see processes/earthquakes.js). Positions are
+  // fractions of the reference frame and may lie outside [0, 1] (a fault longer than the
+  // domain). The side LEFT of the trace direction (x0,y0)->(x1,y1) is raised.
+  // e.g. { x0: -1, y0: 0.5, x1: 2, y1: 0.45, dip: 60, slipRate: 2e-3 }
+  earthquakes: {
+    enabled: true,
+    faults: [],
+    bValue: 1.0,                 // Gutenberg-Richter b: 10x fewer events per magnitude unit
+    minMagnitude: 5.5,           // smallest surface-rupturing event
+    maxMagnitude: 7.5,           // largest event
+    upliftShare: 0.3,            // share of the throw taken by the raised side (rest: the other side drops)
+    coseismicWeakening: 0.3,     // cliffs' critical height cut by this x shaking during an event
+  },
   rockfall: {
     enabled: true,
     rockDensity: 2600,           // kg/m^3
@@ -695,6 +764,26 @@ const PRESETS = {
     strata: { layers: [{ rock: 'limestone', thickness: 1e9 }] },
     climate: { precipitation: 0.4, frost: 0.5 },
     vegetation: { halfSaturation: 0.8 },
+  },
+  'earthquake-scarp': {
+    description: 'A normal fault slipping in earthquakes of magnitude 5.5 to 7.3: each one adds a fresh step to a growing range front that creep and gullies wear back, with shaken cliffs collapsing.',
+    time: { dt: 250 },
+    initial: { type: 'flat', height: 0, base: 0, noise: { amplitude: 5, wavelength: 800 }, soil: 0.5 },
+    uplift: { rate: 0 },
+    boundary: { open: ['south', 'east', 'west'] },
+    strata: {
+      layers: [{ rock: 'limestone', thickness: 40 }, { rock: 'shale', thickness: 25 }],
+      top: 0, repeat: true, dip: 8, dipDirection: 270,
+    },
+    earthquakes: {
+      faults: [{ x0: -2, y0: 0.42, x1: 3, y1: 0.5, dip: 60, slipRate: 2.5e-3 }],
+      maxMagnitude: 7.3,
+      upliftShare: 1, // throw measured against the basin, which sediment keeps level
+    },
+    climate: { precipitation: 0.4, frost: 0.5 },
+    vegetation: { halfSaturation: 0.8 },
+    fluvial: { deposition: 1.0 },
+    rockfall: { timescale: 2000 },
   },
   'badlands': {
     description: 'Weak shale and siltstone, no vegetation, dry climate with intense storms: dense gullies and sharp knife-edge ridges.',
@@ -822,6 +911,14 @@ function validate(p) {
   });
   needRock(p.strata.basement, 'strata.basement');
   p.bodies.forEach((b, k) => needRock(b.rock, `bodies[${k}]`));
+  const eq = p.earthquakes;
+  if (!(eq.maxMagnitude > eq.minMagnitude)) fail('earthquakes.maxMagnitude must exceed minMagnitude');
+  if (!(eq.bValue > 0)) fail('earthquakes.bValue must be positive');
+  eq.faults.forEach((f, k) => {
+    for (const c of ['x0', 'y0', 'x1', 'y1']) if (!Number.isFinite(f[c])) fail(`earthquakes.faults[${k}].${c} must be a number`);
+    if (!(f.slipRate >= 0)) fail(`earthquakes.faults[${k}].slipRate must be >= 0`);
+    if (f.dip != null && !(f.dip > 0 && f.dip <= 90)) fail(`earthquakes.faults[${k}].dip must be in (0, 90]`);
+  });
   const sides = ['north', 'south', 'east', 'west'];
   for (const s of p.boundary.open) if (!sides.includes(s)) fail(`boundary.open: unknown side "${s}"`);
   if (!p.boundary.open.length && p.boundary.seaLevel == null) {
@@ -1268,6 +1365,8 @@ function fluvial(sim, dt) {
   else qs.fill(0);
   const qsOut = sim.qsOut;
   qsOut.fill(0);
+  const lost = sim.exportedAt; // volume (m^3) leaving the domain at each outlet this step
+  if (lost) lost.fill(0);
   let exported = 0;
   for (let s = n - 1; s >= 0; s--) {
     const i = order[s];
@@ -1292,7 +1391,10 @@ function fluvial(sim, dt) {
     qsOut[i] = out;
     const r = receiver[i];
     if (r >= 0) qs[r] += out;
-    else exported += out * dt;
+    else {
+      exported += out * dt;
+      if (lost) lost[i] = out * dt;
+    }
   }
   sim.qs = qs;
   for (let i = 0; i < n; i++) z[i] = rock[i] + soil[i];
@@ -1533,6 +1635,10 @@ function avalanche(sim) {
 // swap order) and dumped as loose debris (soil) on the lower cell, where the
 // avalanche step spreads it into a talus slope.
 //
+// Earthquake shaking (sim.shaking, 0..1, see earthquakes.js) lowers the critical height
+// by a factor (1 - coseismicWeakening x shaking) and raises the failure probability
+// for the step towards 1, so strong shaking brings down cliffs that were close to failing.
+//
 // Grid-scale caveat: cliffs lower than about dx * tan(phi) cannot be represented as
 // unstable faces, so rockfall only "switches on" when dx is small compared with the
 // cliff heights the rock can sustain.
@@ -1559,6 +1665,8 @@ function rockfall(sim, dt) {
   const { dist, area } = grid;
   const rate = (1 / rp.timescale) * (1 + rp.frostFactor * sim.params.climate.frost);
   const pFail = 1 - Math.exp(-rate * dt);
+  const shaking = sim.shaking;
+  const weaken = sim.params.earthquakes?.coseismicWeakening ?? 0;
   let events = 0;
   let volume = 0;
 
@@ -1585,8 +1693,9 @@ function rockfall(sim, dt) {
     if (rockFace <= 0) continue;
     const beta = Math.atan(drop / L);
     const { cohesion, phi } = lith.meanStrength(i, zj - upliftCum[i], rock[i] - upliftCum[i]);
-    if (drop <= culmannHeight(beta, cohesion, phi, rp.rockDensity)) continue;
-    if (rng.next() >= pFail) continue;
+    const sh = shaking ? shaking[i] : 0;
+    if (drop <= culmannHeight(beta, cohesion, phi, rp.rockDensity) * (1 - weaken * sh)) continue;
+    if (rng.next() >= pFail + (1 - pFail) * sh) continue;
 
     const stableDrop = L * Math.tan(0.5 * (beta + phi));
     // never so much that the lower cell ends up higher (half the drop for equal areas)
@@ -1922,6 +2031,178 @@ function coast(sim, dt) {
   return result;
 }
 
+// ---- src/processes/earthquakes.js ----
+// Earthquakes: faults that move in sudden slips instead of smooth uplift.
+//
+// A fault is a straight surface trace (in fractions of the reference frame, so it lines
+// up across zoom levels and may run off the domain: the domain is then a window onto
+// a longer fault) with a dip angle and a long-term slip rate. The side to the LEFT of
+// the trace's direction (seen on the map, north up) is the raised side, as for the
+// `fault` uplift pattern.
+//
+// MAGNITUDES follow a truncated Gutenberg-Richter distribution: the number of events of
+// magnitude >= M falls as 10^(-b M) between minMagnitude and maxMagnitude
+// (Gutenberg & Richter 1944, Bull. Seismol. Soc. Am. 34). Below about magnitude 5.5
+// ruptures rarely reach the surface, so smaller events are left out.
+//
+// RUPTURE SIZE from magnitude, by the empirical regressions of Wells & Coppersmith 1994
+// (Bull. Seismol. Soc. Am. 84), all slip types:
+//   surface rupture length   log10 L(km) = -3.22 + 0.69 M
+//   average displacement     log10 D(m)  = -4.80 + 0.69 M
+//   down-dip rupture width   log10 W(km) = -1.01 + 0.32 M
+// Ruptures longer than the fault are cut to its length. Slip along a rupture has an
+// elliptical profile with the regression's mean, zero at the tips.
+//
+// HOW OFTEN. Events are a Poisson process whose rate makes the long-term slip match the
+// slip rate (a potency balance, the slip-times-length version of a moment balance):
+//   rate = slipRate * faultLength / E[D(M) L(M)]
+// with the expectation over the magnitude distribution. So over many events the fault
+// slips at its slip rate on average, while any one place sees a staircase of offsets.
+//
+// SURFACE DISPLACEMENT. Vertical throw = slip x sin(dip). The raised side rises by
+// upliftShare of it and the other side drops by the rest (on normal faults the
+// hanging wall typically drops several times more than the footwall rises). Both decay
+// away from the trace as exp(-distance / W), a stand-in for the elastic dislocation
+// solution (Okada 1985, Bull. Seismol. Soc. Am. 75) [adapted: exponential decay instead
+// of the full half-space solution; horizontal motion is ignored]. Rock carries its
+// strata with it, so the fault offsets the layers.
+//
+// SHAKING. Each event shakes the ground within about 10^(0.5 M - 2.5) km of the rupture
+// [adapted: a one-parameter attenuation, not a ground-motion model]. For that step
+// cliffs fail more easily (their critical height is cut by coseismicWeakening x shaking)
+// and unstable ones fail at once (see rockfall.js): earthquake-triggered rockfall.
+
+const sinD = (deg) => Math.sin((deg * Math.PI) / 180);
+
+/** Surface rupture length (m) for magnitude M (Wells & Coppersmith 1994). */
+function ruptureLength(M) { return 1000 * Math.pow(10, -3.22 + 0.69 * M); }
+/** Average surface displacement (m) for magnitude M (Wells & Coppersmith 1994). */
+function averageDisplacement(M) { return Math.pow(10, -4.80 + 0.69 * M); }
+/** Down-dip rupture width (m) for magnitude M (Wells & Coppersmith 1994). */
+function ruptureWidth(M) { return 1000 * Math.pow(10, -1.01 + 0.32 * M); }
+/** Distance (m) over which shaking from a magnitude-M rupture falls by e. */
+function shakingLength(M) { return 1000 * Math.pow(10, 0.5 * M - 2.5); }
+
+/** Magnitude from a uniform random number u in [0, 1): inverse CDF of the truncated G-R law. */
+function sampleMagnitude(u, b, Mmin, Mmax) {
+  const c = 1 - Math.pow(10, -b * (Mmax - Mmin));
+  return Mmin - Math.log10(1 - u * c) / b;
+}
+
+/** Per-fault geometry and event rate, cached on the simulation until parameters change. */
+function faultModel(sim, k) {
+  const ep = sim.params.earthquakes;
+  const fault = ep.faults[k];
+  const F = sim.frame;
+  const key = JSON.stringify([fault, ep.bValue, ep.minMagnitude, ep.maxMagnitude, F]);
+  const cache = sim.scratch.faults || (sim.scratch.faults = []);
+  if (cache[k] && cache[k].key === key) return cache[k];
+  const g = sim.grid;
+  const x0 = F.x + fault.x0 * F.width, y0 = F.y + fault.y0 * F.height;
+  const x1 = F.x + fault.x1 * F.width, y1 = F.y + fault.y1 * F.height;
+  const Lf = Math.hypot(x1 - x0, y1 - y0);
+  if (!(Lf > 0)) throw new Error(`earthquakes.faults[${k}] has zero length`);
+  const sx = (x1 - x0) / Lf, sy = (y1 - y0) / Lf;
+  const along = new Float64Array(g.size);
+  const across = new Float64Array(g.size); // > 0 on the raised (left) side
+  for (let i = 0; i < g.size; i++) {
+    const rx = g.x[i] - x0, ry = g.y[i] - y0;
+    along[i] = rx * sx + ry * sy;
+    across[i] = rx * sy - ry * sx; // left of the strike, with y pointing south
+  }
+  // expected potency (slip x rupture length) per event, by quadrature over the
+  // magnitude distribution's quantiles
+  const Q = 400;
+  let potency = 0;
+  for (let q = 0; q < Q; q++) {
+    const M = sampleMagnitude((q + 0.5) / Q, ep.bValue, ep.minMagnitude, ep.maxMagnitude);
+    potency += averageDisplacement(M) * Math.min(ruptureLength(M), Lf);
+  }
+  potency /= Q;
+  const model = { key, x0, y0, sx, sy, length: Lf, along, across, rate: (fault.slipRate * Lf) / potency, meanPotency: potency };
+  cache[k] = model;
+  return model;
+}
+
+/**
+ * Slip one fault now.
+ * @param {import('../simulation.js').Simulation} sim
+ * @param {number} k index into params.earthquakes.faults
+ * @param {number} M magnitude
+ * @param {number} [center] position of the rupture centre along the fault (m from its
+ *   first point); default random, keeping the rupture on the fault
+ * @returns {object} the event, also appended to sim.quakes.events
+ */
+function triggerEarthquake(sim, k, M, center) {
+  const ep = sim.params.earthquakes;
+  const fault = ep.faults[k];
+  const fm = faultModel(sim, k);
+  const { rock, upliftCum, boundaryOutlet, shaking } = sim;
+  const area = sim.grid.area;
+  const L = Math.min(ruptureLength(M), fm.length);
+  const slip = averageDisplacement(M);
+  const c = center ?? L / 2 + sim.quakeRng.next() * (fm.length - L);
+  const half = L / 2;
+  const peak = (4 / Math.PI) * slip; // elliptical profile with mean `slip`
+  const throwPeak = peak * sinD(fault.dip ?? 60);
+  const share = fault.upliftShare ?? ep.upliftShare;
+  const decay = fault.decayLength ?? ruptureWidth(M);
+  const r0 = shakingLength(M);
+  let volume = 0;
+  for (let i = 0; i < sim.grid.size; i++) {
+    const s = fm.along[i] - c;
+    const d = fm.across[i];
+    // shaking: by distance to the rupture segment
+    const ds = Math.max(0, Math.abs(s) - half);
+    const sh = Math.exp(-Math.hypot(ds, d) / r0);
+    if (sh > shaking[i]) shaking[i] = sh;
+    if (boundaryOutlet[i] || Math.abs(s) >= half) continue;
+    const t = throwPeak * Math.sqrt(1 - (s / half) * (s / half)) * Math.exp(-Math.abs(d) / decay);
+    const u = d > 0 ? share * t : -(1 - share) * t;
+    rock[i] += u;
+    upliftCum[i] += u;
+    volume += u * area[i];
+  }
+  sim.budget.uplift += volume;
+  const ev = {
+    time: sim.time, fault: k, magnitude: M, length: L, slip, throw: slip * sinD(fault.dip ?? 60),
+    center: [fm.x0 + c * fm.sx, fm.y0 + c * fm.sy],
+  };
+  const q = sim.quakes;
+  q.events.push(ev);
+  if (q.events.length > 1000) q.events.splice(0, q.events.length - 1000);
+  q.count++;
+  q.lastStep++;
+  return ev;
+}
+
+/**
+ * Draw this step's earthquakes on every fault and apply them.
+ * @returns {number} events this step
+ */
+function earthquakes(sim, dt) {
+  const ep = sim.params.earthquakes;
+  sim.quakes.lastStep = 0;
+  for (let k = 0; k < ep.faults.length; k++) {
+    const fm = faultModel(sim, k);
+    if (!(fm.rate > 0)) continue;
+    // Poisson process: exponential waiting times
+    let t = -Math.log(1 - sim.quakeRng.next()) / fm.rate;
+    while (t < dt) {
+      const M = sampleMagnitude(sim.quakeRng.next(), ep.bValue, ep.minMagnitude, ep.maxMagnitude);
+      triggerEarthquake(sim, k, M);
+      t += -Math.log(1 - sim.quakeRng.next()) / fm.rate;
+    }
+  }
+  return sim.quakes.lastStep;
+}
+
+/** Long-term event rate (events/yr) and mean potency of fault k, for checks and display. */
+function faultRate(sim, k) {
+  const fm = faultModel(sim, k);
+  return { rate: fm.rate, length: fm.length, meanPotency: fm.meanPotency };
+}
+
 // ---- src/mesh.js ----
 // The mesh contract: what the processes are allowed to know about the grid.
 //
@@ -2051,6 +2332,368 @@ class GraphMesh {
   }
 }
 
+// ---- src/sphere.js ----
+// A whole planet: the icosahedral geodesic mesh.
+//
+// Start from an icosahedron (12 vertices, 20 triangles), split every triangle into
+// f x f smaller ones, and push the new vertices out onto the sphere. The vertices are
+// the cell centres; the cells are their spherical Voronoi polygons: 12 pentagons
+// (at the icosahedron's corners) and 10 f^2 - 10 hexagons, 10 f^2 + 2 cells in all.
+// This is the grid of several global atmosphere models (e.g. Heikes & Randall 1995,
+// Monthly Weather Review 123) and of geodesic domes.
+//
+//   f        cells     mean spacing on Earth
+//   16       2 562     ~ 450 km
+//   32      10 242     ~ 220 km
+//   48      23 042     ~ 150 km
+//   64      40 962     ~ 110 km
+//
+// It satisfies the mesh contract (mesh.js) with real geometry:
+//   dist   great-circle distance between neighbouring centres (R x angle)
+//   face   length of the shared Voronoi edge: the arc between the circumcentres of
+//          the two triangles on either side of the edge
+//   area   spherical area of the Voronoi polygon (sums to 4 pi R^2 to round-off)
+// so the finite-volume processes are consistent discretisations on the sphere: the
+// tests check the discrete Laplacian against spherical harmonics.
+//
+// Map coordinates. The contract wants x, y in metres for drawing; here they are
+// equirectangular: x = R (longitude + pi) eastwards, y = R (pi/2 - latitude) southwards,
+// so the map is 2 pi R by pi R. Geometry never uses them (they jump at the date line
+// and squash towards the poles); `pos` holds the true unit vectors.
+//
+// There are no edges: `edge` is all zero, and water reaches the sea or a closed basin.
+
+const PHI = (1 + Math.sqrt(5)) / 2;
+
+const ICO_VERTICES = [
+  [-1, PHI, 0], [1, PHI, 0], [-1, -PHI, 0], [1, -PHI, 0],
+  [0, -1, PHI], [0, 1, PHI], [0, -1, -PHI], [0, 1, -PHI],
+  [PHI, 0, -1], [PHI, 0, 1], [-PHI, 0, -1], [-PHI, 0, 1],
+];
+const ICO_FACES = [
+  [0, 11, 5], [0, 5, 1], [0, 1, 7], [0, 7, 10], [0, 10, 11],
+  [1, 5, 9], [5, 11, 4], [11, 10, 2], [10, 7, 6], [7, 1, 8],
+  [3, 9, 4], [3, 4, 2], [3, 2, 6], [3, 6, 8], [3, 8, 9],
+  [4, 9, 5], [2, 4, 11], [6, 2, 10], [8, 6, 7], [9, 8, 1],
+];
+
+const dot3 = (a, i, b, j) => a[i] * b[j] + a[i + 1] * b[j + 1] + a[i + 2] * b[j + 2];
+
+/** Angle (rad) between unit vectors a[i..] and b[j..], accurate at small angles. */
+function angleBetween(a, i, b, j) {
+  const cx = a[i + 1] * b[j + 2] - a[i + 2] * b[j + 1];
+  const cy = a[i + 2] * b[j] - a[i] * b[j + 2];
+  const cz = a[i] * b[j + 1] - a[i + 1] * b[j];
+  return Math.atan2(Math.sqrt(cx * cx + cy * cy + cz * cz), dot3(a, i, b, j));
+}
+
+/** Solid angle of the spherical triangle with unit-vector corners (Van Oosterom & Strackee 1983). */
+function solidAngle(a, i, b, j, c, k) {
+  const det = a[i] * (b[j + 1] * c[k + 2] - b[j + 2] * c[k + 1]) -
+    a[i + 1] * (b[j] * c[k + 2] - b[j + 2] * c[k]) +
+    a[i + 2] * (b[j] * c[k + 1] - b[j + 1] * c[k]);
+  const den = 1 + dot3(a, i, b, j) + dot3(b, j, c, k) + dot3(c, k, a, i);
+  return Math.abs(2 * Math.atan2(det, den));
+}
+
+class SphereMesh {
+  /**
+   * @param {number} subdivisions f: each icosahedron edge is cut into f pieces
+   * @param {number} [radius] planet radius (m), default Earth's
+   */
+  constructor(subdivisions, radius = 6.371e6) {
+    const f = subdivisions | 0;
+    if (!(f >= 1)) throw new Error('subdivisions must be at least 1');
+    if (!(radius > 0)) throw new Error('radius must be positive');
+    this.subdivisions = f;
+    this.radius = radius;
+    const R = radius;
+
+    // --- vertices and triangles: subdivide each face, sharing vertices along edges ---
+    const pos = [];
+    const key = new Map();
+    const vertex = (x, y, z) => {
+      const L = Math.hypot(x, y, z);
+      x /= L; y /= L; z /= L;
+      const k = `${Math.round(x * 1e9)},${Math.round(y * 1e9)},${Math.round(z * 1e9)}`;
+      let id = key.get(k);
+      if (id === undefined) { id = pos.length / 3; pos.push(x, y, z); key.set(k, id); }
+      return id;
+    };
+    const tris = [];
+    for (const [ia, ib, ic] of ICO_FACES) {
+      const A = ICO_VERTICES[ia], B = ICO_VERTICES[ib], C = ICO_VERTICES[ic];
+      const idx = [];
+      for (let i = 0; i <= f; i++) {
+        idx.push([]);
+        for (let j = 0; j <= f - i; j++) {
+          const u = i / f, v = j / f, w = 1 - u - v;
+          idx[i].push(vertex(w * A[0] + u * B[0] + v * C[0], w * A[1] + u * B[1] + v * C[1], w * A[2] + u * B[2] + v * C[2]));
+        }
+      }
+      for (let i = 0; i < f; i++) {
+        for (let j = 0; j < f - i; j++) {
+          tris.push(idx[i][j], idx[i + 1][j], idx[i][j + 1]);
+          if (j < f - i - 1) tris.push(idx[i + 1][j], idx[i + 1][j + 1], idx[i][j + 1]);
+        }
+      }
+    }
+    const n = pos.length / 3;
+    this.size = n;
+    this.pos = Float64Array.from(pos);
+    const P = this.pos;
+    // orient every triangle counter-clockwise seen from outside
+    const T = tris.length / 3;
+    for (let t = 0; t < T; t++) {
+      const a = 3 * tris[3 * t], b = 3 * tris[3 * t + 1], c = 3 * tris[3 * t + 2];
+      const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+      const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+      const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      if (nx * P[a] + ny * P[a + 1] + nz * P[a + 2] < 0) { const s = tris[3 * t + 1]; tris[3 * t + 1] = tris[3 * t + 2]; tris[3 * t + 2] = s; }
+    }
+    this.triangles = Int32Array.from(tris);
+
+    // circumcentres of the triangles = Voronoi vertices
+    const cc = new Float64Array(3 * T);
+    for (let t = 0; t < T; t++) {
+      const a = 3 * tris[3 * t], b = 3 * tris[3 * t + 1], c = 3 * tris[3 * t + 2];
+      const ux = P[b] - P[a], uy = P[b + 1] - P[a + 1], uz = P[b + 2] - P[a + 2];
+      const vx = P[c] - P[a], vy = P[c + 1] - P[a + 1], vz = P[c + 2] - P[a + 2];
+      let nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+      const L = Math.hypot(nx, ny, nz);
+      cc[3 * t] = nx / L; cc[3 * t + 1] = ny / L; cc[3 * t + 2] = nz / L;
+    }
+
+    // --- neighbours in counter-clockwise order, from "after b around a comes c" ---
+    const D = 6;
+    this.degree = D;
+    const nextAround = new Map(); // key a*n+b -> [c, triangle]
+    for (let t = 0; t < T; t++) {
+      const v = [tris[3 * t], tris[3 * t + 1], tris[3 * t + 2]];
+      for (let s = 0; s < 3; s++) nextAround.set(v[s] * n + v[(s + 1) % 3], [v[(s + 2) % 3], t]);
+    }
+    const first = new Int32Array(n).fill(-1);
+    for (let t = 0; t < T; t++) for (let s = 0; s < 3; s++) { const a = tris[3 * t + s]; if (first[a] < 0) first[a] = tris[3 * t + (s + 1) % 3]; }
+    this.neighbors = new Int32Array(D * n).fill(-1);
+    /** triangle between neighbour slot k and slot k+1 (cyclically), -1 for unused slots */
+    this.cornerTriangle = new Int32Array(D * n).fill(-1);
+    this.valence = new Uint8Array(n);
+    for (let a = 0; a < n; a++) {
+      let b = first[a];
+      let k = 0;
+      do {
+        if (k >= D) throw new Error('geodesic mesh: vertex with more than six neighbours');
+        const [c, t] = nextAround.get(a * n + b);
+        this.neighbors[D * a + k] = b;
+        this.cornerTriangle[D * a + k] = t;
+        k++;
+        b = c;
+      } while (b !== first[a]);
+      this.valence[a] = k;
+    }
+
+    // --- geometry: distances, Voronoi face lengths, cell areas ---
+    this.dist = new Float64Array(D * n);
+    this.face = new Float64Array(D * n);
+    this.area = new Float64Array(n);
+    for (let a = 0; a < n; a++) {
+      const d = this.valence[a];
+      let omega = 0;
+      for (let k = 0; k < d; k++) {
+        const e = D * a + k;
+        const b = this.neighbors[e];
+        this.dist[e] = R * angleBetween(P, 3 * a, P, 3 * b);
+        // the edge a-b is flanked by the corner triangles before and after slot k
+        const tPrev = this.cornerTriangle[D * a + ((k + d - 1) % d)];
+        const tNext = this.cornerTriangle[e];
+        this.face[e] = R * angleBetween(cc, 3 * tPrev, cc, 3 * tNext);
+        omega += solidAngle(P, 3 * a, cc, 3 * tPrev, cc, 3 * tNext);
+      }
+      this.area[a] = R * R * omega;
+    }
+    this.circumcenters = cc;
+    this.edge = new Uint8Array(n);
+    this.lattice = false;
+    this.sphere = true;
+    let s = 0, m = 0;
+    for (let e = 0; e < D * n; e++) if (this.neighbors[e] >= 0) { s += this.dist[e]; m++; }
+    /** mean centre-to-centre spacing (m) */
+    this.spacing = s / m;
+    this.cellArea = (4 * Math.PI * R * R) / n; // mean, for display scales
+
+    // --- map coordinates ---
+    this.lon = new Float64Array(n);
+    this.lat = new Float64Array(n);
+    this.x = new Float64Array(n);
+    this.y = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      this.lon[i] = Math.atan2(P[3 * i + 1], P[3 * i]);
+      this.lat[i] = Math.asin(Math.max(-1, Math.min(1, P[3 * i + 2])));
+      this.x[i] = R * (this.lon[i] + Math.PI);
+      this.y[i] = R * (Math.PI / 2 - this.lat[i]);
+    }
+    this.width = 2 * Math.PI * R;
+    this.height = Math.PI * R;
+    this.bounds = { xmin: 0, ymin: 0, xmax: this.width, ymax: this.height };
+
+    // coarse longitude-latitude buckets give every search a nearby starting cell
+    this._bw = 4 * f;
+    this._bh = 2 * f;
+    this._bucket = new Int32Array(this._bw * this._bh);
+    let hint = 0;
+    for (let r = 0; r < this._bh; r++) {
+      for (let c = 0; c < this._bw; c++) {
+        const lon = ((c + 0.5) / this._bw) * 2 * Math.PI - Math.PI;
+        const lat = Math.PI / 2 - ((r + 0.5) / this._bh) * Math.PI;
+        hint = this.nearest(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat), hint);
+        this._bucket[r * this._bw + c] = hint;
+      }
+    }
+  }
+
+  /**
+   * Cell whose centre is nearest the unit vector (vx, vy, vz): greedy walk from `start`
+   * towards the point. On a Delaunay triangulation the walk cannot get stuck short of
+   * the nearest vertex.
+   */
+  nearest(vx, vy, vz, start = -1) {
+    const P = this.pos;
+    const nb = this.neighbors;
+    let i = start >= 0 ? start : this._startFor(vx, vy, vz);
+    let best = P[3 * i] * vx + P[3 * i + 1] * vy + P[3 * i + 2] * vz;
+    for (;;) {
+      let next = -1;
+      for (let k = 0; k < 6; k++) {
+        const j = nb[6 * i + k];
+        if (j < 0) continue;
+        const d = P[3 * j] * vx + P[3 * j + 1] * vy + P[3 * j + 2] * vz;
+        if (d > best) { best = d; next = j; }
+      }
+      if (next < 0) return i;
+      i = next;
+    }
+  }
+
+  _startFor(vx, vy, vz) {
+    if (!this._bucket) return 0;
+    const lon = Math.atan2(vy, vx);
+    const lat = Math.asin(Math.max(-1, Math.min(1, vz)));
+    const c = Math.min(this._bw - 1, Math.floor(((lon + Math.PI) / (2 * Math.PI)) * this._bw));
+    const r = Math.min(this._bh - 1, Math.floor(((Math.PI / 2 - lat) / Math.PI) * this._bh));
+    return this._bucket[r * this._bw + c];
+  }
+
+  /** Cell at map coordinates (x, y) (see the header), or -1 off the map. */
+  cellAt(x, y) {
+    if (!(x >= 0 && x <= this.width && y >= 0 && y <= this.height)) return -1;
+    const lon = x / this.radius - Math.PI;
+    const lat = Math.PI / 2 - y / this.radius;
+    return this.nearest(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat));
+  }
+
+  /**
+   * Linear interpolation weights at the unit vector v: the triangle of cell centres that
+   * contains it and barycentric weights (summing to 1) in the plane of that triangle.
+   * @returns {{cell:number, ids:number[], weights:number[]}} cell = nearest centre
+   */
+  locate(vx, vy, vz, start = -1) {
+    const P = this.pos;
+    const tris = this.triangles;
+    const p = this.nearest(vx, vy, vz, start);
+    let bestT = -1, bestMin = -Infinity, bestW = null;
+    for (let k = 0; k < this.valence[p]; k++) {
+      const t = this.cornerTriangle[6 * p + k];
+      const a = 3 * tris[3 * t], b = 3 * tris[3 * t + 1], c = 3 * tris[3 * t + 2];
+      // v = wa A + wb B + wc C solved by triple products (Cramer's rule)
+      const det = triple(P, a, b, c, P[a], P[a + 1], P[a + 2], 0);
+      const wa = triple(P, -1, b, c, vx, vy, vz, 1) / det;
+      const wb = triple(P, a, -1, c, vx, vy, vz, 2) / det;
+      const wc = triple(P, a, b, -1, vx, vy, vz, 3) / det;
+      const lo = Math.min(wa, wb, wc);
+      if (lo > bestMin) { bestMin = lo; bestT = t; bestW = [wa, wb, wc]; }
+      if (lo >= 0) break;
+    }
+    const s = bestW[0] + bestW[1] + bestW[2];
+    return {
+      cell: p,
+      ids: [tris[3 * bestT], tris[3 * bestT + 1], tris[3 * bestT + 2]],
+      weights: bestW.map((w) => w / s),
+    };
+  }
+
+  /**
+   * Displacement from cell i to cell j in i's local tangent plane (m): x east, y south,
+   * matching the map convention. Used for gradients (hillshading).
+   */
+  offset(i, j, out = [0, 0]) {
+    const P = this.pos;
+    const px = P[3 * i], py = P[3 * i + 1], pz = P[3 * i + 2];
+    // east = z x p (normalised); north = p x east
+    let ex = -py, ey = px;
+    const el = Math.hypot(ex, ey) || 1;
+    ex /= el; ey /= el;
+    const nx = -pz * ey, ny = pz * ex, nz = px * ey - py * ex;
+    const dx = P[3 * j] - px, dy = P[3 * j + 1] - py, dz = P[3 * j + 2] - pz;
+    out[0] = this.radius * (dx * ex + dy * ey);
+    out[1] = -this.radius * (dx * nx + dy * ny + dz * nz);
+    return out;
+  }
+}
+
+/** Triple product with one of the three columns optionally replaced by (vx, vy, vz). */
+function triple(P, a, b, c, vx, vy, vz, which) {
+  const A = which === 1 ? [vx, vy, vz] : [P[a], P[a + 1], P[a + 2]];
+  const B = which === 2 ? [vx, vy, vz] : [P[b], P[b + 1], P[b + 2]];
+  const C = which === 3 ? [vx, vy, vz] : [P[c], P[c + 1], P[c + 2]];
+  return A[0] * (B[1] * C[2] - B[2] * C[1]) - A[1] * (B[0] * C[2] - B[2] * C[0]) + A[2] * (B[0] * C[1] - B[1] * C[0]);
+}
+
+/** Unit vector of a longitude and latitude given in degrees. */
+function lonLatToVector(lonDeg, latDeg) {
+  const lon = (lonDeg * Math.PI) / 180, lat = (latDeg * Math.PI) / 180;
+  return [Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat)];
+}
+
+/** Longitude and latitude (degrees) of a unit vector. */
+function vectorToLonLat(v) {
+  return [(Math.atan2(v[1], v[0]) * 180) / Math.PI, (Math.asin(Math.max(-1, Math.min(1, v[2]))) * 180) / Math.PI];
+}
+
+/**
+ * Azimuthal equidistant projection centred on the unit vector `center`: distances and
+ * directions from the centre are true. x points east and y south (the grid convention).
+ * Used to lay a flat hex patch onto the sphere when zooming in from a planet.
+ */
+function azimuthalProjection(center, radius) {
+  const [cx, cy, cz] = center;
+  let ex = -cy, ey = cx, ez = 0; // east = z x c
+  let el = Math.hypot(ex, ey, ez);
+  if (el < 1e-9) { ex = 0; ey = 1; ez = 0; el = 1; } // at a pole: pick y as "east"
+  ex /= el; ey /= el; ez /= el;
+  const nx = cy * ez - cz * ey, ny = cz * ex - cx * ez, nz = cx * ey - cy * ex; // north = c x east
+  return {
+    /** unit vector -> [x, y] (m), or null on the far side of the planet */
+    forward(v) {
+      const d = v[0] * cx + v[1] * cy + v[2] * cz;
+      const e = v[0] * ex + v[1] * ey + v[2] * ez;
+      const nn = v[0] * nx + v[1] * ny + v[2] * nz;
+      const s = Math.hypot(e, nn);
+      const c = Math.atan2(s, d);
+      if (c > Math.PI * 0.75) return null;
+      if (s < 1e-15) return [0, 0];
+      return [(radius * c * e) / s, (-radius * c * nn) / s];
+    },
+    /** [x, y] (m) -> unit vector */
+    inverse(x, y) {
+      const c = Math.hypot(x, y) / radius;
+      if (c < 1e-15) return [cx, cy, cz];
+      const se = x / (c * radius), sn = -y / (c * radius); // direction cosines east and north
+      const sc = Math.sin(c), co = Math.cos(c);
+      return [co * cx + sc * (se * ex + sn * nx), co * cy + sc * (se * ey + sn * ny), co * cz + sc * (se * ez + sn * nz)];
+    },
+  };
+}
+
 // ---- src/simulation.js ----
 // The simulation: state, the order of processes in a time step, and bookkeeping.
 //
@@ -2062,6 +2705,7 @@ class GraphMesh {
 //
 // ONE STEP of length dt:
 //   1. uplift       rock rises by U(x, y) dt (except at fixed base-level outlets)
+//   1b. earthquakes faults slip in sudden events; shaking primes cliffs to fail
 //   2. weathering   bedrock converts to soil at P0 exp(-soil / h*)   (Heimsath et al. 1997, Nature 388)
 //   3. vegetation   cover from climate and soil depth
 //   4. flow         lakes, flow directions, drainage area
@@ -2074,6 +2718,7 @@ class GraphMesh {
 //
 // Operator splitting like this is first-order accurate in dt; keep dt small
 // compared with the timescales you care about (e.g. the rockfall timescale).
+
 
 
 
@@ -2128,6 +2773,18 @@ class Simulation {
     this.boundaryRate = new Float64Array(n);
     /** Sediment flux (m^3/yr) leaving each cell along its river, from the last step. */
     this.qsOut = new Float64Array(n);
+    /** Sediment volume (m^3) that left the domain through each outlet cell in the last step. */
+    this.exportedAt = new Float64Array(n);
+    /** Ground shaking 0..1 from this step's earthquakes (0 when there were none). */
+    this.shaking = new Float32Array(n);
+    /** Earthquake catalogue: the most recent events, and counts. */
+    this.quakes = { events: [], count: 0, lastStep: 0 };
+    /**
+     * Per-cell fields given directly instead of derived from the parameters (null = derive):
+     * uplift rate (m/yr) and precipitation (m/yr). A patch zoomed in from a planet gets
+     * them from the planet. Part of the state (snapshots keep them).
+     */
+    this.fields = { uplift: null, precipitation: null };
     this.flow = {
       filled: new Float64Array(n),
       receiver: new Int32Array(n),
@@ -2150,6 +2807,8 @@ class Simulation {
     this.time = 0;
     this.stepCount = 0;
     this.rng = new Rng(this.params.seed);
+    // a separate stream, so switching earthquakes on does not reshuffle everything else
+    this.quakeRng = new Rng(((this.params.seed | 0) ^ 0x5eed9a7e) >>> 0);
     // volume budget (m^3): uplift includes prescribed boundary motion; inflow is
     // sediment carried in by rivers from outside the domain
     this.budget = { uplift: 0, exported: 0, inflow: 0 };
@@ -2174,6 +2833,9 @@ class Simulation {
     if (snap.inflowArea) sim.inflowArea.set(snap.inflowArea);
     if (snap.inflowSediment) sim.inflowSediment.set(snap.inflowSediment);
     if (snap.boundaryRate) sim.boundaryRate.set(snap.boundaryRate);
+    if (snap.fields) sim.setFields(snap.fields);
+    if (snap.quakeRngState != null) sim.quakeRng.state = snap.quakeRngState >>> 0;
+    if (snap.quakeCount != null) sim.quakes.count = snap.quakeCount;
     sim.time = snap.time;
     sim.seaLevel = seaLevelAt(sim.params, sim.time);
     sim.stepCount = snap.stepCount;
@@ -2192,6 +2854,8 @@ class Simulation {
       time: this.time,
       stepCount: this.stepCount,
       rngState: this.rng.state,
+      quakeRngState: this.quakeRng.state,
+      quakeCount: this.quakes.count,
       budget: { ...this.budget },
       rock: Array.from(this.rock),
       soil: Array.from(this.soil),
@@ -2200,7 +2864,43 @@ class Simulation {
       inflowArea: Array.from(this.inflowArea),
       inflowSediment: Array.from(this.inflowSediment),
       boundaryRate: Array.from(this.boundaryRate),
+      fields: {
+        uplift: this.fields.uplift && Array.from(this.fields.uplift),
+        precipitation: this.fields.precipitation && Array.from(this.fields.precipitation),
+      },
     };
+  }
+
+  /**
+   * Give per-cell fields directly instead of deriving them from the parameters:
+   * `uplift` (m/yr) and/or `precipitation` (m/yr), arrays of one value per cell; null
+   * returns a field to its parametric form. They survive setParams.
+   */
+  setFields({ uplift, precipitation } = {}) {
+    const n = this.grid.size;
+    const take = (a, name) => {
+      if (a == null) return null;
+      if (a.length !== n) throw new Error(`setFields: ${name} needs ${n} values`);
+      return Float64Array.from(a);
+    };
+    if (uplift !== undefined) this.fields.uplift = take(uplift, 'uplift');
+    if (precipitation !== undefined) this.fields.precipitation = take(precipitation, 'precipitation');
+    this._buildDerived();
+    this._updateDerivedState();
+    return this;
+  }
+
+  /**
+   * Slip fault k (index into params.earthquakes.faults) now, with magnitude M; returns
+   * the event. Optional `center`: rupture centre along the fault (m from its first point).
+   */
+  earthquake(k, M, center) {
+    if (!this.params.earthquakes.faults[k]) throw new Error(`no fault ${k}`);
+    this.shaking.fill(0);
+    const ev = triggerEarthquake(this, k, M, center);
+    this._updateDerivedState();
+    routeFlow(this.grid, this.z, this.outlet, this.precipWeight, this.flow);
+    return ev;
   }
 
   /**
@@ -2265,6 +2965,11 @@ class Simulation {
       upliftVol += u * area[i];
     }
     this.budget.uplift += upliftVol;
+
+    // 1b. earthquakes (shaking from them lasts this step)
+    this.shaking.fill(0);
+    this.quakes.lastStep = 0;
+    if (p.earthquakes.enabled && p.earthquakes.faults.length) earthquakes(this, dt);
     this._updateSurfaceRock();
 
     // 2. weathering
@@ -2439,9 +3144,10 @@ class Simulation {
         case 'fault': f = -fx * uy + fy * ux + (u.offset || 0) < 0 ? 1 : 0; break;
         default: throw new Error(`unknown uplift pattern "${u.pattern}"`);
       }
-      this.upliftField[i] = this.boundaryOutlet[i] ? 0 : u.rate * f;
+      this.upliftField[i] = this.boundaryOutlet[i] ? 0 : this.fields.uplift ? this.fields.uplift[i] : u.rate * f;
 
-      const P = Math.max(0, p.climate.precipitation * (1 + p.climate.precipitationGradient * (fx)));
+      const P = this.fields.precipitation ? Math.max(0, this.fields.precipitation[i])
+        : Math.max(0, p.climate.precipitation * (1 + p.climate.precipitationGradient * (fx)));
       this.precipWeight[i] = P; // relative to a 1 m/yr reference
       const vc = p.vegetation.cover;
       this.vegMax[i] = vc === 'auto' ? P / (P + p.vegetation.halfSaturation) : Math.max(0, Math.min(1, +vc));
@@ -2546,6 +3252,1068 @@ function smoothstep(t) {
   return t * t * (3 - 2 * t);
 }
 
+// ---- src/planet.js ----
+// A planet: kinematic plate tectonics on the icosahedral sphere, isostasy, and the
+// same surface processes (rivers, creep, weathering) as the landscape scale.
+//
+// PLATES are rigid caps that rotate about Euler poles at constant angular velocity
+// ("kinematic": the motions are prescribed, not computed from forces). Each plate keeps
+// its crust in its OWN frame of reference, on its own copy of the mesh: crust thickness,
+// continental fraction, formation time and soil. The world map is a view that, for each
+// world cell, looks back along every plate's rotation to the plate-frame cell that has
+// moved there (nearest neighbour). Rigid motion is therefore exact: nothing is
+// interpolated, so coastlines do not blur however far a plate travels.
+//
+// Where plates meet, after every small rotation:
+//   no plate covers a cell   a GAP opens: new oceanic crust (age zero) is added to the
+//                            plate that was there before. This is sea-floor spreading;
+//                            ridges form and ocean floor ages away from them.
+//   two or more plates       they CONVERGE. The most buoyant column (the one that would
+//                            float highest) overrides. A continent beneath it is too
+//                            buoyant to sink and is scraped off onto the overriding plate
+//                            (collision: crust thickens into mountains); ocean floor
+//                            subducts (is destroyed) except for part of its sediment, while
+//                            a fraction `arcFraction` of the subducted volume returns as
+//                            new continental crust on the overriding plate (volcanic arcs;
+//                            this is how island arcs grow into continents).
+// Colliding continents lock together: their relative rotation decays with timescale
+// `collisionLocking` while continental crust is being scraped off along their contact
+// (an adapted stand-in for the forces that stall real collisions). Optionally, every
+// `reorganizeEvery` years all plates get new random poles (plate reorganisation).
+// Thick crust spreads sideways where it exceeds `flowThreshold` (crustal flow, the
+// gravitational spreading that keeps orogenic plateaus flat).
+//
+// ISOSTASY. Each column floats on the mantle (Airy isostasy, no flexure). A column of
+// thickness h and density rho has a "dry" freeboard  e = h (1 - rho / rho_m) - K,  and
+// below sea level the water's weight deepens it to  e rho_m / (rho_m - rho_w).  K is set so
+// that continental crust of `continentalThickness` stands at `referenceElevation`. The
+// density mixes oceanic and continental crust by the continental fraction. Oceanic
+// lithosphere cools and sinks with age t:  depth = ridgeDepth + subsidence sqrt(t / 1 Myr)
+// until it reaches the depth of old cold crust (Parsons & Sclater 1977, J. Geophys. Res. 82).
+// Erosion therefore triggers rebound: removing 1 m of rock lowers a continent by only
+// 1 - rho_c / rho_m ~ 0.15 m, which is why old mountain belts outlive their erosion.
+//
+// SEA LEVEL is set every step so the ocean's water volume stays constant: young, buoyant
+// ocean floor or shrinking continents push it up; old deep basins pull it down.
+//
+// SURFACE processes are a Simulation on the same mesh with planet-scale parameters
+// (rivers, creep, weathering; no rockfall or waves at 100-km cells). Its erosion and
+// deposition change crust thickness, written back to the plate frames.
+//
+// Conservation: in the plate frames, total crust volume changes by exactly
+//   created (ridges) + arcs - subducted + surface change (sediment lost to the sea).
+// The world view samples the plate frames by nearest neighbour; where neighbouring
+// world cells look back to the same plate cell (a few per cent of cells, along seams
+// where the rotated mesh does not line up), the map shows that column twice and skips
+// another for that step.
+
+
+
+
+
+
+const YR_PER_MYR = 1e6;
+
+const PLANET_DEFAULTS = {
+  seed: 1,
+  subdivisions: 40,              // icosahedron edge cuts: 10 f^2 + 2 cells (40 -> 16 002, ~180 km apart on Earth)
+  radius: 6.371e6,               // m
+  time: { dt: 5e5 },             // years per step
+  plates: {
+    count: 10,
+    minSpeed: 0.01,              // m/yr, fastest point of the slowest plate
+    maxSpeed: 0.08,              // m/yr, fastest point of the fastest plate
+    sizeVariation: 1.0,          // spread of plate sizes (0 = all similar)
+    collisionLocking: 2e7,       // yr: relative motion of colliding continents decays over this
+    lockingLength: 1.5e6,        // m of collision front over which locking reaches full strength
+    reorganizeEvery: 0,          // yr between plate reorganisations (new poles); 0 = never
+  },
+  continents: {
+    mode: 'scattered',           // 'scattered' (noise blobs) | 'supercontinent' (one cap)
+    fraction: 0.35,              // share of the surface that starts continental
+    wavelength: 1.2,             // noise wavelength in planet radii (smaller = more, smaller continents)
+    thicknessNoise: 4000,        // m
+  },
+  crust: {
+    continentalThickness: 35000, // m
+    oceanicThickness: 7000,      // m
+    continentalDensity: 2800,    // kg/m^3
+    oceanicDensity: 2900,
+    mantleDensity: 3300,
+    waterDensity: 1030,
+    referenceElevation: 600,     // m: where continental crust of continentalThickness floats
+    ridgeDepth: 2600,            // m below sea level at a spreading ridge
+    subsidence: 350,             // m per sqrt(Myr) of oceanic subsidence with age
+    trenchDepth: 2500,           // m: extra depth of a subducting plate's edge (ocean trenches)
+    arcFraction: 0.1,            // volume of new arc crust per volume of oceanic crust subducted
+    sedimentAccretion: 0.5,      // share of a sinking ocean floor's sediment scraped off at the trench
+    arcWidth: 250000,            // m: width over which arc and scraped-off crust spreads behind the margin
+    polarityFlip: 2000,          // m: buoyancy excess of the sinking column that flips a subduction zone
+    flowThreshold: 45000,        // m: crust thicker than this spreads sideways
+    flowDiffusivity: 5e4,        // m^2/yr: how fast it spreads at the threshold...
+    flowScale: 10000,            // m: ...rising as (1 + (excess / flowScale)^2) for thicker crust
+  },
+  climate: {
+    zonal: true,                 // wet tropics, dry subtropics, wet mid-latitudes, dry poles
+    precipitation: 1.0,          // m/yr, scales the whole pattern
+  },
+  // Surface processes: parameters for the Simulation on the sphere (see params.js).
+  // Erodibilities are effective values for ~100-km cells, far below landscape-scale ones:
+  // the cells hide all the relief that does the eroding at small scales.
+  surface: {
+    rocks: { crust: { color: '#9a8a74', erodibility: 1.5e-7, cohesion: 1e8, frictionAngle: 45, weathering: 1e-4, waveErodibility: 0 } },
+    strata: { layers: [{ rock: 'crust', thickness: 1e9 }], basement: 'crust', strengthVariation: { amplitude: 0 }, undulation: { amplitude: 0 } },
+    fluvial: { soilErodibility: 1e-6, deposition: 0.5 },
+    hillslope: { diffusivity: 1000, transportDepth: 20 },
+    weathering: { productionDepth: 30, moistureExponent: 0.5 },
+    vegetation: { cover: 'auto' },
+    climate: { frost: 0.3 },
+  },
+};
+
+const PLANET_PRESETS = {
+  'earth-like': {
+    description: 'About a third continental crust in scattered blocks, ten plates moving 1-8 cm/yr: ridges, trenches, arcs and collisions.',
+  },
+  'supercontinent': {
+    description: 'One supercontinent over several plates, which tear it apart: rifts open into new oceans while its far side crumples.',
+    continents: { mode: 'supercontinent', fraction: 0.3 },
+    plates: { count: 8 },
+  },
+  'archipelago': {
+    description: 'Mostly ocean with small continental fragments and many plates: island arcs grow, collide and weld into new land.',
+    continents: { fraction: 0.12, wavelength: 0.5 },
+    plates: { count: 14 },
+  },
+};
+
+/** DEFAULTS <- preset <- overrides, like resolveParams for landscapes. */
+function resolvePlanetParams(input = {}) {
+  const over = typeof input === 'string' ? { preset: input } : input;
+  let p = deepMerge(PLANET_DEFAULTS, {});
+  if (over.preset) {
+    const pre = PLANET_PRESETS[over.preset];
+    if (!pre) throw new Error(`unknown planet preset "${over.preset}"; try one of: ${Object.keys(PLANET_PRESETS).join(', ')}`);
+    const { description, ...rest } = pre;
+    p = deepMerge(p, rest);
+  }
+  p = deepMerge(p, over);
+  const fail = (m) => { throw new Error(`invalid planet parameters: ${m}`); };
+  if (!(p.subdivisions >= 2 && p.subdivisions <= 160)) fail('subdivisions must be 2..160');
+  if (!(p.plates.count >= 1)) fail('plates.count must be at least 1');
+  if (!(p.continents.fraction >= 0 && p.continents.fraction <= 1)) fail('continents.fraction must be 0..1');
+  if (!(p.time.dt > 0)) fail('time.dt must be positive');
+  return p;
+}
+
+/** The Simulation parameters for the surface processes on the sphere. */
+function surfaceParams(p, seaLevel) {
+  return deepMerge(p.surface, {
+    seed: p.seed,
+    time: { dt: p.time.dt },
+    boundary: { open: [], seaLevel },
+    initial: { type: 'flat', base: 0, height: 0, noise: { amplitude: 0 }, soil: 0 },
+    uplift: { rate: 0, pattern: 'uniform' },
+    coast: { enabled: false },
+    rockfall: { enabled: false },
+    earthquakes: { enabled: false, faults: [] },
+  });
+}
+
+/** Rotation matrix (row-major 3x3) for angle theta about unit axis (x, y, z): Rodrigues' formula. */
+function axisAngle(x, y, z, theta, out) {
+  const c = Math.cos(theta), s = Math.sin(theta), C = 1 - c;
+  out[0] = c + x * x * C; out[1] = x * y * C - z * s; out[2] = x * z * C + y * s;
+  out[3] = y * x * C + z * s; out[4] = c + y * y * C; out[5] = y * z * C - x * s;
+  out[6] = z * x * C - y * s; out[7] = z * y * C + x * s; out[8] = c + z * z * C;
+  return out;
+}
+
+class Planet {
+  /** @param {object|string} [params] planet parameter overrides (optionally `preset`), or a preset name */
+  constructor(params = {}) {
+    this.params = resolvePlanetParams(params);
+    const p = this.params;
+    this.mesh = new SphereMesh(p.subdivisions, p.radius);
+    const mesh = this.mesh;
+    const n = mesh.size;
+    this.rng = new Rng(p.seed);
+    this.time = 0;
+    this.stepCount = 0;
+    this.seaLevel = 0;
+    this.sim = new Simulation(surfaceParams(p, 0), { mesh });
+
+    const P = p.plates.count;
+    this.plateCount = P;
+    this.rot = new Float64Array(9 * P);
+    for (let q = 0; q < P; q++) { this.rot[9 * q] = this.rot[9 * q + 4] = this.rot[9 * q + 8] = 1; }
+    this.omega = new Float64Array(3 * P); // angular velocity vectors (rad/yr)
+    // plate-frame state, P copies of the mesh, index q * n + s
+    this.bOwned = new Uint8Array(P * n);
+    this.bConsumed = new Uint8Array(P * n);
+    this.bStamp = new Int32Array(P * n);
+    this.bThick = new Float64Array(P * n);
+    this.bCont = new Float64Array(P * n);
+    this.bBirth = new Float64Array(P * n);
+    this.bSoil = new Float64Array(P * n);
+    this.bodyOf = new Int32Array(P * n);
+    for (let q = 0; q < P; q++) for (let i = 0; i < n; i++) this.bodyOf[q * n + i] = i;
+    this.stamp = 0;
+    // world view
+    this.owner = new Int32Array(n);
+    this.prevOwner = new Int32Array(n);
+    this.thickness = new Float64Array(n);
+    this.continental = new Float64Array(n);
+    this.age = new Float64Array(n);
+    /** 0 interior, 1 convergent, 2 divergent, 3 transform (largest-rate neighbour) */
+    this.boundary = new Uint8Array(n);
+    /** isostatic + tectonic elevation before surface processes, this step (m) */
+    this.zTectonic = new Float64Array(n);
+    /** rock uplift rate from tectonics and isostasy over the last step, following the plate (m/yr) */
+    this.upliftRate = new Float64Array(n);
+    /** total surface change rate over the last step, following the plate (m/yr) */
+    this.dzdt = new Float64Array(n);
+    /** crust (m^3, continental) scraped off or grown as arcs this step, not yet placed */
+    this.pending = new Float64Array(n);
+    /** plate pair -> the plate that overrides at their convergent boundary */
+    this.polarity = new Map();
+    this.budget = { created: 0, arc: 0, subducted: 0, accreted: 0, surface: 0 };
+    this.last = { created: 0, subducted: 0, arc: 0, accreted: 0, substeps: 0, collisions: 0 };
+
+    this._setupPlates();
+    this._setupCrust();
+    this._buildView();
+    this._initialAges();
+    this._buildView();
+    this._precipitation();
+    // water volume: whatever lies below sea level 0 at the start
+    this._isostasy();
+    this.waterVolume = this._waterBelow(0);
+    this.seaLevel = 0;
+    this._applyToSurface();
+    /** surface elevation of every plate column when it was last seen (m) */
+    this.bZ = new Float64Array(P * n);
+    for (let i = 0; i < n; i++) this.bZ[this.owner[i] * n + i] = this.sim.z[i];
+    this.volume0 = this.crustVolume();
+  }
+
+  /** Total crust volume held by all plates, in their own frames (m^3). */
+  crustVolume() {
+    const n = this.mesh.size;
+    const A = this.mesh.area;
+    let v = 0;
+    for (let q = 0; q < this.plateCount; q++) {
+      for (let s = 0; s < n; s++) if (this.bOwned[q * n + s]) v += this.bThick[q * n + s] * A[s];
+    }
+    return v;
+  }
+
+  /** Isostatic surface elevation (m, relative to the datum sea level 0). */
+  elevation(h, c, ageYr) {
+    const cr = this.params.crust;
+    const rm = cr.mantleDensity;
+    const rho = cr.oceanicDensity + c * (cr.continentalDensity - cr.oceanicDensity);
+    const K = cr.continentalThickness * (1 - cr.continentalDensity / rm) - cr.referenceElevation;
+    const dry = h * (1 - rho / rm) - K;
+    let e = dry >= 0 ? dry : (dry * rm) / (rm - cr.waterDensity);
+    if (c < 1) e += (1 - c) * this._thermal(ageYr);
+    return e;
+  }
+
+  /** Thermal buoyancy of young oceanic lithosphere (m, water-loaded), zero once old. */
+  _thermal(ageYr) {
+    const cr = this.params.crust;
+    if (this._theta0 === undefined || this._theta0key !== cr) {
+      // so that new crust sits at ridgeDepth and old crust at its cold isostatic depth
+      this._theta0key = cr;
+      const rm = cr.mantleDensity;
+      const K = cr.continentalThickness * (1 - cr.continentalDensity / rm) - cr.referenceElevation;
+      const dry = cr.oceanicThickness * (1 - cr.oceanicDensity / rm) - K;
+      const old = dry >= 0 ? dry : (dry * rm) / (rm - cr.waterDensity);
+      this._theta0 = Math.max(0, -cr.ridgeDepth - old);
+    }
+    return Math.max(0, this._theta0 - this.params.crust.subsidence * Math.sqrt(Math.max(0, ageYr) / YR_PER_MYR));
+  }
+
+  /** Surface velocity (m/yr, 3-vector) of plate q at unit position (x, y, z). */
+  velocity(q, x, y, z, out = [0, 0, 0]) {
+    const w = this.omega, R = this.params.radius;
+    const wx = w[3 * q], wy = w[3 * q + 1], wz = w[3 * q + 2];
+    out[0] = R * (wy * z - wz * y); out[1] = R * (wz * x - wx * z); out[2] = R * (wx * y - wy * x);
+    return out;
+  }
+
+  /** Advance one step (default params.time.dt years). */
+  step(dt = this.params.time.dt) {
+    const p = this.params;
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const R = p.radius;
+    // tectonics, in substeps that move no point more than half a cell
+    let vmax = 0;
+    for (let q = 0; q < this.plateCount; q++) vmax = Math.max(vmax, R * Math.hypot(this.omega[3 * q], this.omega[3 * q + 1], this.omega[3 * q + 2]));
+    const sub = Math.max(1, Math.ceil((vmax * dt) / (0.5 * mesh.spacing)));
+    const h = dt / sub;
+    const last = this.last;
+    last.created = last.subducted = last.arc = last.accreted = last.collisions = 0;
+    for (let k = 0; k < sub; k++) this._tectonicSubstep(h, this.time + (k + 1) * h);
+    last.substeps = sub;
+    this._maybeReorganize(dt);
+
+    this._spreadAdditions();
+    this._buildView();
+    this._crustalFlow(dt);
+    this._buildView();
+    this._classifyBoundaries();
+    this._isostasy();
+    this.seaLevel = this._seaLevelForVolume(this.waterVolume);
+    this._applyToSurface();
+
+    // surface processes
+    const sim = this.sim;
+    const zT = this.zTectonic;
+    sim.step(dt);
+    // write erosion and deposition back to the plates
+    const A = mesh.area;
+    let surf = 0;
+    for (let i = 0; i < n; i++) {
+      const q = this.owner[i];
+      const s = this.bodyOf[q * n + i];
+      const b = q * n + s;
+      // sediment a river carries past its first sea cell (once that is filled to sea level)
+      // stays in that column and builds a delta, instead of leaving the planet; isostasy
+      // places it next step
+      const delta = sim.exportedAt[i] / A[i];
+      const d = sim.z[i] - zT[i] + delta;
+      const dv = d * A[i];
+      surf += dv;
+      const hOld = this.bThick[b];
+      const hNew = Math.max(0, hOld + dv / A[s]);
+      if (d > 0) this.bCont[b] = (this.bCont[b] * hOld + (hNew - hOld)) / hNew; // sediment is continental material
+      this.bThick[b] = hNew;
+      this.bSoil[b] = Math.min(sim.soil[i] + delta, hNew);
+    }
+    this.budget.surface += surf;
+    // Rates follow the rock, not the map: compare each column with itself a step ago, in
+    // its plate's frame. (Measured at fixed map points, a mountain range sliding past would
+    // read as uplift on one flank and collapse on the other.)
+    const tStart = this.time;
+    for (let i = 0; i < n; i++) {
+      const q = this.owner[i];
+      const b = q * n + this.bodyOf[q * n + i];
+      const prev = this.bBirth[b] > tStart ? zT[i] : this.bZ[b]; // new crust: no history
+      this.dzdt[i] = (sim.z[i] - prev) / dt;
+      this.upliftRate[i] = (zT[i] - prev) / dt;
+    }
+    for (let i = 0; i < n; i++) {
+      const q = this.owner[i];
+      this.bZ[q * n + this.bodyOf[q * n + i]] = sim.z[i];
+    }
+    this.time += dt;
+    this.stepCount++;
+    this._buildView();
+    return this;
+  }
+
+  run(steps, onStep) {
+    for (let k = 0; k < steps; k++) { this.step(); if (onStep) onStep(this); }
+    return this;
+  }
+
+  /** Change parameters mid-run (crust, climate, surface, plate locking/reorganisation). */
+  setParams(over) {
+    const next = resolvePlanetParams(deepMerge(this.params, over));
+    for (const k of ['subdivisions', 'radius', 'seed']) if (next[k] !== this.params[k]) throw new Error(`planet ${k} cannot change mid-run; make a new Planet`);
+    if (next.plates.count !== this.params.plates.count) throw new Error('plate count cannot change mid-run; make a new Planet');
+    this.params = next;
+    this.sim.setParams(deepMerge(surfaceParams(next, this.seaLevel), {}));
+    this._precipitation();
+    return this;
+  }
+
+  /**
+   * Replace the plate layout, keeping the crust where it is: `owner(i)` gives the plate
+   * of world cell i (0..plates.count-1) and `omega[q]` plate q's angular velocity vector
+   * (rad/yr; its direction is the Euler pole). For custom set-ups and tests.
+   */
+  setPlates(owner, omega) {
+    const n = this.mesh.size;
+    const P = this.plateCount;
+    this._buildView();
+    const soil = new Float64Array(n), birth = new Float64Array(n), zNow = Float64Array.from(this.sim.z);
+    for (let i = 0; i < n; i++) {
+      const q = this.owner[i];
+      soil[i] = this.bSoil[q * n + this.bodyOf[q * n + i]];
+      birth[i] = this.bBirth[q * n + this.bodyOf[q * n + i]];
+    }
+    for (const a of [this.bOwned, this.bConsumed, this.bThick, this.bCont, this.bBirth, this.bSoil, this.bZ]) a.fill(0);
+    this.rot.fill(0);
+    for (let q = 0; q < P; q++) { this.rot[9 * q] = this.rot[9 * q + 4] = this.rot[9 * q + 8] = 1; }
+    for (let q = 0; q < P; q++) for (let i = 0; i < n; i++) this.bodyOf[q * n + i] = i;
+    for (let i = 0; i < n; i++) {
+      const q = owner(i);
+      if (!(q >= 0 && q < P)) throw new Error(`setPlates: cell ${i} given plate ${q}`);
+      const b = q * n + i;
+      this.owner[i] = this.prevOwner[i] = q;
+      this.bOwned[b] = 1;
+      this.bThick[b] = this.thickness[i];
+      this.bCont[b] = this.continental[i];
+      this.bBirth[b] = birth[i];
+      this.bSoil[b] = soil[i];
+      this.bZ[b] = zNow[i];
+    }
+    omega.forEach((w, q) => { this.omega[3 * q] = w[0]; this.omega[3 * q + 1] = w[1]; this.omega[3 * q + 2] = w[2]; });
+    this.polarity.clear();
+    this._buildView();
+    this.volume0 = this.crustVolume() - (this.budget.created + this.budget.arc - this.budget.subducted + this.budget.surface);
+    return this;
+  }
+
+  /** Summary numbers. */
+  stats() {
+    const n = this.mesh.size;
+    const A = this.mesh.area;
+    const z = this.sim.z;
+    let land = 0, total = 0, zmin = Infinity, zmax = -Infinity, cont = 0;
+    const alive = new Set();
+    for (let i = 0; i < n; i++) {
+      total += A[i];
+      if (z[i] > this.seaLevel) land += A[i];
+      if (this.continental[i] > 0.5) cont += A[i];
+      zmin = Math.min(zmin, z[i]);
+      zmax = Math.max(zmax, z[i]);
+      alive.add(this.owner[i]);
+    }
+    return {
+      time: this.time, step: this.stepCount, plates: alive.size, seaLevel: this.seaLevel,
+      landFraction: land / total, continentalFraction: cont / total, minElevation: zmin, maxElevation: zmax,
+      created: this.last.created, subducted: this.last.subducted, arc: this.last.arc, accreted: this.last.accreted,
+    };
+  }
+
+  // ------------------------------------------------------------------ set-up
+
+  _setupPlates() {
+    const p = this.params;
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const P = this.plateCount;
+    const rng = this.rng;
+    // seeds spread out: rejection of candidates too close to earlier seeds
+    const minSep = Math.acos(1 - 2 / P) * 0.6;
+    const seeds = [];
+    for (let tries = 0; seeds.length < P && tries < 10000; tries++) {
+      const c = Math.floor(rng.next() * n);
+      const ok = seeds.every((s) => {
+        const d = mesh.pos[3 * s] * mesh.pos[3 * c] + mesh.pos[3 * s + 1] * mesh.pos[3 * c + 1] + mesh.pos[3 * s + 2] * mesh.pos[3 * c + 2];
+        return Math.acos(Math.min(1, d)) > minSep;
+      });
+      if (ok || tries > 5000) seeds.push(c);
+    }
+    // grow plates outward at different speeds over a noisy cost: irregular, varied plates
+    const speed = seeds.map(() => Math.exp(p.plates.sizeVariation * (rng.next() - 0.5) * 1.5));
+    const cost = new Float64Array(n);
+    const P3 = mesh.pos;
+    for (let i = 0; i < n; i++) {
+      cost[i] = 1 + 0.6 * fbm3(P3[3 * i], P3[3 * i + 1], P3[3 * i + 2], { wavelength: 0.35, octaves: 4, seed: p.seed + 11 });
+    }
+    const label = new Int32Array(n).fill(-1);
+    const best = new Float64Array(n).fill(Infinity);
+    const heap = new MinHeap(6 * n + P);
+    seeds.forEach((s, q) => { best[s] = 0; heap.push(s, 0); label[s] = q; });
+    const done = new Uint8Array(n);
+    while (heap.n) {
+      const i = heap.pop();
+      if (done[i]) continue;
+      done[i] = 1;
+      const q = label[i];
+      for (let k = 0; k < 6; k++) {
+        const e = 6 * i + k;
+        const j = mesh.neighbors[e];
+        if (j < 0 || done[j]) continue;
+        const d = best[i] + (mesh.dist[e] * 0.5 * (cost[i] + cost[j])) / speed[q];
+        if (d < best[j]) { best[j] = d; label[j] = q; heap.push(j, d); }
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      const q = label[i];
+      this.owner[i] = q;
+      this.prevOwner[i] = q;
+      this.bOwned[q * n + i] = 1;
+    }
+    for (let q = 0; q < P; q++) this._randomMotion(q);
+  }
+
+  _randomMotion(q) {
+    const p = this.params.plates;
+    const rng = this.rng;
+    // uniform random pole on the sphere
+    const z = 2 * rng.next() - 1;
+    const a = 2 * Math.PI * rng.next();
+    const r = Math.sqrt(1 - z * z);
+    const v = p.minSpeed + (p.maxSpeed - p.minSpeed) * rng.next();
+    const w = v / this.params.radius;
+    this.omega[3 * q] = w * r * Math.cos(a);
+    this.omega[3 * q + 1] = w * r * Math.sin(a);
+    this.omega[3 * q + 2] = w * z;
+  }
+
+  _setupCrust() {
+    const p = this.params;
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const P3 = mesh.pos;
+    const cp = p.continents;
+    const cr = p.crust;
+    const field = new Float64Array(n);
+    if (cp.mode === 'supercontinent') {
+      const [cx, cy, cz] = lonLatToVector(360 * this.rng.next() - 180, 60 * this.rng.next() - 30);
+      for (let i = 0; i < n; i++) {
+        const d = P3[3 * i] * cx + P3[3 * i + 1] * cy + P3[3 * i + 2] * cz;
+        field[i] = d + 0.25 * fbm3(P3[3 * i], P3[3 * i + 1], P3[3 * i + 2], { wavelength: 0.6, octaves: 5, seed: p.seed + 23 });
+      }
+    } else if (cp.mode === 'scattered') {
+      for (let i = 0; i < n; i++) field[i] = fbm3(P3[3 * i], P3[3 * i + 1], P3[3 * i + 2], { wavelength: cp.wavelength, octaves: 5, seed: p.seed + 23 });
+    } else {
+      throw new Error(`unknown continents.mode "${cp.mode}"`);
+    }
+    // threshold at the area quantile that gives the requested continental fraction
+    const order = Array.from({ length: n }, (_, i) => i).sort((a, b) => field[b] - field[a]);
+    const total = mesh.area.reduce((s, a) => s + a, 0);
+    const cont = new Float64Array(n);
+    let acc = 0;
+    for (const i of order) { if (acc >= cp.fraction * total) break; cont[i] = 1; acc += mesh.area[i]; }
+    const thick = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const noise = cp.thicknessNoise * fbm3(P3[3 * i], P3[3 * i + 1], P3[3 * i + 2], { wavelength: 0.3, octaves: 4, seed: p.seed + 29 });
+      thick[i] = cont[i] ? cr.continentalThickness + noise : cr.oceanicThickness;
+    }
+    // soften margins into shelves and slopes: two passes of neighbour averaging
+    for (let pass = 0; pass < 2; pass++) {
+      const t0 = Float64Array.from(thick), c0 = Float64Array.from(cont);
+      for (let i = 0; i < n; i++) {
+        let st = t0[i], sc = c0[i], m = 1;
+        for (let k = 0; k < 6; k++) { const j = mesh.neighbors[6 * i + k]; if (j >= 0) { st += t0[j]; sc += c0[j]; m++; } }
+        // keep interiors as they are; only mixed neighbourhoods change
+        thick[i] = 0.5 * t0[i] + 0.5 * (st / m);
+        cont[i] = 0.5 * c0[i] + 0.5 * (sc / m);
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      const b = this.owner[i] * n + i;
+      this.bThick[b] = thick[i];
+      this.bCont[b] = cont[i];
+      this.bBirth[b] = -100 * YR_PER_MYR; // replaced by _initialAges
+    }
+  }
+
+  /** Initial ocean-floor ages: travel time from the nearest spreading boundary of the plate. */
+  _initialAges() {
+    const mesh = this.mesh;
+    const n = mesh.size;
+    this._classifyBoundaries();
+    const best = new Float64Array(n).fill(Infinity);
+    const heap = new MinHeap(6 * n + n);
+    const v = [0, 0, 0];
+    for (let i = 0; i < n; i++) {
+      if (this.boundary[i] !== 2) continue;
+      best[i] = 0;
+      heap.push(i, 0);
+    }
+    const done = new Uint8Array(n);
+    while (heap.n) {
+      const i = heap.pop();
+      if (done[i]) continue;
+      done[i] = 1;
+      const q = this.owner[i];
+      const P3 = mesh.pos;
+      this.velocity(q, P3[3 * i], P3[3 * i + 1], P3[3 * i + 2], v);
+      const speed = Math.max(0.005, Math.hypot(v[0], v[1], v[2])); // half-spreading rate proxy
+      for (let k = 0; k < 6; k++) {
+        const e = 6 * i + k;
+        const j = mesh.neighbors[e];
+        if (j < 0 || done[j] || this.owner[j] !== q) continue;
+        const d = best[i] + mesh.dist[e] / speed;
+        if (d < best[j]) { best[j] = d; heap.push(j, d); }
+      }
+    }
+    const maxAge = 180 * YR_PER_MYR;
+    for (let i = 0; i < n; i++) {
+      const b = this.owner[i] * n + i;
+      this.bBirth[b] = -Math.min(maxAge, Number.isFinite(best[i]) ? best[i] : maxAge);
+    }
+  }
+
+  _precipitation() {
+    const c = this.params.climate;
+    const mesh = this.mesh;
+    const P = new Float64Array(mesh.size);
+    for (let i = 0; i < mesh.size; i++) {
+      const lat = Math.abs((mesh.lat[i] * 180) / Math.PI);
+      // [adapted] a smooth caricature of Earth's zonal-mean rainfall
+      const f = c.zonal ? 0.25 + 1.5 * Math.exp(-((lat / 12) ** 2)) + 0.65 * Math.exp(-(((lat - 50) / 13) ** 2)) : 1;
+      P[i] = c.precipitation * f;
+    }
+    this.sim.setFields({ precipitation: P });
+  }
+
+  // ------------------------------------------------------------------ tectonics
+
+  _tectonicSubstep(h, tNow) {
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const P = this.plateCount;
+    const P3 = mesh.pos;
+    const { rot, omega, bodyOf, bOwned, bStamp } = this;
+    // 1. rotate every plate a little further
+    const Q = new Float64Array(9), M = new Float64Array(9);
+    const alive = new Uint8Array(P);
+    for (let i = 0; i < n; i++) alive[this.owner[i]] = 1;
+    for (let q = 0; q < P; q++) {
+      const wx = omega[3 * q], wy = omega[3 * q + 1], wz = omega[3 * q + 2];
+      const w = Math.hypot(wx, wy, wz);
+      if (!(w > 0)) continue;
+      axisAngle(wx / w, wy / w, wz / w, w * h, Q);
+      const Rq = rot.subarray(9 * q, 9 * q + 9);
+      for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) M[3 * r + c] = Q[3 * r] * Rq[c] + Q[3 * r + 1] * Rq[3 + c] + Q[3 * r + 2] * Rq[6 + c];
+      // re-orthonormalise (Gram-Schmidt on the rows) so round-off cannot shear the plate
+      for (let r = 0; r < 3; r++) {
+        for (let r2 = 0; r2 < r; r2++) {
+          const d = M[3 * r] * M[3 * r2] + M[3 * r + 1] * M[3 * r2 + 1] + M[3 * r + 2] * M[3 * r2 + 2];
+          for (let c = 0; c < 3; c++) M[3 * r + c] -= d * M[3 * r2 + c];
+        }
+        const L = Math.hypot(M[3 * r], M[3 * r + 1], M[3 * r + 2]);
+        for (let c = 0; c < 3; c++) M[3 * r + c] /= L;
+      }
+      Rq.set(M);
+    }
+    // 2. look back along each plate's rotation: which plate cell is now at world cell i?
+    const stamp = ++this.stamp;
+    for (let q = 0; q < P; q++) {
+      if (!alive[q]) continue;
+      const Rq = rot.subarray(9 * q, 9 * q + 9);
+      for (let i = 0; i < n; i++) {
+        const x = P3[3 * i], y = P3[3 * i + 1], z = P3[3 * i + 2];
+        // body = R^T world
+        const bx = Rq[0] * x + Rq[3] * y + Rq[6] * z;
+        const by = Rq[1] * x + Rq[4] * y + Rq[7] * z;
+        const bz = Rq[2] * x + Rq[5] * y + Rq[8] * z;
+        const s = mesh.nearest(bx, by, bz, bodyOf[q * n + i]);
+        bodyOf[q * n + i] = s;
+        bStamp[q * n + s] = stamp;
+      }
+    }
+    // 3. resolve each world cell: gap, single owner, or convergence
+    const cand = new Int32Array(P);
+    const A = mesh.area;
+    const cr = this.params.crust;
+    const last = this.last;
+    const collide = new Map();
+    this.prevOwner.set(this.owner);
+    for (let i = 0; i < n; i++) {
+      let m = 0;
+      for (let q = 0; q < P; q++) if (alive[q] && bOwned[q * n + bodyOf[q * n + i]]) cand[m++] = q;
+      if (m === 1) { this.owner[i] = cand[0]; continue; }
+      if (m === 0) {
+        // spreading: new oceanic crust joins the plate that was here
+        let q = this.prevOwner[i];
+        if (!alive[q]) for (let k = 0; k < 6; k++) { const j = mesh.neighbors[6 * i + k]; if (j >= 0 && alive[this.prevOwner[j]]) { q = this.prevOwner[j]; break; } }
+        const s = bodyOf[q * n + i];
+        const b = q * n + s;
+        bOwned[b] = 1; this.bConsumed[b] = 0;
+        this.bThick[b] = cr.oceanicThickness; this.bCont[b] = 0; this.bBirth[b] = this._birthTime(q, s, i, tNow); this.bSoil[b] = 0;
+        last.created += cr.oceanicThickness * A[s];
+        this.budget.created += cr.oceanicThickness * A[s];
+        this.owner[i] = q;
+        continue;
+      }
+      // convergence: decide which plate overrides (see _overrider)
+      let w = cand[0];
+      for (let c = 1; c < m; c++) w = this._overrider(w, cand[c], i, tNow);
+      for (let c = 0; c < m; c++) {
+        const q = cand[c];
+        if (q === w) continue;
+        const sq = bodyOf[q * n + i];
+        // a continent (not a sliver of arc crust) arriving at the margin: a collision
+        const continent = this.bCont[q * n + sq] > 0.5;
+        this._consume(q, sq, i, stamp);
+        // also take plate-frame cells next to it that no world cell looked at this substep,
+        // so subduction leaves no stray patches behind in the sinking plate
+        for (let k = 0; k < 6; k++) {
+          const t = mesh.neighbors[6 * sq + k];
+          if (t >= 0 && bOwned[q * n + t] && bStamp[q * n + t] !== stamp) this._consume(q, t, i, stamp);
+        }
+        if (continent) {
+          const key = Math.min(w, q) * P + Math.max(w, q);
+          collide.set(key, (collide.get(key) || 0) + 1);
+        }
+      }
+      this.owner[i] = w;
+    }
+    // A world cell resolved early may look back to a plate cell that a later convergence
+    // consumed (two world cells can sample the same plate cell): hand it to a plate that
+    // still has crust there, or treat it as a gap.
+    for (let i = 0; i < n; i++) {
+      const q0 = this.owner[i];
+      if (bOwned[q0 * n + bodyOf[q0 * n + i]]) continue;
+      let q1 = -1, e1 = -Infinity;
+      for (let q = 0; q < P; q++) {
+        if (!alive[q]) continue;
+        const b = q * n + bodyOf[q * n + i];
+        if (!bOwned[b]) continue;
+        const e = this.elevation(this.bThick[b], this.bCont[b], tNow - this.bBirth[b]);
+        if (e > e1) { e1 = e; q1 = q; }
+      }
+      if (q1 >= 0) { this.owner[i] = q1; continue; }
+      const b = q0 * n + bodyOf[q0 * n + i];
+      const s = bodyOf[q0 * n + i];
+      bOwned[b] = 1; this.bConsumed[b] = 0;
+      this.bThick[b] = cr.oceanicThickness; this.bCont[b] = 0; this.bBirth[b] = this._birthTime(q0, s, i, tNow); this.bSoil[b] = 0;
+      last.created += cr.oceanicThickness * A[s];
+      this.budget.created += cr.oceanicThickness * A[s];
+    }
+    // 4. close pinholes in the plate frames (cells skipped by the nearest-neighbour
+    //    sampling while crust was being added around them)
+    for (let q = 0; q < P; q++) {
+      if (!alive[q]) continue;
+      for (let s = 0; s < n; s++) {
+        const b = q * n + s;
+        if (bOwned[b] || this.bConsumed[b]) continue;
+        let own = 0, th = 0, co = 0, bi = 0, so = 0;
+        const val = mesh.valence[s];
+        for (let k = 0; k < val; k++) {
+          const t = mesh.neighbors[6 * s + k];
+          const bt = q * n + t;
+          if (bOwned[bt]) { own++; th += this.bThick[bt]; co += this.bCont[bt]; bi += this.bBirth[bt]; so += this.bSoil[bt]; }
+        }
+        if (own < val - 1) continue;
+        bOwned[b] = 1;
+        this.bThick[b] = th / own; this.bCont[b] = co / own; this.bBirth[b] = bi / own; this.bSoil[b] = so / own;
+        last.created += this.bThick[b] * A[s];
+        this.budget.created += this.bThick[b] * A[s];
+      }
+    }
+    // 5. colliding continents lock together
+    const pl = this.params.plates;
+    if (pl.collisionLocking > 0 && collide.size) {
+      const area = new Float64Array(P);
+      for (let i = 0; i < n; i++) area[this.owner[i]] += A[i];
+      const ref = Math.max(1, pl.lockingLength / mesh.spacing);
+      for (const [key, cells] of collide) {
+        const a = Math.floor(key / P), b = key % P;
+        const f = Math.min(1, cells / ref);
+        const keep = Math.exp((-h / pl.collisionLocking) * f);
+        const wa = area[b] / (area[a] + area[b] || 1), wb = 1 - wa;
+        for (let c = 0; c < 3; c++) {
+          const d = (omega[3 * a + c] - omega[3 * b + c]) * (1 - keep);
+          omega[3 * a + c] -= wa * d;
+          omega[3 * b + c] += wb * d;
+        }
+        last.collisions += cells;
+      }
+    }
+  }
+
+  /**
+   * Formation time of new crust in plate q's cell s, which fills the gap at world cell i.
+   * The nearest-neighbour view opens gaps a whole cell at a time, so the new cell is
+   * usually some way past the gap, or short of it; date it from when it passes:
+   * signed distance beyond i along the plate's motion, over the plate's speed.
+   */
+  _birthTime(q, s, i, tNow) {
+    const P3 = this.mesh.pos;
+    const R = this.rot.subarray(9 * q, 9 * q + 9);
+    const bx = P3[3 * s], by = P3[3 * s + 1], bz = P3[3 * s + 2];
+    const wx = R[0] * bx + R[1] * by + R[2] * bz, wy = R[3] * bx + R[4] * by + R[5] * bz, wz = R[6] * bx + R[7] * by + R[8] * bz;
+    const v = this.velocity(q, P3[3 * i], P3[3 * i + 1], P3[3 * i + 2]);
+    const speed = Math.hypot(v[0], v[1], v[2]);
+    if (!(speed > 0)) return tNow;
+    const ahead = (this.params.radius * ((wx - P3[3 * i]) * v[0] + (wy - P3[3 * i + 1]) * v[1] + (wz - P3[3 * i + 2]) * v[2])) / speed;
+    // behind the gap (not yet at it) counts as forming a little later
+    return tNow - Math.max(-this.mesh.spacing, Math.min(ahead, this.mesh.spacing)) / speed;
+  }
+
+  /**
+   * Which of plates a and b overrides the other at world cell i. Each pair keeps the
+   * polarity it took at first contact (the more buoyant column then), because a
+   * subduction zone does not flip from one cell to the next; but if the column meant to
+   * sink stands higher than the overriding one by more than polarityFlip (a continent
+   * arriving at the trench), the polarity flips, as in arc-continent collisions.
+   */
+  _overrider(a, b, i, tNow) {
+    const n = this.mesh.size;
+    const ba = a * n + this.bodyOf[a * n + i], bb = b * n + this.bodyOf[b * n + i];
+    const ea = this.elevation(this.bThick[ba], this.bCont[ba], tNow - this.bBirth[ba]);
+    const eb = this.elevation(this.bThick[bb], this.bCont[bb], tNow - this.bBirth[bb]);
+    const key = Math.min(a, b) * this.plateCount + Math.max(a, b);
+    let top = this.polarity.get(key);
+    if (top === undefined) top = ea >= eb ? a : b;
+    else if ((top === a ? eb - ea : ea - eb) > this.params.crust.polarityFlip) top = top === a ? b : a;
+    this.polarity.set(key, top);
+    return top;
+  }
+
+  /**
+   * Plate q's frame cell sq goes under the overriding plate at world cell i: its
+   * continental part is scraped off and its oceanic part subducts, feeding arc crust.
+   * Both additions wait in `pending` until _spreadAdditions places them.
+   */
+  _consume(q, sq, i, stamp) {
+    const n = this.mesh.size;
+    const A = this.mesh.area;
+    const b = q * n + sq;
+    const vol = this.bThick[b] * A[sq];
+    // a continent is too buoyant to sink and is scraped off whole; on sinking ocean floor
+    // only part of the sediment it carries is scraped off (accretionary wedge), the rest
+    // goes down with the slab
+    const c = this.bCont[b];
+    const vc = c * vol * (c > 0.5 ? 1 : this.params.crust.sedimentAccretion);
+    const vo = vol - vc;
+    const arc = this.params.crust.arcFraction * vo;
+    this.pending[i] += vc + arc;
+    this.bOwned[b] = 0;
+    this.bConsumed[b] = 1;
+    this.bStamp[b] = stamp;
+    this.last.subducted += vo;
+    this.last.arc += arc;
+    this.last.accreted += vc;
+    this.budget.subducted += vo;
+    this.budget.arc += arc;
+    this.budget.accreted += vc;
+  }
+
+  _maybeReorganize(dt) {
+    const every = this.params.plates.reorganizeEvery;
+    if (!(every > 0)) return;
+    if (Math.floor((this.time + dt) / every) > Math.floor(this.time / every)) {
+      for (let q = 0; q < this.plateCount; q++) this._randomMotion(q);
+    }
+  }
+
+  /** Copy the plate-frame state into the world view. */
+  _buildView() {
+    const n = this.mesh.size;
+    for (let i = 0; i < n; i++) {
+      const q = this.owner[i];
+      const b = q * n + this.bodyOf[q * n + i];
+      this.thickness[i] = this.bThick[b];
+      this.continental[i] = this.bCont[b];
+      this.age[i] = Math.max(0, this.time - this.bBirth[b]);
+    }
+  }
+
+  /**
+   * Place this step's scraped-off and arc crust: spread it over the overriding plate
+   * with a diffusion of width ~arcWidth (arcs stand a few hundred km behind trenches;
+   * collision belts are as wide), then add it to the plate frames as continental crust.
+   */
+  _spreadAdditions() {
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const { neighbors: nb, dist, face, area } = mesh;
+    const vol = this.pending;
+    let any = false;
+    for (let i = 0; i < n; i++) if (vol[i] > 0) { any = true; break; }
+    if (!any) return;
+    let worst = 0;
+    for (let i = 0; i < n; i++) {
+      let t = 0;
+      for (let k = 0; k < 6; k++) { const e = 6 * i + k; if (nb[e] >= 0) t += face[e] / dist[e]; }
+      worst = Math.max(worst, t / area[i]);
+    }
+    // each pass adds about 0.45 / worst x 2 to the variance (m^2); worst ~ 4 / spacing^2
+    const w = this.params.crust.arcWidth;
+    const passes = Math.min(200, Math.ceil((w * w * worst) / 0.9));
+    const kdt = 0.45 / worst;
+    const u = new Float64Array(n);
+    for (let it = 0; it < passes; it++) {
+      for (let i = 0; i < n; i++) u[i] = vol[i] / area[i];
+      for (let i = 0; i < n; i++) {
+        for (let k = 0; k < 6; k++) {
+          const e = 6 * i + k;
+          const j = nb[e];
+          if (j <= i || this.owner[j] !== this.owner[i]) continue;
+          const f = (kdt * face[e] * (u[i] - u[j])) / dist[e];
+          vol[i] -= f;
+          vol[j] += f;
+        }
+      }
+    }
+    for (let i = 0; i < n; i++) {
+      if (!(vol[i] > 0)) continue;
+      const q = this.owner[i];
+      const s = this.bodyOf[q * n + i];
+      const b = q * n + s;
+      const add = vol[i] / area[s];
+      const h0 = this.bThick[b];
+      this.bThick[b] = h0 + add;
+      this.bCont[b] = (this.bCont[b] * h0 + add) / (h0 + add);
+    }
+    vol.fill(0);
+  }
+
+  /** Crust thicker than flowThreshold spreads to neighbours on the same plate. */
+  _crustalFlow(dt) {
+    const cr = this.params.crust;
+    const D = cr.flowDiffusivity;
+    if (!(D > 0)) return;
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const { neighbors: nb, dist, face, area } = mesh;
+    const h0 = cr.flowThreshold;
+    const th = Float64Array.from(this.thickness);
+    let worst = 0;
+    for (let i = 0; i < n; i++) {
+      let s = 0;
+      for (let k = 0; k < 6; k++) { const e = 6 * i + k; if (nb[e] >= 0) s += face[e] / dist[e]; }
+      worst = Math.max(worst, s / area[i]);
+    }
+    // thicker crust is hotter and weaker at depth: it flows faster, as (1 + (excess / e0)^2)
+    const e0 = cr.flowScale;
+    let emax = 0;
+    for (let i = 0; i < n; i++) emax = Math.max(emax, th[i] - h0);
+    const fmax = 1 + (Math.max(0, emax) / e0) ** 2;
+    const subs = Math.min(400, Math.max(1, Math.ceil((dt * D * fmax * worst) / 0.5)));
+    const hstep = dt / subs;
+    const out = new Float64Array(n);
+    const flux = new Float64Array(6 * n);
+    for (let it = 0; it < subs; it++) {
+      out.fill(0);
+      for (let i = 0; i < n; i++) {
+        const ei = th[i] - h0;
+        for (let k = 0; k < 6; k++) {
+          const e = 6 * i + k;
+          const j = nb[e];
+          flux[e] = 0;
+          if (j <= i || this.owner[j] !== this.owner[i]) continue;
+          const ej = th[j] - h0;
+          if (ei <= 0 && ej <= 0) continue;
+          const em = Math.max(ei, ej);
+          const q = ((D * (1 + (em / e0) ** 2) * (Math.max(ei, 0) - Math.max(ej, 0))) / dist[e]) * face[e] * hstep; // volume i -> j
+          flux[e] = q;
+          out[q > 0 ? i : j] += Math.abs(q);
+        }
+      }
+      for (let i = 0; i < n; i++) {
+        const avail = Math.max(0, th[i] - h0) * area[i];
+        out[i] = out[i] > avail ? avail / out[i] : 1;
+      }
+      for (let i = 0; i < n; i++) {
+        for (let k = 0; k < 6; k++) {
+          const e = 6 * i + k;
+          const q0 = flux[e];
+          if (q0 === 0) continue;
+          const j = nb[e];
+          const q = q0 > 0 ? q0 * out[i] : q0 * out[j];
+          th[i] -= q / area[i];
+          th[j] += q / area[j];
+        }
+      }
+    }
+    // write the change back to the plate frames
+    for (let i = 0; i < n; i++) {
+      const d = th[i] - this.thickness[i];
+      if (d === 0) continue;
+      const q = this.owner[i];
+      const s = this.bodyOf[q * n + i];
+      this.bThick[q * n + s] += (d * area[i]) / area[s];
+    }
+  }
+
+  _classifyBoundaries() {
+    const mesh = this.mesh;
+    const n = mesh.size;
+    const P3 = mesh.pos;
+    const vi = [0, 0, 0], vj = [0, 0, 0];
+    this.boundary.fill(0);
+    for (let i = 0; i < n; i++) {
+      const a = this.owner[i];
+      let bestRate = 0, type = 0;
+      for (let k = 0; k < 6; k++) {
+        const j = mesh.neighbors[6 * i + k];
+        if (j < 0 || this.owner[j] === a) continue;
+        const x = P3[3 * i], y = P3[3 * i + 1], z = P3[3 * i + 2];
+        this.velocity(a, x, y, z, vi);
+        this.velocity(this.owner[j], x, y, z, vj);
+        // unit direction from i towards j, in the tangent plane
+        let dx = P3[3 * j] - x, dy = P3[3 * j + 1] - y, dz = P3[3 * j + 2] - z;
+        const L = Math.hypot(dx, dy, dz);
+        dx /= L; dy /= L; dz /= L;
+        const rx = vi[0] - vj[0], ry = vi[1] - vj[1], rz = vi[2] - vj[2];
+        const closing = rx * dx + ry * dy + rz * dz; // > 0: plates approach
+        const rate = Math.hypot(rx, ry, rz);
+        if (rate <= bestRate) continue;
+        bestRate = rate;
+        type = Math.abs(closing) < 0.5 * rate ? 3 : closing > 0 ? 1 : 2;
+      }
+      this.boundary[i] = type;
+    }
+  }
+
+  /** Elevations from isostasy (plus trenches) into zTectonic. */
+  _isostasy() {
+    const n = this.mesh.size;
+    const zT = this.zTectonic;
+    for (let i = 0; i < n; i++) zT[i] = this.elevation(this.thickness[i], this.continental[i], this.age[i]);
+    const td = this.params.crust.trenchDepth;
+    if (td > 0) {
+      // trenches: sea floor at the edge of a plate sinking under its neighbour
+      const nb = this.mesh.neighbors;
+      const P3 = this.mesh.pos;
+      const P = this.plateCount;
+      const vi = [0, 0, 0], vj = [0, 0, 0];
+      for (let i = 0; i < n; i++) {
+        if (zT[i] > 0) continue;
+        const a = this.owner[i];
+        for (let k = 0; k < 6; k++) {
+          const j = nb[6 * i + k];
+          if (j < 0) continue;
+          const b = this.owner[j];
+          if (b === a || this.polarity.get(Math.min(a, b) * P + Math.max(a, b)) !== b) continue;
+          const x = P3[3 * i], y = P3[3 * i + 1], z = P3[3 * i + 2];
+          this.velocity(a, x, y, z, vi);
+          this.velocity(b, x, y, z, vj);
+          const closing = (vi[0] - vj[0]) * (P3[3 * j] - x) + (vi[1] - vj[1]) * (P3[3 * j + 1] - y) + (vi[2] - vj[2]) * (P3[3 * j + 2] - z);
+          if (closing > 0) { zT[i] -= td; break; }
+        }
+      }
+    }
+  }
+
+  _waterBelow(level) {
+    const z = this.zTectonic;
+    const A = this.mesh.area;
+    let v = 0;
+    for (let i = 0; i < this.mesh.size; i++) if (z[i] < level) v += (level - z[i]) * A[i];
+    return v;
+  }
+
+  /** Sea level that holds `volume` of water over the current topography (bisection). */
+  _seaLevelForVolume(volume) {
+    let lo = -12000, hi = 12000;
+    for (let it = 0; it < 60; it++) {
+      const mid = 0.5 * (lo + hi);
+      if (this._waterBelow(mid) < volume) lo = mid; else hi = mid;
+    }
+    return 0.5 * (lo + hi);
+  }
+
+  /** Put the tectonic surface into the surface simulation. */
+  _applyToSurface() {
+    const n = this.mesh.size;
+    const sim = this.sim;
+    for (let i = 0; i < n; i++) {
+      const q = this.owner[i];
+      const soil = Math.min(this.bSoil[q * n + this.bodyOf[q * n + i]], this.thickness[i]);
+      sim.soil[i] = soil;
+      sim.rock[i] = this.zTectonic[i] - soil;
+    }
+    sim.params.boundary.seaLevel = this.seaLevel; // the planet owns sea level
+    sim.seaLevel = this.seaLevel;
+    sim._updateDerivedState();
+  }
+}
+
 // ---- src/nest.js ----
 // Zooming in: refine a patch of a running simulation at finer spacing.
 //
@@ -2560,13 +4328,22 @@ function smoothstep(t) {
 //     ("mean-preserving"), plus zero-mean roughness scaled to the local parent relief;
 //   - the parameters, the seed and the reference frame, so strata, plugs, fault lines,
 //     weak zones and rainfall line up exactly with the parent's;
+//   - per-cell uplift and rainfall fields, if the parent had them (see setFields);
 //   - the time and the sea level;
 //   - boundary conditions: every edge cell of the patch is an outlet whose elevation
 //     follows the parent's last rate of change (dz/dt), and rivers that flow into the
 //     patch in the parent enter the child with their drainage area and sediment flux.
 //
+// The parent may be a flat hex-grid Simulation (zoomIn) or a Planet (zoomFromPlanet):
+// both reduce to a MAPPING from each child cell to a triangle of parent cells with
+// linear-interpolation weights, and a projection of parent cell centres into child
+// coordinates. For a planet the flat patch is laid on the sphere by an azimuthal
+// equidistant projection about its centre (true distances and directions from the
+// centre; a 500-km patch on Earth is distorted by well under 1%).
+//
 // What it does NOT do: anything the child does never flows back to the parent
 // (one-way coupling), and the parent's rates are frozen at its last step.
+
 
 
 
@@ -2576,30 +4353,56 @@ function smoothstep(t) {
  * barycentric on the triangle of cell centres that contains the point.
  */
 function interpolator(mesh, field) {
+  const w = [0, 0, 0], ids = [0, 0, 0];
+  return (x, y) => {
+    if (!hexTriangle(mesh, x, y, ids, w)) return NaN;
+    return w[0] * field[ids[0]] + w[1] * field[ids[1]] + w[2] * field[ids[2]];
+  };
+}
+
+/** Triangle of hex-lattice cell centres containing (x, y) and barycentric weights. */
+function hexTriangle(mesh, x, y, ids, w) {
   if (!mesh.lattice) throw new Error('interpolation needs a hexagonal-lattice parent mesh');
   const D = mesh.degree;
   const nb = mesh.neighbors;
-  return (x, y) => {
-    const p = mesh.cellAt(x, y);
-    if (p < 0) return NaN;
-    const dx = x - mesh.x[p];
-    const dy = y - mesh.y[p];
-    if (dx === 0 && dy === 0) return field[p];
-    // slot k points along azimuth 60k degrees (y grows southwards, so north is -y)
-    let az = (Math.atan2(-dy, dx) * 180) / Math.PI;
-    if (az < 0) az += 360;
-    const k = Math.floor(az / 60) % 6;
-    const a = nb[D * p + k];
-    const b = nb[D * p + ((k + 1) % 6)];
-    if (a < 0 || b < 0) return field[p]; // at the parent's edge: nearest value
-    // barycentric coordinates of (x, y) in triangle (p, a, b)
-    const x1 = mesh.x[a] - mesh.x[p], y1 = mesh.y[a] - mesh.y[p];
-    const x2 = mesh.x[b] - mesh.x[p], y2 = mesh.y[b] - mesh.y[p];
-    const det = x1 * y2 - x2 * y1;
-    const wa = (dx * y2 - x2 * dy) / det;
-    const wb = (x1 * dy - dx * y1) / det;
-    return (1 - wa - wb) * field[p] + wa * field[a] + wb * field[b];
-  };
+  const p = mesh.cellAt(x, y);
+  if (p < 0) return false;
+  ids[0] = ids[1] = ids[2] = p;
+  w[0] = 1; w[1] = w[2] = 0;
+  const dx = x - mesh.x[p];
+  const dy = y - mesh.y[p];
+  if (dx === 0 && dy === 0) return true;
+  // slot k points along azimuth 60k degrees (y grows southwards, so north is -y)
+  let az = (Math.atan2(-dy, dx) * 180) / Math.PI;
+  if (az < 0) az += 360;
+  const k = Math.floor(az / 60) % 6;
+  const a = nb[D * p + k];
+  const b = nb[D * p + ((k + 1) % 6)];
+  if (a < 0 || b < 0) return true; // at the parent's edge: nearest value
+  const x1 = mesh.x[a] - mesh.x[p], y1 = mesh.y[a] - mesh.y[p];
+  const x2 = mesh.x[b] - mesh.x[p], y2 = mesh.y[b] - mesh.y[p];
+  const det = x1 * y2 - x2 * y1;
+  const wa = (dx * y2 - x2 * dy) / det;
+  const wb = (x1 * dy - dx * y1) / det;
+  ids[1] = a; ids[2] = b;
+  w[0] = 1 - wa - wb; w[1] = wa; w[2] = wb;
+  return true;
+}
+
+/**
+ * Interpolate a parent field onto every child cell through a mapping: map.k parent cells
+ * per child cell (ids, weights summing to 1), and parentOf, the parent cell containing it.
+ */
+function sample(map, field) {
+  const n = map.parentOf.length;
+  const K = map.k;
+  const out = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let v = 0;
+    for (let k = K * i; k < K * i + K; k++) v += map.w[k] * field[map.ids[k]];
+    out[i] = v;
+  }
+  return out;
 }
 
 /**
@@ -2644,13 +4447,179 @@ function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughn
   const child = new Simulation(params);
   const cg = child.grid;
   const n = cg.size;
+  const map = { k: 3, ids: new Int32Array(3 * n), w: new Float64Array(3 * n), parentOf: new Int32Array(n) };
+  const ids = [0, 0, 0], w = [0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    hexTriangle(pg, cg.x[i], cg.y[i], ids, w);
+    for (let k = 0; k < 3; k++) { map.ids[3 * i + k] = ids[k]; map.w[3 * i + k] = w[k]; }
+    map.parentOf[i] = pg.cellAt(cg.x[i], cg.y[i]);
+  }
+  refine(parentView(parent), child, map, (p) => [pg.x[p], pg.y[p]], { roughness, correctionIterations, wavelength: pg.dx, seed: (pp.seed | 0) + 4049 });
+  Object.assign(child.zoom, { level: params.zoom.level, factor, center: [cx, cy], parentDx: pg.dx });
+  return child;
+}
+
+/**
+ * Create a flat hex-grid patch of a Planet, laid on the sphere around (lon, lat).
+ * The patch inherits the planet's topography, soil, sea level, rainfall and its
+ * tectonic uplift rate (isostasy included) as a per-cell uplift field; its edges follow
+ * the planet's surface change rate; rivers entering from the planet bring their
+ * drainage area and sediment. Erosion parameters are rescaled for the patch's spacing
+ * (regionalErosionParams). From the patch, zoomIn refines further.
+ * @param {import('./planet.js').Planet} planet
+ * @param {object} o
+ * @param {number} o.lon longitude of the patch centre (degrees)
+ * @param {number} o.lat latitude of the patch centre (degrees)
+ * @param {number} [o.dx] child spacing (m); default planet spacing / factor
+ * @param {number} [o.factor] used when dx is not given (default 32)
+ * @param {number} [o.cols] [o.rows] child grid size
+ * @param {number} [o.dt] child time step (default planet dt x dx / planet spacing)
+ * @param {number} [o.smooth] width of the interpolation kernel in planet cell spacings;
+ *   0 = linear on the triangles of planet cells (shows their facets at the patch scale)
+ * @param {object} [o.params] parameter overrides for the child (e.g. erodibilities)
+ * @returns {Simulation}
+ */
+function zoomFromPlanet(planet, { lon, lat, dx, factor = 32, cols = 128, rows = 128, dt, roughness = 0.3, smooth = 0.4, correctionIterations = 48, params: over = {} } = {}) {
+  const mesh = planet.mesh;
+  dx = dx ?? mesh.spacing / factor;
+  const rowSpacing = (Math.sqrt(3) / 2) * dx;
+  const halfW = (dx * (cols - 1 + 0.5)) / 2;
+  const halfH = (rowSpacing * (rows - 1)) / 2;
+  if (Math.max(halfW, halfH) > 0.5 * planet.params.radius) throw new Error('the requested patch is too large to lay flat on the planet; use fewer cells or a smaller dx');
+  const proj = azimuthalProjection(lonLatToVector(lon, lat), planet.params.radius);
+  const fac = mesh.spacing / dx;
+  let params = deepMerge(planet.sim.params, {
+    grid: { cols, rows, dx, origin: [-halfW, -halfH] },
+    frame: null,
+    time: { dt: dt ?? planet.params.time.dt / fac },
+    boundary: { open: ['north', 'south', 'east', 'west'], seaLevel: planet.seaLevel },
+    initial: { type: 'flat', base: 0, height: 0, noise: { amplitude: 0 }, soil: 0 },
+    uplift: { rate: 0, pattern: 'uniform' },
+    // waves and cliff collapse are calibrated for cells of tens of metres
+    coast: { enabled: false },
+    rockfall: { enabled: true },
+    earthquakes: { enabled: true, faults: [] },
+    zoom: { level: 1, factor: fac, center: [0, 0], parentDx: mesh.spacing, planet: { lon, lat } },
+  });
+  params = deepMerge(deepMerge(params, regionalErosionParams(dx, planet.params)), over);
+  delete params.preset;
+  const child = new Simulation(params);
+  const cg = child.grid;
+  const n = cg.size;
+  const map = smooth > 0 ? kernelMapping(mesh, cg, proj, smooth * mesh.spacing) : linearMapping(mesh, cg, proj);
+  const P3 = mesh.pos;
+  const project = (p) => proj.forward([P3[3 * p], P3[3 * p + 1], P3[3 * p + 2]]);
+  refine(parentView(planet), child, map, project, { roughness, correctionIterations, wavelength: mesh.spacing, seed: (planet.params.seed | 0) + 4049 });
+  Object.assign(child.zoom, { level: 1, factor: fac, center: [0, 0], parentDx: mesh.spacing, planet: { lon, lat } });
+  return child;
+}
+
+/** Linear interpolation on the triangles of sphere-mesh cell centres. */
+function linearMapping(mesh, cg, proj) {
+  const n = cg.size;
+  const map = { k: 3, ids: new Int32Array(3 * n), w: new Float64Array(3 * n), parentOf: new Int32Array(n) };
+  let hint = -1;
+  for (let i = 0; i < n; i++) {
+    const v = proj.inverse(cg.x[i], cg.y[i]);
+    const loc = mesh.locate(v[0], v[1], v[2], hint);
+    hint = loc.cell;
+    map.parentOf[i] = loc.cell;
+    for (let k = 0; k < 3; k++) { map.ids[3 * i + k] = loc.ids[k]; map.w[3 * i + k] = loc.weights[k]; }
+  }
+  return map;
+}
+
+/**
+ * Smooth interpolation: a Gaussian-weighted average (width sigma, m) over the planet cells
+ * within two rings of the nearest one. It does not pass through the parent values, but
+ * the mean-preserving correction in refine restores every parent cell's average.
+ */
+function kernelMapping(mesh, cg, proj, sigma) {
+  const n = cg.size;
+  const K = 19; // a cell, its 6 neighbours and the 12 beyond (fewer next to pentagons)
+  const map = { k: K, ids: new Int32Array(K * n), w: new Float64Array(K * n), parentOf: new Int32Array(n) };
+  const P3 = mesh.pos;
+  const R = mesh.radius;
+  let hint = -1;
+  const ring = [];
+  for (let i = 0; i < n; i++) {
+    const v = proj.inverse(cg.x[i], cg.y[i]);
+    const p = mesh.nearest(v[0], v[1], v[2], hint);
+    hint = p;
+    map.parentOf[i] = p;
+    ring.length = 0;
+    ring.push(p);
+    for (let r = 0, start = 0; r < 2; r++) {
+      const end = ring.length;
+      for (let a = start; a < end; a++) {
+        for (let k = 0; k < 6; k++) {
+          const q = mesh.neighbors[6 * ring[a] + k];
+          if (q >= 0 && !ring.includes(q)) ring.push(q);
+        }
+      }
+      start = end;
+    }
+    let sum = 0;
+    for (let k = 0; k < K; k++) {
+      if (k >= ring.length) { map.ids[K * i + k] = p; map.w[K * i + k] = 0; continue; }
+      const q = ring[k];
+      const d = R * Math.acos(Math.min(1, v[0] * P3[3 * q] + v[1] * P3[3 * q + 1] + v[2] * P3[3 * q + 2]));
+      const wk = Math.exp(-(d * d) / (2 * sigma * sigma));
+      map.ids[K * i + k] = q;
+      map.w[K * i + k] = wk;
+      sum += wk;
+    }
+    for (let k = 0; k < K; k++) map.w[K * i + k] /= sum;
+  }
+  return map;
+}
+
+/**
+ * Erosion parameters for a patch of spacing dx zoomed out of a planet. Stream power and
+ * creep coefficients calibrated on a grid are effective values that depend on what the
+ * grid resolves: the landscape defaults suit ~30-m cells and the planet's ~150-km cells.
+ * [adapted] Between them, interpolate log-linearly in log(dx). A rule of thumb, not a
+ * derivation; override with `params` in zoomFromPlanet when you have better values.
+ */
+function regionalErosionParams(dx, planetParams, { landscapeDx = 30, planetDx = 1.5e5 } = {}) {
+  const t = Math.min(1, Math.max(0, Math.log(dx / landscapeDx) / Math.log(planetDx / landscapeDx)));
+  const mix = (a, b) => Math.exp((1 - t) * Math.log(a) + t * Math.log(b));
+  const s = planetParams.surface;
+  const crust = s.rocks.crust;
+  return {
+    rocks: { crust: { ...crust, erodibility: mix(1e-5, crust.erodibility), cohesion: mix(1e6, crust.cohesion), weathering: mix(1e-4, crust.weathering) } },
+    fluvial: { soilErodibility: mix(4e-4, s.fluvial.soilErodibility) },
+    hillslope: { diffusivity: mix(0.01, s.hillslope.diffusivity), transportDepth: mix(0.3, s.hillslope.transportDepth) },
+    weathering: { productionDepth: mix(0.5, s.weathering.productionDepth) },
+  };
+}
+
+/** What refine and compareWithParent need from a parent, Simulation or Planet. */
+function parentView(parent) {
+  if (parent.sim) {
+    const sim = parent.sim;
+    return {
+      mesh: parent.mesh, z: sim.z, soil: sim.soil, upliftCum: new Float64Array(parent.mesh.size),
+      dzdt: parent.dzdt, flow: sim.flow, qsOut: sim.qsOut, time: parent.time,
+      uplift: parent.upliftRate, precipitation: sim.precipWeight,
+    };
+  }
+  return {
+    mesh: parent.grid, z: parent.z, soil: parent.soil, upliftCum: parent.upliftCum,
+    dzdt: parent.dzdt, flow: parent.flow, qsOut: parent.qsOut, time: parent.time,
+    uplift: parent.fields.uplift ? parent.upliftField : null,
+    precipitation: parent.fields.precipitation ? parent.precipWeight : null,
+  };
+}
+
+/** Fill a freshly made child from its parent through a mapping (see the header). */
+function refine(pv, child, map, project, { roughness, correctionIterations, wavelength, seed }) {
+  const pg = pv.mesh;
+  const cg = child.grid;
+  const n = cg.size;
+  const pz = pv.z;
 
   // --- topography: linear interpolation, roughness, mean-preserving correction ---
-  const pz = parent.z;
-  const zAt = interpolator(pg, pz);
-  const soilAt = interpolator(pg, parent.soil);
-  const upAt = interpolator(pg, parent.upliftCum);
-  const rateAt = interpolator(pg, parent.dzdt);
   const relief = new Float64Array(pg.size);
   for (let p = 0; p < pg.size; p++) {
     let lo = pz[p], hi = pz[p];
@@ -2660,27 +4629,25 @@ function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughn
     }
     relief[p] = hi - lo;
   }
-  const reliefAt = interpolator(pg, relief);
-  const parentOf = new Int32Array(n);
-  const z = new Float64Array(n);
-  const soil = new Float64Array(n);
-  const upliftCum = new Float64Array(n);
+  const z = sample(map, pz);
+  const reliefC = sample(map, relief);
+  const soil = sample(map, pv.soil);
+  const upliftCum = sample(map, pv.upliftCum);
+  const rate = sample(map, pv.dzdt);
   const boundaryRate = new Float64Array(n);
   for (let i = 0; i < n; i++) {
-    const x = cg.x[i], y = cg.y[i];
-    parentOf[i] = pg.cellAt(x, y);
-    const detail = fbm(x, y, { wavelength: pg.dx, octaves: 4, seed: (pp.seed | 0) + 4049 });
-    z[i] = zAt(x, y) + roughness * 0.5 * reliefAt(x, y) * detail;
-    soil[i] = Math.max(0, soilAt(x, y));
-    upliftCum[i] = upAt(x, y);
-    if (child.boundaryOutlet[i]) boundaryRate[i] = rateAt(x, y);
+    const detail = fbm(cg.x[i], cg.y[i], { wavelength, octaves: 4, seed });
+    z[i] += roughness * 0.5 * reliefC[i] * detail;
+    if (soil[i] < 0) soil[i] = 0;
+    if (child.boundaryOutlet[i]) boundaryRate[i] = rate[i];
   }
   // Correct so each parent cell's child-average equals the parent value: interpolate the
   // per-parent-cell misfit and add it, a few times (a fixed-point iteration).
+  const parentOf = map.parentOf;
   const sum = new Float64Array(pg.size);
   const cnt = new Float64Array(pg.size);
   const misfit = new Float64Array(pg.size);
-  const misfitAt = interpolator(pg, misfit);
+  const childArea = cg.area[0];
   let residual = 0;
   for (let it = 0; it <= correctionIterations; it++) {
     sum.fill(0); cnt.fill(0);
@@ -2689,26 +4656,35 @@ function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughn
     for (let p = 0; p < pg.size; p++) {
       misfit[p] = cnt[p] ? pz[p] - sum[p] / cnt[p] : 0;
       // judge convergence on parent cells the patch covers completely
-      if (cnt[p] >= 0.9 * factor * factor) residual = Math.max(residual, Math.abs(misfit[p]));
+      if (cnt[p] * childArea >= 0.9 * pg.area[p]) residual = Math.max(residual, Math.abs(misfit[p]));
     }
     if (it === correctionIterations) break;
-    for (let i = 0; i < n; i++) z[i] += misfitAt(cg.x[i], cg.y[i]);
+    const corr = sample(map, misfit);
+    for (let i = 0; i < n; i++) z[i] += corr[i];
   }
 
   // --- rivers entering the patch from the parent ---
   const inflowArea = new Float64Array(n);
   const inflowSediment = new Float64Array(n);
-  const inside = (x, y) => { const c = cg.cellAt(x, y); return c >= 0 && !child.boundaryOutlet[c] ? c : -1; };
-  const pf = parent.flow;
+  const where = new Map();
+  const childCell = (p) => {
+    if (where.has(p)) return where.get(p);
+    const xy = project(p);
+    const c = xy ? cg.cellAt(xy[0], xy[1]) : -1;
+    const r = c >= 0 && !child.boundaryOutlet[c] ? c : -1;
+    where.set(p, r);
+    return r;
+  };
+  const pf = pv.flow;
   const pD = pg.degree;
   const mfd = pf.flowExponent > 0;
   let enteringArea = 0;
   for (let p = 0; p < pg.size; p++) {
-    if (pf.receiver[p] < 0 || inside(pg.x[p], pg.y[p]) >= 0) continue;
+    if (pf.receiver[p] < 0 || childCell(p) >= 0) continue;
     // sediment follows the single receiver
     const r = pf.receiver[p];
-    const tr = inside(pg.x[r], pg.y[r]);
-    if (tr >= 0) inflowSediment[tr] += parent.qsOut[p];
+    const tr = childCell(r);
+    if (tr >= 0) inflowSediment[tr] += pv.qsOut[p];
     // water: all to the receiver, or shared by slope^p as in the parent's MFD routing
     if (!mfd) {
       if (tr >= 0) { inflowArea[tr] += pf.area[p]; enteringArea += pf.area[p]; }
@@ -2726,10 +4702,16 @@ function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughn
     }
     for (const [q, wk] of w) {
       if (wk <= 0) continue;
-      const t = inside(pg.x[q], pg.y[q]);
+      const t = childCell(q);
       if (t >= 0) { const a = (pf.area[p] * wk) / wsum; inflowArea[t] += a; enteringArea += a; }
     }
   }
+
+  // per-cell fields the parent had (a planet's uplift and rainfall) carry over
+  const fields = {};
+  if (pv.uplift) fields.uplift = sample(map, pv.uplift);
+  if (pv.precipitation) fields.precipitation = sample(map, pv.precipitation);
+  if (fields.uplift || fields.precipitation) child.setFields(fields);
 
   // open edges carry no soil; their elevation is the surface itself
   const rock = new Float64Array(n);
@@ -2737,40 +4719,38 @@ function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt, roughn
     if (child.boundaryOutlet[i]) soil[i] = 0;
     rock[i] = z[i] - soil[i];
   }
-  child.setState({ rock, soil, upliftCum, time: parent.time, inflowArea, inflowSediment, boundaryRate });
+  child.setState({ rock, soil, upliftCum, time: pv.time, inflowArea, inflowSediment, boundaryRate });
   child.stepCount = 0;
-  child.zoom = {
-    level: params.zoom.level, factor, center: [cx, cy], parentDx: pg.dx,
-    bounds: { ...cg.bounds }, meanResidual: residual, enteringArea, parentTime: parent.time,
-  };
-  return child;
+  child.zoom = { bounds: { ...cg.bounds }, meanResidual: residual, enteringArea, parentTime: pv.time, parentOf, project };
 }
 
 /**
- * Compare a zoomed child with its frozen parent over the parent cells the patch covers
- * completely: mean elevation, mean rate of change, and the discharge of the largest
- * river leaving the patch. These are the cross-scale consistency checks. The parent is
- * frozen, so its "expected" elevation is extrapolated at its last rate of change over
- * the time the child has run.
+ * Compare a zoomed child with its frozen parent (a Simulation or a Planet) over the
+ * parent cells the patch covers completely: mean elevation, mean rate of change, and the
+ * discharge of the largest river leaving the patch. These are the cross-scale consistency
+ * checks. The parent is frozen, so its "expected" elevation is extrapolated at its last
+ * rate of change over the time the child has run.
  */
 function compareWithParent(child, parent) {
-  const pg = parent.grid;
+  const pv = parentView(parent);
+  const pg = pv.mesh;
   const cg = child.grid;
-  const factor = child.zoom.factor;
+  const parentOf = child.zoom.parentOf;
   const sumZ = new Float64Array(pg.size);
   const sumR = new Float64Array(pg.size);
   const cnt = new Float64Array(pg.size);
   for (let i = 0; i < cg.size; i++) {
     if (child.boundaryOutlet[i]) continue;
-    const p = pg.cellAt(cg.x[i], cg.y[i]);
+    const p = parentOf[i];
     sumZ[p] += child.z[i]; sumR[p] += child.dzdt[i]; cnt[p]++;
   }
+  const childArea = cg.area[0];
   let nP = 0, parentZ = 0, childZ = 0, parentRate = 0, childRate = 0;
   for (let p = 0; p < pg.size; p++) {
-    if (cnt[p] < 0.9 * factor * factor) continue;
+    if (cnt[p] * childArea < 0.9 * pg.area[p]) continue;
     nP++;
-    parentZ += parent.z[p]; childZ += sumZ[p] / cnt[p];
-    parentRate += parent.dzdt[p]; childRate += sumR[p] / cnt[p];
+    parentZ += pv.z[p]; childZ += sumZ[p] / cnt[p];
+    parentRate += pv.dzdt[p]; childRate += sumR[p] / cnt[p];
   }
   // biggest river leaving: child = largest drainage area arriving at an edge cell;
   // parent = largest area at a covered cell whose receiver lies outside the patch
@@ -2778,18 +4758,22 @@ function compareWithParent(child, parent) {
   for (let i = 0; i < cg.size; i++) if (child.boundaryOutlet[i]) childExit = Math.max(childExit, child.flow.area[i]);
   let parentExit = 0;
   const b = cg.bounds;
-  const within = (x, y) => x > b.xmin && x < b.xmax && y > b.ymin && y < b.ymax;
+  const within = (p) => {
+    const xy = child.zoom.project(p);
+    return !!xy && xy[0] > b.xmin && xy[0] < b.xmax && xy[1] > b.ymin && xy[1] < b.ymax;
+  };
   for (let p = 0; p < pg.size; p++) {
-    const r = parent.flow.receiver[p];
-    if (r < 0 || !within(pg.x[p], pg.y[p]) || within(pg.x[r], pg.y[r])) continue;
-    parentExit = Math.max(parentExit, parent.flow.area[p]);
+    const r = pv.flow.receiver[p];
+    if (r < 0 || !within(p) || within(r)) continue;
+    parentExit = Math.max(parentExit, pv.flow.area[p]);
   }
   const elapsed = child.time - child.zoom.parentTime;
+  const m = Math.max(nP, 1);
   return {
     parentCells: nP,
     elapsed,
-    meanElevation: { parent: parentZ / nP, expected: (parentZ + parentRate * elapsed) / nP, child: childZ / nP },
-    meanRate: { parent: parentRate / nP, child: childRate / nP },
+    meanElevation: { parent: parentZ / m, expected: (parentZ + parentRate * elapsed) / m, child: childZ / m },
+    meanRate: { parent: parentRate / m, child: childRate / m },
     largestExitArea: { parent: parentExit, child: childExit },
   };
 }
@@ -2850,15 +4834,19 @@ function hillshade(sim, exaggeration = 1) {
   const { grid, z } = sim;
   const n = grid.size;
   const nb = grid.neighbors;
+  const D = grid.degree;
   const out = new Float32Array(n);
   const L = [-0.5, -0.5, Math.SQRT1_2]; // unit vector towards the light (x east, y south, z up)
+  const off = [0, 0];
   for (let i = 0; i < n; i++) {
     let sxx = 0, sxy = 0, syy = 0, sxz = 0, syz = 0;
-    for (let k = 0; k < 6; k++) {
-      const j = nb[6 * i + k];
+    for (let k = 0; k < D; k++) {
+      const j = nb[D * i + k];
       if (j < 0) continue;
-      const ddx = grid.x[j] - grid.x[i];
-      const ddy = grid.y[j] - grid.y[i];
+      // meshes with curved geometry (the sphere) give displacements in the local tangent plane
+      if (grid.offset) grid.offset(i, j, off);
+      const ddx = grid.offset ? off[0] : grid.x[j] - grid.x[i];
+      const ddy = grid.offset ? off[1] : grid.y[j] - grid.y[i];
       const dz = (z[j] - z[i]) * exaggeration;
       sxx += ddx * ddx; sxy += ddx * ddy; syy += ddy * ddy;
       sxz += ddx * dz; syz += ddy * dz;
@@ -3055,9 +5043,187 @@ function crossSection(sim, row, width, height, rgba) {
   return { zmin, zmax, exaggeration: horiz / vert };
 }
 
+// ------------------------------------------------------------------ planets
+
+const PLANET_VIEWS = {
+  terrain: 'Terrain (land and sea floor)',
+  plates: 'Plates and boundaries',
+  age: 'Ocean-floor age',
+  crust: 'Crust thickness',
+  discharge: 'Drainage area',
+  erosion: 'Erosion / deposition rate',
+};
+
+const LAND = [[0, [72, 120, 72]], [0.06, [110, 150, 85]], [0.18, [185, 175, 110]], [0.38, [160, 120, 80]], [0.62, [130, 105, 90]], [0.8, [225, 225, 225]], [1, [255, 255, 255]]];
+const OCEAN = [[0, [150, 205, 225]], [0.06, [90, 160, 205]], [0.35, [45, 95, 165]], [0.7, [25, 55, 115]], [1, [10, 25, 60]]];
+const AGE = [[0, [200, 40, 40]], [0.15, [235, 140, 40]], [0.3, [240, 220, 70]], [0.5, [90, 190, 110]], [0.75, [60, 120, 200]], [1, [70, 40, 140]]];
+const CRUST = [[0, [20, 30, 70]], [0.12, [50, 90, 160]], [0.35, [120, 170, 120]], [0.5, [220, 200, 110]], [0.75, [200, 100, 50]], [1, [110, 20, 30]]];
+const BOUNDARY_RGB = [null, [255, 70, 60], [255, 235, 90], [235, 235, 235]];
+
+/** A distinct colour for plate q (golden-angle hues). */
+function plateColor(q) {
+  const h = (q * 137.508) % 360;
+  const s = 0.45, l = 0.55;
+  const f = (k) => {
+    const a = s * Math.min(l, 1 - l);
+    const kk = (k + h / 30) % 12;
+    return 255 * (l - a * Math.max(-1, Math.min(kk - 3, 9 - kk, 1)));
+  };
+  return [f(0), f(8), f(4)];
+}
+
+/**
+ * Colour every cell of a planet for the given view (see PLANET_VIEWS).
+ * @param {import('./planet.js').Planet} planet
+ * @param {Uint8ClampedArray} [out] 3 bytes per cell
+ */
+function planetColors(planet, view = 'terrain', out) {
+  const sim = planet.sim;
+  const mesh = planet.mesh;
+  const n = mesh.size;
+  out = out || new Uint8ClampedArray(3 * n);
+  const z = sim.z;
+  const sea = planet.seaLevel;
+  const shade = hillshade(sim, 25);
+  const area = sim.flow.area;
+  let amax = 0, emax = 1e-12;
+  for (let i = 0; i < n; i++) {
+    if (area[i] > amax) amax = area[i];
+    if (z[i] > sea) emax = Math.max(emax, Math.abs(sim.dzdt[i]));
+  }
+  const logAmax = Math.log(Math.max(amax / mesh.cellArea, 2));
+  const riverStart = Math.min(Math.log(40), 0.55 * logAmax);
+  for (let i = 0; i < n; i++) {
+    const s = shade[i];
+    const lit = 0.45 + 0.65 * s;
+    const wet = z[i] < sea;
+    let c;
+    switch (view) {
+      case 'plates': {
+        c = plateColor(planet.owner[i]);
+        const k = 0.55 + 0.45 * planet.continental[i];
+        c = c.map((v) => v * k * (0.8 + 0.2 * s));
+        const b = planet.boundary[i];
+        if (b) c = BOUNDARY_RGB[b];
+        break;
+      }
+      case 'age': {
+        if (planet.continental[i] > 0.5) { const g = 70 + 90 * s; c = [g, g, g]; break; }
+        c = ramp(AGE, planet.age[i] / 2e8).map((v) => v * (0.8 + 0.2 * s));
+        break;
+      }
+      case 'crust':
+        c = ramp(CRUST, planet.thickness[i] / 80000).map((v) => v * (0.75 + 0.25 * s));
+        break;
+      case 'discharge': {
+        const t = Math.log(Math.max(area[i] / mesh.cellArea, 1)) / logAmax;
+        c = wet ? [30, 40, 60] : ramp(BLUE, t).map((v) => v * (0.75 + 0.25 * s));
+        break;
+      }
+      case 'erosion': {
+        if (wet) { c = [40, 50, 70]; break; }
+        const r = sim.dzdt[i] / emax;
+        const t = Math.sign(r) * Math.sqrt(Math.abs(r));
+        c = t < 0 ? [255, 255 * (1 + t), 255 * (1 + t)] : [255 * (1 - t), 255 * (1 - t), 255];
+        c = c.map((v) => v * (0.7 + 0.3 * s));
+        break;
+      }
+      case 'terrain':
+      default: {
+        if (wet) {
+          c = ramp(OCEAN, (sea - z[i]) / 8000).map((v) => v * (0.85 + 0.25 * s));
+        } else {
+          c = ramp(LAND, (z[i] - sea) / 6000).map((v) => v * lit);
+          const t = (Math.log(Math.max(area[i] / mesh.cellArea, 1)) - riverStart) / (logAmax - riverStart);
+          if (t > 0) c = c.map((v, k) => v + Math.min(1, 0.3 + t) * (LAKE_RGB[k] - v));
+        }
+      }
+    }
+    out[3 * i] = c[0];
+    out[3 * i + 1] = c[1];
+    out[3 * i + 2] = c[2];
+  }
+  return out;
+}
+
+/**
+ * Pixel map for a sphere mesh: 'map' (equirectangular, the whole planet, 2:1) or
+ * 'globe' (orthographic view centred on lon0, lat0 in degrees). Pixels off the globe are -1.
+ */
+function spherePixelMap(mesh, width, height, { projection = 'map', lon0 = 0, lat0 = 0 } = {}) {
+  const map = new Int32Array(width * height);
+  let hint = 0;
+  if (projection === 'globe') {
+    const l0 = (lon0 * Math.PI) / 180, p0 = (lat0 * Math.PI) / 180;
+    // camera frame: c = centre, e = east, u = north
+    const c = [Math.cos(p0) * Math.cos(l0), Math.cos(p0) * Math.sin(l0), Math.sin(p0)];
+    const e = [-Math.sin(l0), Math.cos(l0), 0];
+    const u = [c[1] * e[2] - c[2] * e[1], c[2] * e[0] - c[0] * e[2], c[0] * e[1] - c[1] * e[0]];
+    const r = 0.5 * Math.min(width, height) - 1;
+    for (let py = 0; py < height; py++) {
+      for (let px = 0; px < width; px++) {
+        const a = (px + 0.5 - width / 2) / r, b = -(py + 0.5 - height / 2) / r;
+        const d = 1 - a * a - b * b;
+        if (d < 0) { map[py * width + px] = -1; continue; }
+        const w = Math.sqrt(d);
+        hint = mesh.nearest(w * c[0] + a * e[0] + b * u[0], w * c[1] + a * e[1] + b * u[1], w * c[2] + a * e[2] + b * u[2], hint);
+        map[py * width + px] = hint;
+      }
+    }
+    return { map, width, height, projection, lon0, lat0, radiusPx: r };
+  }
+  for (let py = 0; py < height; py++) {
+    const lat = Math.PI / 2 - ((py + 0.5) / height) * Math.PI;
+    for (let px = 0; px < width; px++) {
+      const lon = ((px + 0.5) / width) * 2 * Math.PI - Math.PI;
+      hint = mesh.nearest(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat), hint);
+      map[py * width + px] = hint;
+    }
+  }
+  return { map, width, height, projection, scale: width / mesh.width, x0: 0, y0: 0 };
+}
+
+/**
+ * Cross-section of a planet along a parallel (constant latitude, degrees): the surface,
+ * sea, and the crust down to its base, coloured continental or oceanic, floating on
+ * the mantle. Shows isostasy at work: thick crust has deep roots under high ground.
+ */
+function planetSection(planet, latDeg, width, height, rgba) {
+  const mesh = planet.mesh;
+  const z = planet.sim.z;
+  const sea = planet.seaLevel;
+  const lat = (latDeg * Math.PI) / 180;
+  const cells = new Int32Array(width);
+  let hint = 0;
+  for (let px = 0; px < width; px++) {
+    const lon = ((px + 0.5) / width) * 2 * Math.PI - Math.PI;
+    hint = mesh.nearest(Math.cos(lat) * Math.cos(lon), Math.cos(lat) * Math.sin(lon), Math.sin(lat), hint);
+    cells[px] = hint;
+  }
+  const top = 10000, bottom = -90000;
+  const sky = [34, 36, 44], water = [55, 100, 165], mantle = [120, 60, 50];
+  const contC = [196, 160, 120], oceC = [70, 75, 85];
+  for (let px = 0; px < width; px++) {
+    const i = cells[px];
+    const base = z[i] - planet.thickness[i];
+    const cc = planet.continental[i];
+    const crustC = [0, 1, 2].map((k) => oceC[k] + cc * (contC[k] - oceC[k]));
+    for (let py = 0; py < height; py++) {
+      const e = top - ((py + 0.5) / height) * (top - bottom);
+      const col = e > z[i] ? (e <= sea ? water : sky) : e > base ? crustC : mantle;
+      const o = 4 * (py * width + px);
+      rgba[o] = col[0]; rgba[o + 1] = col[1]; rgba[o + 2] = col[2]; rgba[o + 3] = 255;
+    }
+  }
+  return { zmin: bottom, zmax: top, exaggeration: (2 * Math.PI * planet.params.radius * Math.cos(lat) / width) / ((top - bottom) / height) };
+}
+
 // ---- web/app.js ----
 // Browser front end. All physics lives in ../src; this file only wires controls,
 // the animation loop and drawing.
+//
+// `sim` is the level being shown: a landscape Simulation, or a Planet. Zooming in
+// stacks the frozen levels above it.
 
 
 const $ = (id) => document.getElementById(id);
@@ -3066,6 +5232,10 @@ const $ = (id) => document.getElementById(id);
 const SLIDERS = [
   { group: 'Tectonics' },
   { path: 'uplift.rate', label: 'Uplift rate', unit: 'm/yr', min: 1e-6, max: 3e-3, log: true },
+  { group: 'Earthquakes (on the faults in the parameters)' },
+  { path: 'earthquakes.enabled', label: 'Faults slip in earthquakes', toggle: true },
+  { path: 'earthquakes.maxMagnitude', label: 'Largest magnitude', unit: '', min: 5.6, max: 8.5 },
+  { path: 'earthquakes.bValue', label: 'Gutenberg-Richter b', unit: '', min: 0.5, max: 1.5 },
   { group: 'Climate' },
   { path: 'climate.precipitation', label: 'Precipitation', unit: 'm/yr', min: 0.05, max: 4, log: true },
   { path: 'climate.frost', label: 'Frost (freeze-thaw)', unit: '', min: 0, max: 1 },
@@ -3088,21 +5258,40 @@ const SLIDERS = [
   { path: 'rockfall.timescale', label: 'Failure timescale', unit: 'yr', min: 10, max: 1e5, log: true },
 ];
 
+const PLANET_SLIDERS = [
+  { group: 'Plates' },
+  { path: 'plates.collisionLocking', label: 'Collision locking time', unit: 'yr', min: 1e6, max: 2e8, log: true },
+  { path: 'plates.reorganizeEvery', label: 'Reorganise plates every (0 = never)', unit: 'yr', min: 0, max: 2e8 },
+  { group: 'Crust' },
+  { path: 'crust.arcFraction', label: 'Arc growth per subducted crust', unit: '', min: 0, max: 0.5 },
+  { path: 'crust.flowDiffusivity', label: 'Thick-crust flow', unit: 'm²/yr', min: 1e3, max: 1e6, log: true },
+  { path: 'crust.trenchDepth', label: 'Trench depth', unit: 'm', min: 0, max: 5000 },
+  { group: 'Climate' },
+  { path: 'climate.precipitation', label: 'Precipitation (scale)', unit: 'm/yr', min: 0.1, max: 4, log: true },
+  { path: 'climate.zonal', label: 'Zonal rain belts (wet tropics, dry subtropics)', toggle: true },
+  { group: 'Erosion (effective values for planet-scale cells)' },
+  { path: 'surface.rocks.crust.erodibility', label: 'Rock erodibility', unit: '', min: 1e-8, max: 3e-6, log: true },
+  { path: 'surface.hillslope.diffusivity', label: 'Creep diffusivity', unit: 'm²/yr', min: 10, max: 3e4, log: true },
+];
+
 let sim;
 let running = false;
 let pm;
 let mapImage;
 let sectionRow = null;
+let sectionLat = 20;
 // Zoom: the frozen ancestors of the current simulation, innermost last, each with the
 // options that made its child (so Reset can re-make the child from scratch).
 let stack = [];
 let zoomPending = false;
-let lastPatch = null; // { parent, bounds } of the most recently left child, drawn on its parent
+let lastPatch = null; // { parent, bounds | outline } of the most recently left child, drawn on its parent
+let globe = { lon: 0, lat: 15 };
 const mapCanvas = $('map');
 const mapCtx = mapCanvas.getContext('2d');
 const secCanvas = $('section');
 const secCtx = secCanvas.getContext('2d');
 
+const isPlanet = (s) => s instanceof Planet;
 const get = (obj, path) => path.split('.').reduce((o, k) => o?.[k], obj);
 const nest = (path, value) => path.split('.').reduceRight((acc, k) => ({ [k]: acc }), value);
 const fmt = (v) => {
@@ -3111,18 +5300,26 @@ const fmt = (v) => {
   const a = Math.abs(v);
   return a >= 1000 || a < 0.01 ? v.toExponential(1) : +v.toPrecision(3) + '';
 };
+const deg = (r) => (r * 180) / Math.PI;
 
 // ------------------------------------------------------------------ setup
 
 function buildPresetMenu() {
   const sel = $('preset');
-  for (const [name, p] of Object.entries(PRESETS)) {
-    const o = document.createElement('option');
-    o.value = name;
-    o.textContent = name;
-    o.title = p.description;
-    sel.appendChild(o);
-  }
+  const group = (label, entries, prefix) => {
+    const g = document.createElement('optgroup');
+    g.label = label;
+    for (const [name, p] of Object.entries(entries)) {
+      const o = document.createElement('option');
+      o.value = prefix + name;
+      o.textContent = name;
+      o.title = p.description;
+      g.appendChild(o);
+    }
+    sel.appendChild(g);
+  };
+  group('Landscapes', PRESETS, '');
+  group('Planets (plates, ~150-km cells)', PLANET_PRESETS, 'planet:');
   const custom = document.createElement('option');
   custom.value = '';
   custom.textContent = '(custom)';
@@ -3130,6 +5327,12 @@ function buildPresetMenu() {
   sel.addEventListener('change', () => {
     if (!sel.value) return;
     stack = []; lastPatch = null;
+    if (sel.value.startsWith('planet:')) {
+      const params = resolvePlanetParams({ preset: sel.value.slice(7) });
+      fillPlanetInputs(params);
+      restart(params);
+      return;
+    }
     const params = resolveParams({ preset: sel.value });
     fillGridInputs(params);
     restart(params);
@@ -3138,19 +5341,23 @@ function buildPresetMenu() {
 
 function buildViewMenu() {
   const sel = $('view');
-  for (const [k, label] of Object.entries(VIEWS)) {
+  const views = isPlanet(sim) ? PLANET_VIEWS : VIEWS;
+  const keep = sel.value;
+  sel.innerHTML = '';
+  for (const [k, label] of Object.entries(views)) {
     const o = document.createElement('option');
     o.value = k;
     o.textContent = label;
     sel.appendChild(o);
   }
-  sel.addEventListener('change', draw);
+  sel.value = views[keep] ? keep : 'terrain';
 }
+$('view').addEventListener('change', draw);
 
 function buildSliders() {
   const host = $('sliders');
   host.innerHTML = '';
-  for (const s of SLIDERS) {
+  for (const s of isPlanet(sim) ? PLANET_SLIDERS : SLIDERS) {
     if (s.group) {
       const h = document.createElement('h2');
       h.textContent = s.group;
@@ -3220,33 +5427,62 @@ function buildSliders() {
   }
 }
 
+function buildZoomFactors() {
+  const sel = $('zoom-factor');
+  const opts = isPlanet(sim) ? [8, 16, 32, 64] : [2, 4, 8];
+  const def = isPlanet(sim) ? 32 : 4;
+  sel.innerHTML = opts.map((f) => `<option${f === def ? ' selected' : ''}>${f}</option>`).join('');
+}
+
 function syncControls() {
+  const planet = isPlanet(sim);
+  $('planet-grid').hidden = !planet;
+  $('landscape-grid').hidden = planet;
+  $('projection-wrap').hidden = !planet;
+  $('save-snapshot').disabled = planet;
+  $('section-hint').textContent = planet ? '(along a parallel; click the map to choose the latitude)' : '(click the map to choose a row)';
+  $('quake').hidden = planet || !sim.params.earthquakes?.faults?.length;
+  buildViewMenu();
+  buildSliders();
+  buildZoomFactors();
   for (const el of $('sliders').children) if (el._sync) el._sync();
   for (const cb of $('sliders').querySelectorAll('input[type=checkbox][data-path]')) cb.checked = !!get(sim.params, cb.dataset.path);
-  $('dt').value = sim.params.time.dt;
-  $('preset').value = sim.params.preset || '';
-  $('preset-desc').textContent = sim.params.preset ? PRESETS[sim.params.preset]?.description ?? '' : 'Custom parameters.';
+  if (planet) {
+    $('planet-dt').value = sim.params.time.dt;
+    $('preset').value = sim.params.preset ? `planet:${sim.params.preset}` : '';
+    $('preset-desc').textContent = sim.params.preset ? PLANET_PRESETS[sim.params.preset]?.description ?? '' : 'Custom planet.';
+  } else {
+    $('dt').value = sim.params.time.dt;
+    $('preset').value = sim.params.preset || '';
+    $('preset-desc').textContent = sim.params.preset ? PRESETS[sim.params.preset]?.description ?? '' : 'Custom parameters.';
+  }
   refreshJson();
   updateExtent();
   syncZoom();
 }
 
+function levelName(s) {
+  if (isPlanet(s)) return `planet: ~${(s.mesh.spacing / 1000).toFixed(0)} km cells`;
+  const dx = s.grid.dx;
+  return dx >= 1000 ? `dx ${+(dx / 1000).toPrecision(3)} km` : `dx ${+dx.toPrecision(3)} m`;
+}
+
 function syncZoom() {
   const levels = [...stack.map((f) => f.sim), sim];
-  $('zoom-path').textContent = levels.map((s, k) => `level ${k}: dx ${+s.grid.dx.toPrecision(3)} m`).join(' › ') +
+  $('zoom-path').textContent = levels.map((s, k) => `level ${k}: ${levelName(s)}`).join(' › ') +
     (stack.length ? '' : '. Zoom in to refine a patch; the level above freezes and feeds its edges and rivers.');
   $('zoom-out').disabled = !stack.length;
-  for (const id of ['cols', 'rows', 'dx', 'seed', 'preset']) $(id).disabled = stack.length > 0;
+  for (const id of ['cols', 'rows', 'dx', 'seed', 'preset', 'subdivisions', 'plates', 'planet-seed']) $(id).disabled = stack.length > 0;
   $('zoom-in').textContent = zoomPending ? 'Click the map…' : 'Zoom in…';
 }
 
 function setSim(next) {
   sim = next;
   $('hover').innerHTML = '&nbsp;';
-  fillGridInputs(sim.params);
-  sectionRow = sim.grid.rows >> 1;
-  resize();
+  if (isPlanet(sim)) fillPlanetInputs(sim.params); else fillGridInputs(sim.params);
+  sectionRow = isPlanet(sim) ? null : sim.grid.rows >> 1;
   syncControls();
+  resize();
   draw();
 }
 
@@ -3258,10 +5494,20 @@ function fillGridInputs(params) {
   $('dt').value = params.time.dt;
 }
 
+function fillPlanetInputs(params) {
+  $('subdivisions').value = params.subdivisions;
+  $('plates').value = params.plates.count;
+  $('planet-seed').value = params.seed;
+  $('planet-dt').value = params.time.dt;
+}
+
 function updateExtent() {
   const cols = +$('cols').value, rows = +$('rows').value, dx = +$('dx').value;
   const w = dx * (cols + 0.5) / 1000, h = (dx * Math.sqrt(3) / 2 * (rows - 1) + 2 * dx / Math.sqrt(3)) / 1000;
   $('extent').textContent = `${w.toFixed(2)} × ${h.toFixed(2)} km, ${cols * rows} cells`;
+  const f = +$('subdivisions').value;
+  const cells = 10 * f * f + 2;
+  $('planet-extent').textContent = `${cells} cells, ~${((6371 * Math.sqrt((4 * Math.PI) / cells)) * 1.07).toFixed(0)} km apart`;
 }
 
 function gridOverrides() {
@@ -3272,17 +5518,26 @@ function gridOverrides() {
   };
 }
 
+function planetOverrides() {
+  return {
+    seed: +$('planet-seed').value,
+    subdivisions: +$('subdivisions').value,
+    plates: { count: +$('plates').value },
+    time: { dt: +$('planet-dt').value },
+  };
+}
+
 function restart(params) {
   try {
-    sim = new Simulation(params);
+    sim = params.subdivisions != null ? new Planet(params) : new Simulation(params);
   } catch (e) {
     $('json-error').textContent = e.message;
     return;
   }
   $('json-error').textContent = '';
-  sectionRow = sim.grid.rows >> 1;
-  resize();
+  sectionRow = isPlanet(sim) ? null : sim.grid.rows >> 1;
   syncControls();
+  resize();
   draw();
 }
 
@@ -3291,21 +5546,22 @@ function restart(params) {
 function resize() {
   const wrap = $('map-wrap');
   const cssW = Math.max(200, wrap.clientWidth);
-  const g = sim.grid;
-  const aspect = g.height / g.width;
+  const planet = isPlanet(sim);
+  const globeView = planet && $('projection').value === 'globe';
+  const aspect = planet ? (globeView ? 1 : 0.5) : sim.grid.height / sim.grid.width;
   const maxH = window.innerHeight * 0.62;
   let w = cssW;
   let h = w * aspect;
   if (h > maxH) { h = maxH; w = h / aspect; }
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
   // never draw at more than ~3 device pixels per cell row: costs time, adds nothing
-  const W = Math.round(Math.min(w * dpr, g.cols * 12));
+  const W = Math.round(Math.min(w * dpr, planet ? 1400 : sim.grid.cols * 12));
   const H = Math.round(W * aspect);
   mapCanvas.width = W;
   mapCanvas.height = H;
   mapCanvas.style.width = `${w}px`;
   mapCanvas.style.height = `${w * aspect}px`;
-  pm = pixelMap(g, W, H);
+  pm = planet ? spherePixelMap(sim.mesh, W, H, { projection: globeView ? 'globe' : 'map', lon0: globe.lon, lat0: globe.lat }) : pixelMap(sim.grid, W, H);
   mapImage = mapCtx.createImageData(W, H);
   secCanvas.width = W;
   secCanvas.height = Math.round(W / 3.2);
@@ -3313,51 +5569,150 @@ function resize() {
   secCanvas.style.height = `${w / 3.2}px`;
 }
 
+/** Pixel position of a longitude/latitude (degrees) on the current planet map, or null. */
+function lonLatToPixel(lon, lat) {
+  if (pm.projection === 'globe') {
+    const v = lonLatToVector(lon, lat);
+    const c = lonLatToVector(pm.lon0, pm.lat0);
+    if (v[0] * c[0] + v[1] * c[1] + v[2] * c[2] < 0) return null;
+    const l0 = (pm.lon0 * Math.PI) / 180;
+    const e = [-Math.sin(l0), Math.cos(l0), 0];
+    const u = [c[1] * e[2] - c[2] * e[1], c[2] * e[0] - c[0] * e[2], c[0] * e[1] - c[1] * e[0]];
+    const a = v[0] * e[0] + v[1] * e[1] + v[2] * e[2];
+    const b = v[0] * u[0] + v[1] * u[1] + v[2] * u[2];
+    return [pm.width / 2 + a * pm.radiusPx, pm.height / 2 - b * pm.radiusPx];
+  }
+  return [((lon + 180) / 360) * pm.width, ((90 - lat) / 180) * pm.height];
+}
+
 function draw() {
   const view = $('view').value;
-  paint(pm, cellColors(sim, view), mapImage.data);
+  const planet = isPlanet(sim);
+  paint(pm, planet ? planetColors(sim, view) : cellColors(sim, view), mapImage.data, planet ? [0, 0, 0] : undefined);
   mapCtx.putImageData(mapImage, 0, 0);
-  // cross-section marker
-  const y = (sim.grid.y[sectionRow * sim.grid.cols] - pm.y0) * pm.scale;
-  mapCtx.strokeStyle = 'rgba(255,255,255,0.6)';
   mapCtx.setLineDash([6, 4]);
   mapCtx.lineWidth = 1;
-  mapCtx.beginPath();
-  mapCtx.moveTo(0, y + 0.5);
-  mapCtx.lineTo(mapCanvas.width, y + 0.5);
-  mapCtx.stroke();
+  mapCtx.strokeStyle = 'rgba(255,255,255,0.6)';
+  if (planet) {
+    if (pm.projection !== 'globe') { // the section's parallel
+      const y = ((90 - sectionLat) / 180) * pm.height;
+      mapCtx.beginPath(); mapCtx.moveTo(0, y + 0.5); mapCtx.lineTo(mapCanvas.width, y + 0.5); mapCtx.stroke();
+    }
+  } else {
+    const y = (sim.grid.y[sectionRow * sim.grid.cols] - pm.y0) * pm.scale;
+    mapCtx.beginPath(); mapCtx.moveTo(0, y + 0.5); mapCtx.lineTo(mapCanvas.width, y + 0.5); mapCtx.stroke();
+  }
   mapCtx.setLineDash([]);
+  if (!planet) drawFaults();
   if (lastPatch && lastPatch.parent === sim) {
-    const b = lastPatch.bounds;
     mapCtx.strokeStyle = 'rgba(255,255,255,0.9)';
     mapCtx.lineWidth = 2;
-    mapCtx.strokeRect((b.xmin - pm.x0) * pm.scale, (b.ymin - pm.y0) * pm.scale, (b.xmax - b.xmin) * pm.scale, (b.ymax - b.ymin) * pm.scale);
+    if (lastPatch.outline) {
+      mapCtx.beginPath();
+      let pen = false;
+      for (const [lon, lat] of lastPatch.outline) {
+        const p = lonLatToPixel(lon, lat);
+        if (!p) { pen = false; continue; }
+        if (pen && pm.projection !== 'globe' && Math.abs(p[0] - pen[0]) > pm.width / 2) pen = false; // date line
+        if (pen) mapCtx.lineTo(p[0], p[1]); else mapCtx.moveTo(p[0], p[1]);
+        pen = p;
+      }
+      mapCtx.stroke();
+    } else {
+      const b = lastPatch.bounds;
+      mapCtx.strokeRect((b.xmin - pm.x0) * pm.scale, (b.ymin - pm.y0) * pm.scale, (b.xmax - b.xmin) * pm.scale, (b.ymax - b.ymin) * pm.scale);
+    }
   }
 
   const img = secCtx.createImageData(secCanvas.width, secCanvas.height);
-  const info = crossSection(sim, sectionRow, secCanvas.width, secCanvas.height, img.data);
+  if (planet) {
+    const info = planetSection(sim, sectionLat, secCanvas.width, secCanvas.height, img.data);
+    $('section-info').textContent = `latitude ${sectionLat.toFixed(1)}°  ${(info.zmin / 1000).toFixed(0)}…${(info.zmax / 1000).toFixed(0)} km  vertical exaggeration ${info.exaggeration.toFixed(0)}×  (tan: continental crust, grey: oceanic, red: mantle)`;
+  } else {
+    const info = crossSection(sim, sectionRow, secCanvas.width, secCanvas.height, img.data);
+    $('section-info').textContent = `row ${sectionRow}  z ${info.zmin.toFixed(0)}…${info.zmax.toFixed(0)} m  vertical exaggeration ${info.exaggeration.toFixed(1)}×`;
+  }
   secCtx.putImageData(img, 0, 0);
-  $('section-info').textContent = `row ${sectionRow}  z ${info.zmin.toFixed(0)}…${info.zmax.toFixed(0)} m  vertical exaggeration ${info.exaggeration.toFixed(1)}×`;
 
-  const s = sim.stats();
-  $('stats').textContent =
-    `t = ${(s.time / 1000).toFixed(1)} kyr  step ${s.step}  z ${s.minElevation.toFixed(0)}…${s.maxElevation.toFixed(0)} m  ` +
-    `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}` +
-    (s.seaLevel != null ? `  sea level ${s.seaLevel.toFixed(1)} m  cliff collapses ${s.cliffCollapses}` : '');
+  if (planet) {
+    const s = sim.stats();
+    $('stats').textContent =
+      `t = ${(s.time / 1e6).toFixed(1)} Myr  step ${s.step}  plates ${s.plates}  land ${(100 * s.landFraction).toFixed(0)}%  ` +
+      `z ${(s.minElevation / 1000).toFixed(1)}…${(s.maxElevation / 1000).toFixed(1)} km  sea level ${s.seaLevel.toFixed(0)} m`;
+  } else {
+    const s = sim.stats();
+    const q = sim.quakes;
+    const lastQ = q.events.length ? q.events[q.events.length - 1] : null;
+    $('stats').textContent =
+      `t = ${(s.time / 1000).toFixed(1)} kyr  step ${s.step}  z ${s.minElevation.toFixed(0)}…${s.maxElevation.toFixed(0)} m  ` +
+      `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}` +
+      (s.seaLevel != null ? `  sea level ${s.seaLevel.toFixed(1)} m  cliff collapses ${s.cliffCollapses}` : '') +
+      (q.count ? `  earthquakes ${q.count} (last M${lastQ.magnitude.toFixed(1)}, ${((sim.time - lastQ.time) / 1000).toFixed(1)} kyr ago)` : '');
+  }
   drawLegend(view);
   if (stack.length) {
-    const c = compareWithParent(sim, stack[stack.length - 1].sim);
+    const parent = stack[stack.length - 1].sim;
+    const c = compareWithParent(sim, parent);
+    const km2 = (a) => (a / 1e6 >= 1e4 ? (a / 1e6).toExponential(2) : (a / 1e6).toFixed(a / 1e6 > 100 ? 0 : 3));
     $('zoom-compare').textContent =
       `Against the frozen level above, over ${c.parentCells} of its cells: mean elevation ${c.meanElevation.child.toFixed(1)} m ` +
       `(level above, extrapolated at its last rate: ${c.meanElevation.expected.toFixed(1)} m); largest river leaving ` +
-      `${(c.largestExitArea.child / 1e6).toFixed(3)} km² (level above: ${(c.largestExitArea.parent / 1e6).toFixed(3)} km²).`;
+      `${km2(c.largestExitArea.child)} km² (level above: ${km2(c.largestExitArea.parent)} km²).`;
   } else {
     $('zoom-compare').textContent = '';
   }
 }
 
+/** Fault traces (dashed), and this step's ruptures (bright), on a landscape map. */
+function drawFaults() {
+  const faults = sim.params.earthquakes?.faults || [];
+  if (!faults.length) return;
+  const F = sim.frame;
+  const px = (fx, fy) => [(F.x + fx * F.width - pm.x0) * pm.scale, (F.y + fy * F.height - pm.y0) * pm.scale];
+  mapCtx.save();
+  mapCtx.beginPath();
+  mapCtx.rect(0, 0, mapCanvas.width, mapCanvas.height);
+  mapCtx.clip();
+  mapCtx.setLineDash([3, 4]);
+  mapCtx.strokeStyle = 'rgba(255,90,70,0.8)';
+  mapCtx.lineWidth = 1.5;
+  for (const f of faults) {
+    const a = px(f.x0, f.y0), b = px(f.x1, f.y1);
+    mapCtx.beginPath(); mapCtx.moveTo(a[0], a[1]); mapCtx.lineTo(b[0], b[1]); mapCtx.stroke();
+  }
+  mapCtx.setLineDash([]);
+  const recent = sim.quakes.events.slice(-sim.quakes.lastStep || sim.quakes.events.length);
+  if (sim.quakes.lastStep) {
+    mapCtx.strokeStyle = 'rgba(255,240,120,0.95)';
+    mapCtx.lineWidth = 4;
+    for (const ev of recent) {
+      const f = faults[ev.fault];
+      const dxw = (f.x1 - f.x0) * F.width, dyw = (f.y1 - f.y0) * F.height;
+      const L = Math.hypot(dxw, dyw);
+      const ux = dxw / L, uy = dyw / L;
+      const a = [(ev.center[0] - (ux * ev.length) / 2 - pm.x0) * pm.scale, (ev.center[1] - (uy * ev.length) / 2 - pm.y0) * pm.scale];
+      const b = [(ev.center[0] + (ux * ev.length) / 2 - pm.x0) * pm.scale, (ev.center[1] + (uy * ev.length) / 2 - pm.y0) * pm.scale];
+      mapCtx.beginPath(); mapCtx.moveTo(a[0], a[1]); mapCtx.lineTo(b[0], b[1]); mapCtx.stroke();
+    }
+  }
+  mapCtx.restore();
+}
+
 function drawLegend(view) {
   const host = $('legend');
+  if (isPlanet(sim)) {
+    const items = {
+      plates: '<span style="--c:#ff463c">convergent</span><span style="--c:#ffeb5a">divergent (ridge)</span><span style="--c:#ebebeb">transform</span><span>plate colours: lighter = continental</span>',
+      age: '<span style="--c:#c82828">0 Myr</span><span style="--c:#f0dc46">60</span><span style="--c:#5abe6e">100</span><span style="--c:#3c78c8">150</span><span style="--c:#46288c">200+</span><span style="--c:#999">continent</span>',
+      crust: '<span style="--c:#141e46">0 km</span><span style="--c:#78aa78">28</span><span style="--c:#dcc86e">40</span><span style="--c:#c86432">60</span><span style="--c:#6e141e">80+</span>',
+    };
+    host.innerHTML = items[view] || '';
+    if (view === 'plates') {
+      const alive = [...new Set(sim.owner)].sort((a, b) => a - b);
+      host.innerHTML += alive.map((q) => `<span style="--c:rgb(${plateColor(q).map(Math.round).join(',')})">plate ${q}</span>`).join('');
+    }
+    return;
+  }
   if (view !== 'geology' && view !== 'terrain') { host.innerHTML = ''; return; }
   const used = new Set();
   for (let i = 0; i < sim.grid.size; i++) used.add(sim.surfaceRock[i]);
@@ -3385,9 +5740,23 @@ function cellAtEvent(ev) {
   return pm.map[py * pm.width + px];
 }
 
+const BOUNDARY = ['', 'convergent', 'divergent', 'transform'];
+
 mapCanvas.addEventListener('mousemove', (ev) => {
+  if (drag) return;
   const i = cellAtEvent(ev);
   if (i < 0) { $('hover').innerHTML = '&nbsp;'; return; }
+  if (isPlanet(sim)) {
+    const m = sim.mesh, s = sim.sim;
+    const wet = s.z[i] < sim.seaLevel;
+    $('hover').textContent =
+      `${deg(m.lat[i]).toFixed(1)}°, ${deg(m.lon[i]).toFixed(1)}°  z ${s.z[i].toFixed(0)} m${wet ? ` (${(sim.seaLevel - s.z[i]).toFixed(0)} m deep)` : ''}  ` +
+      `crust ${(sim.thickness[i] / 1000).toFixed(1)} km, ${(100 * sim.continental[i]).toFixed(0)}% continental` +
+      (sim.continental[i] < 0.5 ? `, ${(sim.age[i] / 1e6).toFixed(0)} Myr old` : '') +
+      `  plate ${sim.owner[i]}${sim.boundary[i] ? ` (${BOUNDARY[sim.boundary[i]]} boundary)` : ''}  ` +
+      `uplift ${(sim.upliftRate[i] * 1000).toFixed(3)} mm/yr  rain ${s.precipWeight[i].toFixed(2)} m/yr`;
+    return;
+  }
   const g = sim.grid;
   const lake = sim.flow.filled[i] - sim.z[i];
   $('hover').textContent =
@@ -3399,14 +5768,45 @@ mapCanvas.addEventListener('mousemove', (ev) => {
     (sim.waveExposureField[i] > 0 ? `  waves ${(100 * sim.waveExposureField[i]).toFixed(0)}%` : '') +
     (sim.notch[i] > 0 ? `  notch ${sim.notch[i].toFixed(1)} m` : '');
 });
+
+// dragging turns the globe
+let drag = null;
+mapCanvas.addEventListener('pointerdown', (ev) => {
+  if (!isPlanet(sim) || pm.projection !== 'globe' || zoomPending) return;
+  drag = { x: ev.clientX, y: ev.clientY, lon: globe.lon, lat: globe.lat, moved: false };
+  mapCanvas.setPointerCapture(ev.pointerId);
+});
+mapCanvas.addEventListener('pointermove', (ev) => {
+  if (!drag) return;
+  const r = mapCanvas.getBoundingClientRect();
+  const k = 180 / r.width;
+  const dx = ev.clientX - drag.x, dy = ev.clientY - drag.y;
+  if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+  globe.lon = ((drag.lon - dx * k + 540) % 360) - 180;
+  globe.lat = Math.max(-89, Math.min(89, drag.lat + dy * k));
+  if (!drag.pending) {
+    drag.pending = true;
+    requestAnimationFrame(() => { if (drag) drag.pending = false; resize(); draw(); });
+  }
+});
+mapCanvas.addEventListener('pointerup', () => { if (drag) { drag.wasDrag = drag.moved; setTimeout(() => { drag = null; }, 0); } });
+
 mapCanvas.addEventListener('click', (ev) => {
+  if (drag && drag.wasDrag) return;
   const i = cellAtEvent(ev);
   if (i < 0) return;
   if (zoomPending) {
     zoomPending = false;
-    const opts = { center: [sim.grid.x[i], sim.grid.y[i]], factor: +$('zoom-factor').value, cols: +$('zoom-cells').value, rows: +$('zoom-cells').value };
     try {
-      const child = zoomIn(sim, opts);
+      let child, opts;
+      if (isPlanet(sim)) {
+        const n = +$('zoom-cells').value;
+        opts = { lon: deg(sim.mesh.lon[i]), lat: deg(sim.mesh.lat[i]), factor: +$('zoom-factor').value, cols: n, rows: n };
+        child = zoomFromPlanet(sim, opts);
+      } else {
+        opts = { center: [sim.grid.x[i], sim.grid.y[i]], factor: +$('zoom-factor').value, cols: +$('zoom-cells').value, rows: +$('zoom-cells').value };
+        child = zoomIn(sim, opts);
+      }
       stack.push({ sim, opts });
       setSim(child);
     } catch (e) {
@@ -3415,9 +5815,27 @@ mapCanvas.addEventListener('click', (ev) => {
     }
     return;
   }
-  sectionRow = sim.grid.row(i);
+  if (isPlanet(sim)) sectionLat = deg(sim.mesh.lat[i]);
+  else sectionRow = sim.grid.row(i);
   draw();
 });
+
+/** Outline of a planet patch as longitude/latitude points, for drawing on the planet. */
+function patchOutline(child) {
+  const { lon, lat } = child.zoom.planet;
+  const proj = azimuthalProjection(lonLatToVector(lon, lat), child.zoom.planetRadius ?? 6.371e6);
+  const b = child.grid.bounds;
+  const pts = [];
+  const N = 24;
+  const edge = (x0, y0, x1, y1) => { for (let k = 0; k < N; k++) pts.push([x0 + ((x1 - x0) * k) / N, y0 + ((y1 - y0) * k) / N]); };
+  edge(b.xmin, b.ymin, b.xmax, b.ymin); edge(b.xmax, b.ymin, b.xmax, b.ymax);
+  edge(b.xmax, b.ymax, b.xmin, b.ymax); edge(b.xmin, b.ymax, b.xmin, b.ymin);
+  pts.push(pts[0]);
+  return pts.map(([x, y]) => {
+    const v = proj.inverse(x, y);
+    return [deg(Math.atan2(v[1], v[0])), deg(Math.asin(Math.max(-1, Math.min(1, v[2]))))];
+  });
+}
 
 $('zoom-in').addEventListener('click', () => {
   zoomPending = !zoomPending;
@@ -3426,7 +5844,9 @@ $('zoom-in').addEventListener('click', () => {
 $('zoom-out').addEventListener('click', () => {
   if (!stack.length) return;
   const { sim: parent } = stack.pop();
-  lastPatch = { parent, bounds: { ...sim.grid.bounds } };
+  lastPatch = isPlanet(parent)
+    ? { parent, outline: patchOutline(Object.assign(sim, { zoom: { ...sim.zoom, planetRadius: parent.params.radius } })) }
+    : { parent, bounds: { ...sim.grid.bounds } };
   setSim(parent);
 });
 
@@ -3435,17 +5855,29 @@ $('run').addEventListener('click', () => {
   $('run').textContent = running ? 'Pause' : 'Run';
 });
 $('step').addEventListener('click', () => { sim.step(); draw(); });
+$('quake').addEventListener('click', () => {
+  if (isPlanet(sim) || !sim.params.earthquakes.faults.length) return;
+  sim.earthquake(0, 7);
+  sim.quakes.lastStep = 1; // highlight it
+  draw();
+});
 $('reset').addEventListener('click', () => {
   if (stack.length) { // re-make this patch from its frozen parent
     const top = stack[stack.length - 1];
-    setSim(zoomIn(top.sim, top.opts));
+    setSim(isPlanet(top.sim) ? zoomFromPlanet(top.sim, top.opts) : zoomIn(top.sim, top.opts));
+    return;
+  }
+  if (isPlanet(sim)) {
+    restart(resolvePlanetParams({ ...sim.params, ...planetOverrides(), plates: { ...sim.params.plates, count: +$('plates').value } }));
     return;
   }
   const base = { ...sim.params };
   restart(resolveParams({ ...base, ...gridOverrides(), grid: gridOverrides().grid, time: { ...base.time, dt: +$('dt').value } }));
 });
-$('dt').addEventListener('change', () => sim.setParams({ time: { dt: +$('dt').value } }));
-for (const id of ['cols', 'rows', 'dx']) $(id).addEventListener('input', updateExtent);
+$('dt').addEventListener('change', () => { if (!isPlanet(sim)) sim.setParams({ time: { dt: +$('dt').value } }); });
+$('planet-dt').addEventListener('change', () => { if (isPlanet(sim)) sim.setParams({ time: { dt: +$('planet-dt').value } }); });
+for (const id of ['cols', 'rows', 'dx', 'subdivisions']) $(id).addEventListener('input', updateExtent);
+$('projection').addEventListener('change', () => { resize(); draw(); });
 
 function refreshJson() {
   $('json').value = JSON.stringify(sim.params, null, 2);
@@ -3453,9 +5885,10 @@ function refreshJson() {
 $('json-refresh').addEventListener('click', refreshJson);
 $('json-apply').addEventListener('click', () => {
   try {
-    const p = resolveParams(JSON.parse($('json').value));
+    const raw = JSON.parse($('json').value);
+    const p = raw.subdivisions != null ? resolvePlanetParams(raw) : resolveParams(raw);
     stack = []; lastPatch = null;
-    fillGridInputs(p);
+    if (raw.subdivisions != null) fillPlanetInputs(p); else fillGridInputs(p);
     restart(p);
   } catch (e) {
     $('json-error').textContent = e.message;
@@ -3489,6 +5922,7 @@ $('save-png').addEventListener('click', () => {
   mapCanvas.toBlob((b) => download(`edgy-${$('view').value}-t${Math.round(sim.time)}.png`, b));
 });
 $('save-snapshot').addEventListener('click', () => {
+  if (isPlanet(sim)) return;
   download(`edgy-snapshot-t${Math.round(sim.time)}.json`, new Blob([JSON.stringify(sim.snapshot())], { type: 'application/json' }));
 });
 $('load').addEventListener('change', async (ev) => {
@@ -3498,12 +5932,11 @@ $('load').addEventListener('change', async (ev) => {
     const data = JSON.parse(await file.text());
     stack = []; lastPatch = null; // a loaded run stands alone (a saved patch keeps its edges and inflows)
     if (data.format?.startsWith('edgy-erosion-snapshot')) {
-      sim = Simulation.fromSnapshot(data);
-      fillGridInputs(sim.params);
-      sectionRow = sim.grid.rows >> 1;
-      resize();
-      syncControls();
-      draw();
+      setSim(Simulation.fromSnapshot(data));
+    } else if (data.subdivisions != null) {
+      const p = resolvePlanetParams(data);
+      fillPlanetInputs(p);
+      restart(p);
     } else {
       const p = resolveParams(data);
       fillGridInputs(p);
@@ -3523,15 +5956,14 @@ window.addEventListener('resize', () => {
 // ------------------------------------------------------------------ start
 
 buildPresetMenu();
-buildViewMenu();
-buildSliders();
 const initial = resolveParams({ preset: 'mesa-country' });
 fillGridInputs(initial);
+fillPlanetInputs(resolvePlanetParams({}));
 restart(initial);
 requestAnimationFrame(loop);
 
 // handy for poking at the simulation from the browser console
-window.edgy = { get sim() { return sim; }, Simulation, resolveParams };
+window.edgy = { get sim() { return sim; }, Simulation, Planet, resolveParams, resolvePlanetParams };
 
 </script>
 </body>

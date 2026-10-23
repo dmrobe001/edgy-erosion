@@ -149,6 +149,46 @@ position and a much faster time step, such as the Coastline Evolution Model of A
 Murray & Arnoult 2001 (Nature 414). Refraction is only the crude share described above.
 There are no tides beyond widening the erosion band: no tidal flats, inlets or marshes.
 
+## Earthquakes
+
+Faults listed in `earthquakes.faults` move in sudden slips instead of smooth uplift
+(`src/processes/earthquakes.js`). Each fault has:
+- a straight surface trace in fractions of the reference frame, which may run off the
+  domain (the domain is then a window onto a longer fault);
+- a dip and a long-term slip rate.
+
+The side to the left of the trace's direction is raised, as for the `fault` uplift pattern.
+
+**Which events, and how often.**
+- **Magnitudes** follow a truncated Gutenberg–Richter law between `minMagnitude` (5.5:
+  smaller events rarely break the surface) and `maxMagnitude`. Each magnitude unit up is
+  10^b times rarer (Gutenberg & Richter 1944, *Bull. Seismol. Soc. Am.* 34).
+- **Rupture length, average slip and down-dip width** come from the regressions of
+  Wells & Coppersmith (1994, *Bull. Seismol. Soc. Am.* 84), all slip types. A rupture
+  longer than the fault is cut to the fault.
+- **Slip along a rupture** has an elliptical profile with the regression's mean.
+- **The event rate** comes from a potency balance (moment balance without the shear
+  modulus): rate = slipRate × faultLength / E[slip × length], with the expectation taken
+  over the magnitude distribution. Events are a Poisson process with this rate, so on
+  average the fault slips at its slip rate while any one spot sees a staircase.
+
+**What an event does.**
+- **Displacement.** Vertical throw = slip × sin(dip). The raised side rises by
+  `upliftShare` of it and the other side drops by the rest. Both decay away from the
+  trace as exp(−distance / W), with W the rupture width. [adapted: a stand-in for the
+  elastic dislocation solution (Okada 1985); horizontal motion is ignored]
+- **Strata.** Rock carries its layers with it, so the fault offsets the strata in the
+  geology view and the cross-section.
+- **Shaking.** Ground within about 10^(0.5M − 2.5) km of the rupture shakes for that step.
+  Cliffs' Culmann critical height drops by `coseismicWeakening` × shaking, and unstable
+  faces fail at once instead of stochastically: earthquake-triggered rockfall.
+  [adapted: a one-parameter attenuation, not a ground-motion model]
+
+`sim.earthquake(k, M)` slips fault k on demand (the browser's **Earthquake!** button).
+`sim.quakes` holds the catalogue. The `earthquake-scarp` preset is a normal fault with
+M 5.5–7.3 events building a range front over an alluvial plain. Its throw is measured
+against the basin, which sediment keeps level.
+
 ## Lithology
 
 `src/lithology.js`. Rock type depends on position and on elevation *in the rock's frame*
@@ -228,6 +268,137 @@ How to read it:
 
 Building the factor-1 control is what exposed the time-step defect described under Rivers.
 
+## The planet
+
+`new Planet(params)` (`src/planet.js`) models a whole planet on an icosahedral geodesic
+mesh (`src/sphere.js`).
+
+**The mesh.**
+- **Construction.** An icosahedron's triangles are each cut into f × f smaller ones and
+  pushed out onto the sphere. That gives 10f² + 2 cells: 12 pentagons, the rest hexagons.
+  At f = 40 there are 16,002 cells about 190 km apart.
+- **Geometry.**
+  - Cells are the spherical Voronoi polygons of the vertices.
+  - `dist` is the great-circle distance between centres.
+  - `face` is the arc between the circumcentres on either side of an edge.
+  - `area` is the spherical polygon area, which sums to 4πR² to round-off.
+- **Map coordinates.** `x, y` are equirectangular, used only for drawing. Geometry uses
+  the unit vectors in `pos`.
+- **Accuracy.** With true geometry, the finite-volume processes are consistent on the
+  sphere. The discrete Laplacian converges to the spherical-harmonic eigenvalues
+  −l(l+1)/R² at second order in RMS (0.03% error at f = 16 for l = 1); the maximum
+  error is first order, near the pentagons.
+
+**Plates** are rigid and kinematic: each rotates about its Euler pole at a prescribed
+rate. Plates start as a noisy, randomly weighted growth from scattered seeds, and their
+speeds are drawn between `minSpeed` and `maxSpeed`.
+
+The central data-structure choice: **each plate keeps its crust in its own frame**, on its
+own copy of the mesh. Each plate-frame cell holds crust thickness, continental fraction,
+formation time, soil and last-seen elevation. The world map is only a view of them: after
+each small rotation (substeps move no point more than half a cell), every world cell looks
+back along each plate's rotation to the plate cell now above it, by nearest neighbour.
+Because rigid motion is never interpolated, coastlines stay sharp however far plates
+travel.
+
+Each world cell then falls into one of three cases:
+- **Covered by one plate**: that plate owns it.
+- **A gap** (no plate covers it): sea-floor spreading. New oceanic crust, 7 km thick, is
+  added to the plate that was there.
+  - The view opens gaps a whole cell at a time, so the new cell is dated from when it
+    passes the gap: signed distance along the motion ÷ speed.
+  - Without that correction, ages near ridges came out several Myr too old.
+- **An overlap**: convergence.
+  - **Which plate overrides.** Each plate pair keeps the polarity it took at first contact
+    (the more buoyant column then). This is a deliberate choice: deciding cell by cell made
+    plate edges interfinger, because ages of similar ocean floors alternate. A column meant
+    to sink that floats more than `polarityFlip` (2 km) higher flips the polarity, as when
+    a continent reaches a trench.
+  - **Continents** beneath the overriding plate are too buoyant to sink and are scraped
+    off whole (collision).
+  - **Ocean floor** subducts, except for `sedimentAccretion` (half) of its sediment, which
+    is scraped off as an accretionary wedge.
+  - **Arcs.** `arcFraction` of the subducted volume returns as new continental crust on
+    the overriding plate. All additions are spread over about `arcWidth` (250 km) behind
+    the margin.
+  - **Cleanup.** Plate-frame cells next to a consumed one that no world cell sampled are
+    consumed too, so sinking plates leave no stray patches.
+
+Plate behaviour beyond the boundary rules:
+- **Collisions lock.** While continents collide along more than `lockingLength`, the two
+  plates' relative rotation decays with timescale `collisionLocking`. Larger plates change
+  less. [adapted: a kinematic stand-in for the forces that stall collisions] Only columns
+  with more than 50% continental material count. Arc slivers counting is a bug the tests
+  caught: island arcs alone were locking spreading plates.
+- **Plate reorganisation.** Optionally, every `reorganizeEvery` years all plates draw new
+  poles. Old sutures can then rift, a crude Wilson cycle.
+- **Crustal flow.** Crust thicker than `flowThreshold` (45 km) spreads sideways within its
+  plate, with diffusivity rising as (1 + (excess / 10 km)²) [adapted]. This keeps
+  collision plateaus Tibet-like rather than spiky.
+
+**Isostasy.** Every column floats (Airy, no flexure).
+- **Freeboard.** A column of thickness h and density ρ has dry freeboard
+  e = h(1 − ρ/ρm) − K. Below sea level the water's weight deepens it to e·ρm/(ρm − ρw).
+- **Calibration.** K is set so that 35 km of continental crust stands at
+  `referenceElevation` (600 m).
+- **Density** mixes oceanic (2900) and continental (2800 kg/m³) by the continental fraction.
+- **Ocean-floor cooling.** Oceanic lithosphere sinks with age as
+  ridgeDepth + 350 m·√(age/Myr), until it reaches the isostatic depth of cold crust
+  (about 5.6 km, after about 70 Myr) (Parsons & Sclater 1977, *J. Geophys. Res.* 82).
+- **Trenches.** The edge of a plate sinking under its neighbour is a further
+  `trenchDepth` deeper.
+- **Rebound.** Erosion is compensated: removing 1 m of continental rock lowers the
+  surface by only 1 − ρc/ρm ≈ 0.15 m.
+
+**Sea level** is solved every step so the ocean's water volume stays constant (bisection
+on the hypsometry). Young buoyant sea floor, sediment fill and growing continents push it
+up. The water's own load is not re-balanced when sea level moves.
+
+**Surface processes** run as an ordinary `Simulation` on the sphere mesh:
+- **What runs.** Rivers, creep and weathering, with zonal rainfall (wet tropics, dry
+  subtropics, wet mid-latitudes). Rockfall and waves are off.
+- **Effective coefficients.** Erodibilities and diffusivities are effective values for
+  ~150-km cells. At that size the cells hide all the relief that does the eroding, so the
+  values are far from landscape ones.
+- **Sediment.** Sediment a river carries past its first sea cell stays in that column as a
+  delta, placed by isostasy the next step. Nothing leaves the planet.
+- **Write-back.** Erosion and deposition change crust thickness in the plate frames.
+- **Rates follow the rock.** `planet.upliftRate` and `planet.dzdt` compare each column
+  with itself a step earlier, in its plate's frame. Measured at fixed map points instead,
+  a mountain range sliding past would read as uplift on one flank and collapse on the other.
+
+**Bookkeeping.**
+- **Crust volume.** In the plate frames it changes by exactly created + arcs − subducted
+  + surface change. The tests hold this to 1e-10.
+- **Seams.** Where neighbouring world cells sample the same plate cell (a few per cent of
+  cells, along seams where the rotated mesh does not line up), the map shows that column
+  twice and skips another for that step. The volume itself is unaffected.
+
+### From planet to landscape
+
+`zoomFromPlanet(planet, { lon, lat, factor | dx, cols, rows })` lays a flat hex patch on
+the planet with an azimuthal equidistant projection about (lon, lat). That projection keeps
+true distances and directions from the centre. The patch then works like `zoomIn`:
+- **Same machinery.** Both build a mapping from child cells to weighted parent cells, then
+  share one refine step: mean-preserving elevation, roughness, edges following the
+  parent's rate, and entering rivers.
+- **Fields carried over.** The planet's tectonic uplift rate and rainfall become the
+  patch's per-cell `uplift` and `precipitation` fields (`Simulation.setFields`).
+- **Interpolation.** A Gaussian kernel 0.4 planet spacings wide, followed by 48
+  mean-preserving passes. Linear interpolation on the planet's triangles left visible
+  facets 100 km across.
+- **Erosion parameters** are rescaled for the patch's dx: log-linear in log(dx) between
+  the landscape calibration at 30 m and the planet's at 150 km
+  (`regionalErosionParams`). [adapted: a rule of thumb, not a derivation]
+- **Further down.** `zoomIn` refines the patch; uplift and rainfall fields pass down too.
+
+The chain is planet (~190 km) → region (~5 km) → landscape (~600 m) → … In one run on the
+`earth-like` planet, a patch centred on an active margin was compared with its frozen
+planet over 2 Myr:
+- The patch's mean followed the planet's extrapolation from −1597 m to +1043 m, against
+  +1679 m.
+- The landscape patch inside it stayed within 2–4% of its own parent's mean.
+
 ## Checks that are run (`npm test`)
 
 | claim | test |
@@ -247,6 +418,10 @@ Building the factor-1 control is what exposed the time-step defect described und
 | the hex grid and an irregular mesh (2–6 neighbours) satisfy the mesh contract; all processes run on the irregular mesh with water draining everywhere and the volume budget closed; creep conserves volume with unequal cell areas | `mesh.test.js` |
 | zoom: interpolation is exact for linear fields; the child preserves parent cell means to < 5 cm; strata, plugs and weak zones line up across scales; the largest river leaves the patch with the parent's discharge to within 10% (without inflows it carries about half); edges follow the parent's rate exactly | `nest.test.js` |
 | zoom: a same-resolution patch matches the parent run on at the same dt to within 1% of relief, and its volume budget (uplift and edge motion + inflow − export) closes | `nest.test.js` |
+| sphere: 10f²+2 cells with 12 pentagons; areas tile 4πR² to 1e-12; the Laplacian of l = 1 and l = 2 harmonics converges at second order (error < 0.5% at f = 16); greedy nearest-cell search equals brute force; interpolation reproduces linear fields; the azimuthal projection keeps distances from its centre; surface processes on the sphere close the volume budget | `sphere.test.js` |
+| earthquakes: maximum-likelihood b (Aki 1965) recovers the Gutenberg–Richter b to 3%; over 1 Myr (~5600 events) the mean throw matches slip rate × sin(dip) × time to 5% (measured 1.3%); a fault offsets the strata; a fresh scarp under linear creep matches the error-function profile H/2·(1 + erf(d / 2√(Dt))) (Hanks et al. 1984) to 1% of its height (measured 0.04%); shaking fells cliffs that stand without it; runs are deterministic through snapshots | `earthquakes.test.js` |
+| planet: isostasy gives the reference continent, the ridge depth, √age subsidence and 0.15 m of rebound per metre eroded; crust volume closes to 1e-10 of the total; a single rotating plate makes and destroys no crust and keeps its continent's area within 3% while turning by ωt; two plates spreading for 40 Myr give an age–distance slope matching the 4 cm/yr half rate to 10% (measured 4.07), and a trench where they converge; deterministic | `planet.test.js` |
+| planet → patch: block means kept (< 0.5 m), sea level equal, uplift and rainfall fields carried over | `planet.test.js` |
 
 These are all checks of internal consistency and numerics. **None of them shows that the
 landscapes are geologically realistic.** That is a matter of judgement and of calibrating
@@ -274,8 +449,25 @@ against real topography, which has not been done.
   Refining a patch changes its relief and erosion rate (resolution dependence), so a
   refined patch drifts from what its parent predicts: about +27 m over 150 kyr in the
   alpine example above.
+- **Planet.**
+  - **Plates are kinematic.** They obey no forces; only collisions slow them. No new
+    plates are born except through reorganisation.
+  - **Isostasy is local.** Airy, with no flexure, so a mountain belt's foreland basin is
+    missing.
+  - **Nothing recycles continental crust** except subducted sediment, while arcs and
+    sediment wedges add to it. With the defaults, continental area grows from 35% to about
+    45% and land shrinks from about 29% to about 20% over 200 Myr. Sea level rises a few
+    hundred metres as the basins fill.
+  - **Calibration.** The planet's erosion coefficients are tuned only so that continents
+    neither vanish nor grow without limit over ~10⁸ yr. They are not calibrated against
+    real denudation rates.
+  - **Cell size.** At 150–200 km cells, a "mountain range" is one or two cells wide.
+- **Earthquakes** move the ground vertically only. There are no strike-slip offsets of
+  channels, no aftershocks or clustering, and faults are fixed straight lines. A planet
+  patch does not yet get faults from the plate boundaries crossing it: its tectonics
+  arrive as a smooth uplift field.
 - **Not modelled:** explicit water depth or flood hydraulics; groundwater; chemical
-  dissolution (karst); glaciers; wind; isostasy; lateral channel migration and meanders;
+  dissolution (karst); glaciers; wind; isostasy at landscape scale; lateral channel migration and meanders;
   deep-seated landslides; sediment grain size; porosity (rock and soil volumes are
   interchangeable 1:1).
 

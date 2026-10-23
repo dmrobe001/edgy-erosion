@@ -9,7 +9,7 @@
 <body>
   <header>
     <h1>Edgy Erosion</h1>
-    <span class="sub">landscape evolution on a hexagonal grid: rivers, soil, layered rock, cliffs and rockfall</span>
+    <span class="sub">landscape evolution from plates to cliffs: tectonics, earthquakes, rivers, soil, layered rock and rockfall</span>
   </header>
   <main>
     <aside id="controls">
@@ -22,10 +22,24 @@
           <button id="run" class="primary">Run</button>
           <button id="step">Step</button>
           <button id="reset">Reset</button>
+          <button id="quake" hidden title="Slip the first fault now in a magnitude 7 earthquake">Earthquake!</button>
         </div>
       </section>
 
-      <section>
+      <section id="planet-grid" hidden>
+        <h2>Planet <span class="note">(applies on Reset)</span></h2>
+        <div class="grid3">
+          <label>subdivisions<input id="subdivisions" type="number" min="4" max="96" step="1"></label>
+          <label>plates<input id="plates" type="number" min="1" max="30" step="1"></label>
+          <label>seed<input id="planet-seed" type="number" step="1"></label>
+        </div>
+        <div class="grid3">
+          <label>dt (yr)<input id="planet-dt" type="number" min="1000" step="any"></label>
+          <span id="planet-extent" class="note" style="grid-column: span 2"></span>
+        </div>
+      </section>
+
+      <section id="landscape-grid">
         <h2>Grid <span class="note">(applies on Reset)</span></h2>
         <div class="grid3">
           <label>cols<input id="cols" type="number" min="8" max="1024" step="1"></label>
@@ -85,11 +99,12 @@
     <section id="viewer">
       <div class="toolbar">
         <label>View <select id="view"></select></label>
+        <label id="projection-wrap" hidden>Projection <select id="projection"><option value="map">map</option><option value="globe">globe (drag to turn)</option></select></label>
         <span id="stats" class="mono"></span>
       </div>
       <div id="map-wrap"><canvas id="map"></canvas></div>
       <div id="hover" class="mono">&nbsp;</div>
-      <div class="toolbar"><span>Cross-section <span class="note">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
+      <div class="toolbar"><span>Cross-section <span class="note" id="section-hint">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
       <canvas id="section"></canvas>
       <div id="legend"></div>
     </section>

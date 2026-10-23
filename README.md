@@ -1,7 +1,9 @@
 # Edgy Erosion
 
 A landscape-evolution (erosion) simulator on a **hexagonal grid**, for generating terrain
-with cliffs, escarpments, mesas, outcrops and talus slopes. It runs:
+with cliffs, escarpments, mesas, outcrops and talus slopes, plus a **planet** scale above
+it: plate tectonics on an icosahedral sphere that you can zoom into, region by region,
+down to cliffs. It runs:
 
 - **in a browser**, with live controls, map views and a geological cross-section, and
 - **headless in Node.js**, for scripting, batch runs and tests. No browser is needed.
@@ -9,10 +11,13 @@ with cliffs, escarpments, mesas, outcrops and talus slopes. It runs:
 It is plain JavaScript (ES modules) with **no dependencies** and no build step. The same
 `src/` files run in both places.
 
-The model combines tectonic uplift, soil production, river incision and deposition,
-soil creep, cliff collapse (rockfall), talus avalanching, and wave attack on coasts
-(sea cliffs, shore platforms, beaches, marine terraces under changing sea level). It works over layered,
-dipping and intruded rock, and climate and vegetation modulate the rates. The physics is
+The model combines tectonic uplift, faults that slip in earthquakes, soil production,
+river incision and deposition, soil creep, cliff collapse (rockfall, also shaken loose
+by earthquakes), talus avalanching, and wave attack on coasts (sea cliffs, shore
+platforms, beaches, marine terraces under changing sea level). It works over layered,
+dipping and intruded rock, and climate and vegetation modulate the rates. At planet
+scale, rigid plates spread, subduct and collide, crust floats isostatically, and the
+same rivers and creep wear the continents down. The physics is
 documented, with citations and an honest list of simplifications, in
 **[docs/MODEL.md](docs/MODEL.md)**.
 
@@ -23,7 +28,7 @@ You need [Node.js](https://nodejs.org) 18 or newer. Nothing to install beyond th
 ```bash
 git clone <this repo> && cd edgy-erosion
 
-npm test                 # run the test suite (about 10 s)
+npm test                 # run the test suite (about 20 s)
 npm run serve            # then open http://localhost:8000/
 node bin/erode.js --list-presets
 node bin/erode.js --preset mesa-country --steps 300 --section mid --out out/mesa
@@ -34,7 +39,7 @@ because browsers refuse to load ES modules from `file://`. The repository root c
 be published as-is with GitHub Pages.
 
 For a version you can just double-click or email, `npm run build` bundles everything
-into one self-contained file, `dist/edgy-erosion.html` (about 90 KB, works offline).
+into one self-contained file, `dist/edgy-erosion.html` (about 250 KB, works offline).
 Rebuild it after changing `src/` or `web/`.
 
 ## In the browser
@@ -53,6 +58,14 @@ Rebuild it after changing `src/` or `web/`.
   click the map. The level above freezes and supplies the patch's edges and inflowing
   rivers. The panel compares the patch with the level above it. *Zoom out* returns to
   the level above and outlines the patch. You can zoom several levels deep.
+- **Planets** are at the bottom of the preset list. Views show terrain, plates and their
+  boundaries (convergent, divergent, transform), ocean-floor age and crust thickness, on
+  a map or a globe you can drag. The cross-section runs along a parallel and shows crustal
+  roots under mountains. *Zoom in…* on a planet lays a flat regional patch (factor 8–64
+  finer) on it, inheriting its topography, uplift and rainfall; zoom again to reach
+  landscape scale.
+- **Earthquake!** (for presets with faults, e.g. `earthquake-scarp`) slips the first
+  fault in a magnitude-7 event; ruptures flash yellow on the map.
 - **Export** saves the current view as PNG, or a snapshot (full state plus parameters)
   that can be resumed in the browser or the CLI.
 
@@ -92,7 +105,29 @@ compareWithParent(child, sim);    // mean elevation, rates, river discharge vs t
 Processes run on any mesh that satisfies the contract in `src/mesh.js`:
 `new Simulation(params, { mesh })`.
 
-See `examples/basic.js` and `examples/zoom.js` for runnable scripts. `src/render.js` turns state into RGBA
+A planet, and the way down from it:
+
+```js
+import { Planet, zoomFromPlanet, zoomIn } from './src/index.js';
+const planet = new Planet({ preset: 'earth-like', subdivisions: 40, seed: 3 });
+planet.run(200);                                  // 100 Myr at dt = 0.5 Myr
+planet.sim.z; planet.owner; planet.age; planet.thickness;   // per cell of planet.mesh
+const region = zoomFromPlanet(planet, { lon: 20, lat: -10, factor: 32 });  // ~6 km cells
+const land = zoomIn(region, { center: [0, 0], factor: 8 });                  // ~750 m cells
+```
+
+Earthquakes: give faults in the parameters (positions are fractions of the domain and
+may lie outside it):
+
+```js
+const sim = new Simulation({ preset: 'humid-hills',
+  earthquakes: { faults: [{ x0: -1, y0: 0.5, x1: 2, y1: 0.4, dip: 60, slipRate: 2e-3 }] } });
+sim.run(200);
+sim.earthquake(0, 7.2);        // or trigger one now
+sim.quakes.events;             // the catalogue
+```
+
+See `examples/basic.js`, `examples/zoom.js` and `examples/planet.js` for runnable scripts. `src/render.js` turns state into RGBA
 pixels without a canvas, and `bin/erode.js` uses it to write PNGs from Node.
 
 ### Command line
@@ -117,11 +152,16 @@ snapshot, so a run can be continued. Run `node bin/erode.js --help` for details.
 | `humid-hills` | weathered schist under forest: rounded, soil-mantled hills |
 | `cuestas` | gently dipping hard/soft layers: asymmetric ridges with scarp and dip slopes |
 | `fault-scarp` | a block rising along a fault: a degrading scarp, facets, alluvial fans |
+| `earthquake-scarp` | a normal fault slipping in M 5.5–7.3 earthquakes: a stepped range front, offset strata, shaken-down cliffs |
 | `badlands` | weak, bare, thinly layered rock: dense gullies |
 | `volcanic-necks` | soft sediment cut by basalt dikes and plugs: walls and towers emerge as the land wears down |
 | `coastal-plateau` | layered plateau meeting the sea: deltas and drowned valleys |
 | `rocky-coast` | bands of hard and soft rock meeting the sea end-on: headlands, bays, sea cliffs, platforms |
 | `marine-terraces` | a coast rising 1 mm/yr under 41-kyr sea-level cycles: a staircase of uplifted wave-cut platforms |
+
+Planet presets (`src/planet.js`): `earth-like` (a third continental crust in scattered
+blocks, ten plates), `supercontinent` (one continent across several plates, which tear
+it apart), `archipelago` (small fragments, many plates, growing island arcs).
 
 Presets are only starting points. Every number in them lives in `src/params.js`, and the
 units and meanings are commented there.
@@ -144,6 +184,7 @@ units and meanings are commented there.
 | `hillslope` | `diffusivity`, `criticalSlope` | soil creep and angle of repose |
 | `weathering` | `productionDepth`, `frostBoost`, `moistureExponent` | soil production |
 | `rockfall` | `enabled`, `timescale`, `frostFactor` | cliff collapse |
+| `earthquakes` | `faults` (trace, `dip`, `slipRate`), `bValue`, `min/maxMagnitude`, `upliftShare`, `coseismicWeakening` | faults that slip in events |
 | `coast` | `seaLevelAmplitude`, `seaLevelPeriod`, `seaLevelCurve`, `waveHeight`, `waves`, `tidalRange`, `marineDiffusivity`, `attrition` | sea level through time, wave climate, cliff retreat, shore sediment |
 
 **Scale matters.** Cliffs and rockfall need `dx` small compared with the cliff heights
@@ -169,10 +210,12 @@ src/                 the simulation (browser + Node)
   simulation.js      state, step order, bookkeeping, snapshots
   mesh.js            the mesh contract every process uses; an irregular test mesh
   hexgrid.js         hex lattice geometry and neighbours
-  nest.js            zooming in: refine a patch of a frozen parent
+  nest.js            zooming in: refine a patch of a frozen parent (or of a planet)
+  sphere.js          the icosahedral geodesic mesh, projections
+  planet.js          plates, isostasy, sea level, surface processes on the sphere
   flow.js            lakes, flow directions, drainage area
   lithology.js       rock type at any place and depth
-  processes/         fluvial.js, hillslope.js, rockfall.js, coast.js
+  processes/         fluvial.js, hillslope.js, rockfall.js, coast.js, earthquakes.js
   params.js          defaults, rock library, presets
   render.js          colouring, rasterising, cross-sections
 web/                 browser front end (app.js, style.css); index.html at the root
