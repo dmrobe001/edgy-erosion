@@ -1,0 +1,15 @@
+{
+  "name": "edgy-erosion",
+  "version": "0.1.0",
+  "description": "Landscape evolution / erosion simulation on a hexagonal grid, with cliffs, layered rock and rockfall. Runs in the browser and in Node.",
+  "type": "module",
+  "main": "src/index.js",
+  "exports": { ".": "./src/index.js" },
+  "bin": { "edgy-erosion": "bin/erode.js" },
+  "scripts": {
+    "test": "node --test",
+    "serve": "node scripts/serve.js",
+    "erode": "node bin/erode.js"
+  },
+  "engines": { "node": ">=18" }
+}

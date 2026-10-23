@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Edgy Erosion</title>
+  <link rel="stylesheet" href="web/style.css">
+</head>
+<body>
+  <header>
+    <h1>Edgy Erosion</h1>
+    <span class="sub">landscape evolution on a hexagonal grid: rivers, soil, layered rock, cliffs and rockfall</span>
+  </header>
+  <main>
+    <aside id="controls">
+      <section>
+        <label class="row">Preset
+          <select id="preset"></select>
+        </label>
+        <p id="preset-desc" class="note"></p>
+        <div class="buttons">
+          <button id="run" class="primary">Run</button>
+          <button id="step">Step</button>
+          <button id="reset">Reset</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Grid <span class="note">(applies on Reset)</span></h2>
+        <div class="grid3">
+          <label>cols<input id="cols" type="number" min="8" max="1024" step="1"></label>
+          <label>rows<input id="rows" type="number" min="8" max="1024" step="1"></label>
+          <label>dx (m)<input id="dx" type="number" min="0.1" step="any"></label>
+        </div>
+        <div class="grid3">
+          <label>seed<input id="seed" type="number" step="1"></label>
+          <label>dt (yr)<input id="dt" type="number" min="1" step="any"></label>
+          <span id="extent" class="note"></span>
+        </div>
+      </section>
+
+      <section id="sliders"></section>
+
+      <section>
+        <details>
+          <summary>All parameters (JSON)</summary>
+          <p class="note">The complete, reproducible parameter set. Edit and press Apply to restart with it.</p>
+          <textarea id="json" spellcheck="false"></textarea>
+          <div class="buttons">
+            <button id="json-apply">Apply &amp; reset</button>
+            <button id="json-refresh">Refresh</button>
+          </div>
+          <p id="json-error" class="error"></p>
+        </details>
+      </section>
+
+      <section>
+        <h2>Export</h2>
+        <div class="buttons">
+          <button id="save-png">View as PNG</button>
+          <button id="save-snapshot">Snapshot JSON</button>
+        </div>
+        <label class="row">Load snapshot / params
+          <input id="load" type="file" accept=".json,application/json">
+        </label>
+      </section>
+    </aside>
+
+    <section id="viewer">
+      <div class="toolbar">
+        <label>View <select id="view"></select></label>
+        <span id="stats" class="mono"></span>
+      </div>
+      <div id="map-wrap"><canvas id="map"></canvas></div>
+      <div id="hover" class="mono">&nbsp;</div>
+      <div class="toolbar"><span>Cross-section <span class="note">(click the map to choose a row)</span></span><span id="section-info" class="mono"></span></div>
+      <canvas id="section"></canvas>
+      <div id="legend"></div>
+    </section>
+  </main>
+  <script type="module" src="web/app.js"></script>
+</body>
+</html>
