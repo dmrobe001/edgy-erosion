@@ -13,3 +13,4 @@ jobs:
           node-version: ${{ matrix.node }}
       - run: npm test
       - run: node bin/erode.js --preset fault-scarp --cols 48 --rows 48 --steps 20 --out out/ci
+      - run: node scripts/build-single.js out/ci/single.html

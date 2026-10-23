@@ -24,9 +24,19 @@ const noDownloads = args.includes('--no-downloads');
 
 const MODULES = [
   'src/rng.js', 'src/hexgrid.js', 'src/params.js', 'src/lithology.js', 'src/flow.js',
-  'src/processes/fluvial.js', 'src/processes/hillslope.js', 'src/processes/rockfall.js',
+  'src/processes/fluvial.js', 'src/processes/hillslope.js', 'src/processes/rockfall.js', 'src/processes/coast.js',
   'src/simulation.js', 'src/render.js', 'web/app.js',
 ];
+
+// Every relative import must point at a bundled module, or the page would break at runtime.
+for (const file of MODULES) {
+  const code = readFileSync(join(root, file), 'utf8');
+  for (const m of code.matchAll(/^import\s[^;]*?from\s+['"](\.[^'"]+)['"]/gms)) {
+    const target = join(dirname(file), m[1]).replace(/\\/g, '/');
+    if (target.endsWith('index.js')) continue; // the public API file only re-exports
+    if (!MODULES.includes(target)) throw new Error(`${file} imports ${target}, which is not in MODULES`);
+  }
+}
 
 const seen = new Map();
 const chunks = MODULES.map((file) => {

@@ -41,7 +41,7 @@ export function fluvial(sim, dt) {
   const Hs = p.soilCoverScale;
   const G = p.deposition;
   const vegRed = sim.params.vegetation.erodibilityReduction;
-  const sea = sim.params.boundary.seaLevel;
+  const sea = sim.seaLevel;
   const lakeTol = 1e-3;
   const eroded = sim.scratch.eroded; // lowering depth this step (m)
   const zNew = sim.scratch.zNew;

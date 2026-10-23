@@ -15,16 +15,19 @@
  *  frictionAngle  internal friction angle (degrees). Cliffs no steeper than this
  *                 never fail, whatever their height.
  *  weathering     maximum soil (regolith) production rate on bare rock (m/yr).
+ *  waveErodibility  sea-cliff retreat rate under full wave exposure (m/yr).
+ *                 Observed retreat: ~1e-3 for granite, ~0.1-0.3 for sandstone/chalk,
+ *                 ~1 for weak shale or glacial till.
  *  color          for display only.
  */
 export const ROCKS = {
-  granite:   { color: '#b9a99a', erodibility: 1e-5, cohesion: 1.0e6, frictionAngle: 45, weathering: 5e-5 },
-  basalt:    { color: '#5d5a5c', erodibility: 1e-5, cohesion: 8.0e5, frictionAngle: 42, weathering: 6e-5 },
-  sandstone: { color: '#c98a5a', erodibility: 2e-5, cohesion: 4.0e5, frictionAngle: 40, weathering: 1e-4 },
-  limestone: { color: '#d8d2bd', erodibility: 1.5e-5, cohesion: 5.0e5, frictionAngle: 40, weathering: 8e-5 },
-  schist:    { color: '#7f8a86', erodibility: 3e-5, cohesion: 2.0e5, frictionAngle: 35, weathering: 1.5e-4 },
-  siltstone: { color: '#a8846a', erodibility: 8e-5, cohesion: 6.0e4, frictionAngle: 31, weathering: 3e-4 },
-  shale:     { color: '#8f6f6a', erodibility: 1.5e-4, cohesion: 3.0e4, frictionAngle: 28, weathering: 4e-4 },
+  granite:   { color: '#b9a99a', erodibility: 1e-5, cohesion: 1.0e6, frictionAngle: 45, weathering: 5e-5, waveErodibility: 0.005 },
+  basalt:    { color: '#5d5a5c', erodibility: 1e-5, cohesion: 8.0e5, frictionAngle: 42, weathering: 6e-5, waveErodibility: 0.01 },
+  sandstone: { color: '#c98a5a', erodibility: 2e-5, cohesion: 4.0e5, frictionAngle: 40, weathering: 1e-4, waveErodibility: 0.08 },
+  limestone: { color: '#d8d2bd', erodibility: 1.5e-5, cohesion: 5.0e5, frictionAngle: 40, weathering: 8e-5, waveErodibility: 0.04 },
+  schist:    { color: '#7f8a86', erodibility: 3e-5, cohesion: 2.0e5, frictionAngle: 35, weathering: 1.5e-4, waveErodibility: 0.05 },
+  siltstone: { color: '#a8846a', erodibility: 8e-5, cohesion: 6.0e4, frictionAngle: 31, weathering: 3e-4, waveErodibility: 0.25 },
+  shale:     { color: '#8f6f6a', erodibility: 1.5e-4, cohesion: 3.0e4, frictionAngle: 28, weathering: 4e-4, waveErodibility: 0.4 },
 };
 
 export const DEFAULTS = {
@@ -69,7 +72,8 @@ export const DEFAULTS = {
   },
   rocks: ROCKS,
   strata: {
-    // Layers from the top of the stratigraphic column downwards.
+    // Layers from the top of the stratigraphic column downwards. Thickness is true
+    // thickness (perpendicular to bedding), in metres.
     layers: [{ rock: 'sandstone', thickness: 1e9 }],
     top: 1000,          // elevation of the top of the column at the domain centre (m)
     repeat: false,      // repeat the layer sequence indefinitely downwards
@@ -131,6 +135,34 @@ export const DEFAULTS = {
     productionDepth: 0.5,        // soil production e-folding depth h* (m)
     frostBoost: 1.0,             // production multiplied by (1 + this * frost)
     moistureExponent: 1.0,       // production multiplied by (precipitation / 1 m/yr)^this
+  },
+  coast: {
+    // Acts only when boundary.seaLevel is set. Sea level = boundary.seaLevel + a sinusoid,
+    // or + a piecewise-linear curve [[time_yr, offset_m], ...] if seaLevelCurve is given.
+    enabled: true,
+    seaLevelAmplitude: 0,        // m
+    seaLevelPeriod: 100000,      // yr (glacial cycles: ~41 kyr before ~1 Ma, ~100 kyr since)
+    seaLevelPhase: 90,           // degrees; 90 starts at a highstand
+    seaLevelCurve: null,
+    tidalRange: 2,               // m
+    waveHeight: 2,               // significant wave height (m): sets breaking depth and erosion depth
+    // wave climate: directions waves come FROM (deg, 0 = east, 90 = north) and relative
+    // weights. Resolved onto the six lattice directions (every 60 degrees).
+    waves: [
+      { from: 0, weight: 1 }, { from: 45, weight: 1 }, { from: 90, weight: 1 }, { from: 135, weight: 1 },
+      { from: 180, weight: 1 }, { from: 225, weight: 1 }, { from: 270, weight: 1 }, { from: 315, weight: 1 },
+    ],
+    refraction: 0.35,            // share of wave energy spread over all directions (wraps round headlands)
+    fetchScale: 3000,            // open-water distance (m) over which waves build to full size
+    dissipationLength: 150,      // distance (m) over breaking-depth water that damps waves by e
+    beachShielding: 1.0,         // soil thickness (m) that cuts wave erosion by e
+    platformRatio: 0.02,         // vertical platform lowering rate / horizontal cliff retreat rate
+    depthScale: 1.0,             // erosion decays below low tide over depthScale x waveHeight
+    attrition: 0.05,             // rate (m/yr, at full exposure) at which waves grind shore sediment to fines
+    debrisRetained: 0.3,         // fraction of eroded rock kept as beach/shore sediment (rest: fines, lost)
+    marineDiffusivity: 10,       // shore sediment diffusivity at full exposure (m^2/yr)
+    closureDepth: 10,            // depth (m) below which waves barely move sediment (e-folding)
+    maxSubsteps: 60,             // cap on diffusion substeps per step (D is reduced if it binds)
   },
   rockfall: {
     enabled: true,
@@ -254,6 +286,38 @@ export const PRESETS = {
       top: 220, repeat: true, dip: 1, dipDirection: 180,
     },
     climate: { precipitation: 1.0, frost: 0.2 },
+  },
+  'rocky-coast': {
+    description: 'Bands of hard granite and soft shale meeting stormy seas end-on: hard headlands, soft bays, sea cliffs and wave-cut platforms.',
+    time: { dt: 100 },
+    initial: { type: 'ramp', base: -40, height: 180, angle: 180, noise: { amplitude: 25, wavelength: 1200 }, soil: 0.3 },
+    uplift: { rate: 5e-5 },
+    boundary: { open: ['east'], seaLevel: 0 },
+    strata: {
+      layers: [{ rock: 'granite', thickness: 250 }, { rock: 'shale', thickness: 350 }, { rock: 'sandstone', thickness: 200 }, { rock: 'siltstone', thickness: 300 }],
+      top: 500, repeat: true, dip: 75, dipDirection: 90,
+    },
+    climate: { precipitation: 1.2, frost: 0.2 },
+    coast: {
+      waveHeight: 3, tidalRange: 3,
+      waves: [{ from: 0, weight: 3 }, { from: 30, weight: 1 }, { from: 330, weight: 1 }],
+    },
+  },
+  'marine-terraces': {
+    description: 'A sandstone coast rising 1 mm/yr under 41-kyr glacial sea-level cycles: each highstand cuts a platform that uplift lifts into a staircase of terraces.',
+    time: { dt: 250 },
+    initial: { type: 'ramp', base: -100, height: 360, angle: 180, noise: { amplitude: 6, wavelength: 1500 }, soil: 0.2 },
+    uplift: { rate: 1e-3 },
+    boundary: { open: ['east'], seaLevel: 0 },
+    strata: { layers: [{ rock: 'sandstone', thickness: 1e9 }] },
+    climate: { precipitation: 0.4, frost: 0.1 },
+    fluvial: { deposition: 0.3 },
+    hillslope: { diffusivity: 0.05 },
+    coast: {
+      seaLevelAmplitude: 30, seaLevelPeriod: 41000, seaLevelPhase: 90,
+      waveHeight: 2.5,
+      waves: [{ from: 0, weight: 2 }, { from: 45, weight: 1 }, { from: 315, weight: 1 }],
+    },
   },
 };
 

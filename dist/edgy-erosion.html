@@ -419,16 +419,19 @@ function axialToOffset(q, r) {
  *  frictionAngle  internal friction angle (degrees). Cliffs no steeper than this
  *                 never fail, whatever their height.
  *  weathering     maximum soil (regolith) production rate on bare rock (m/yr).
+ *  waveErodibility  sea-cliff retreat rate under full wave exposure (m/yr).
+ *                 Observed retreat: ~1e-3 for granite, ~0.1-0.3 for sandstone/chalk,
+ *                 ~1 for weak shale or glacial till.
  *  color          for display only.
  */
 const ROCKS = {
-  granite:   { color: '#b9a99a', erodibility: 1e-5, cohesion: 1.0e6, frictionAngle: 45, weathering: 5e-5 },
-  basalt:    { color: '#5d5a5c', erodibility: 1e-5, cohesion: 8.0e5, frictionAngle: 42, weathering: 6e-5 },
-  sandstone: { color: '#c98a5a', erodibility: 2e-5, cohesion: 4.0e5, frictionAngle: 40, weathering: 1e-4 },
-  limestone: { color: '#d8d2bd', erodibility: 1.5e-5, cohesion: 5.0e5, frictionAngle: 40, weathering: 8e-5 },
-  schist:    { color: '#7f8a86', erodibility: 3e-5, cohesion: 2.0e5, frictionAngle: 35, weathering: 1.5e-4 },
-  siltstone: { color: '#a8846a', erodibility: 8e-5, cohesion: 6.0e4, frictionAngle: 31, weathering: 3e-4 },
-  shale:     { color: '#8f6f6a', erodibility: 1.5e-4, cohesion: 3.0e4, frictionAngle: 28, weathering: 4e-4 },
+  granite:   { color: '#b9a99a', erodibility: 1e-5, cohesion: 1.0e6, frictionAngle: 45, weathering: 5e-5, waveErodibility: 0.005 },
+  basalt:    { color: '#5d5a5c', erodibility: 1e-5, cohesion: 8.0e5, frictionAngle: 42, weathering: 6e-5, waveErodibility: 0.01 },
+  sandstone: { color: '#c98a5a', erodibility: 2e-5, cohesion: 4.0e5, frictionAngle: 40, weathering: 1e-4, waveErodibility: 0.08 },
+  limestone: { color: '#d8d2bd', erodibility: 1.5e-5, cohesion: 5.0e5, frictionAngle: 40, weathering: 8e-5, waveErodibility: 0.04 },
+  schist:    { color: '#7f8a86', erodibility: 3e-5, cohesion: 2.0e5, frictionAngle: 35, weathering: 1.5e-4, waveErodibility: 0.05 },
+  siltstone: { color: '#a8846a', erodibility: 8e-5, cohesion: 6.0e4, frictionAngle: 31, weathering: 3e-4, waveErodibility: 0.25 },
+  shale:     { color: '#8f6f6a', erodibility: 1.5e-4, cohesion: 3.0e4, frictionAngle: 28, weathering: 4e-4, waveErodibility: 0.4 },
 };
 
 const DEFAULTS = {
@@ -473,7 +476,8 @@ const DEFAULTS = {
   },
   rocks: ROCKS,
   strata: {
-    // Layers from the top of the stratigraphic column downwards.
+    // Layers from the top of the stratigraphic column downwards. Thickness is true
+    // thickness (perpendicular to bedding), in metres.
     layers: [{ rock: 'sandstone', thickness: 1e9 }],
     top: 1000,          // elevation of the top of the column at the domain centre (m)
     repeat: false,      // repeat the layer sequence indefinitely downwards
@@ -535,6 +539,34 @@ const DEFAULTS = {
     productionDepth: 0.5,        // soil production e-folding depth h* (m)
     frostBoost: 1.0,             // production multiplied by (1 + this * frost)
     moistureExponent: 1.0,       // production multiplied by (precipitation / 1 m/yr)^this
+  },
+  coast: {
+    // Acts only when boundary.seaLevel is set. Sea level = boundary.seaLevel + a sinusoid,
+    // or + a piecewise-linear curve [[time_yr, offset_m], ...] if seaLevelCurve is given.
+    enabled: true,
+    seaLevelAmplitude: 0,        // m
+    seaLevelPeriod: 100000,      // yr (glacial cycles: ~41 kyr before ~1 Ma, ~100 kyr since)
+    seaLevelPhase: 90,           // degrees; 90 starts at a highstand
+    seaLevelCurve: null,
+    tidalRange: 2,               // m
+    waveHeight: 2,               // significant wave height (m): sets breaking depth and erosion depth
+    // wave climate: directions waves come FROM (deg, 0 = east, 90 = north) and relative
+    // weights. Resolved onto the six lattice directions (every 60 degrees).
+    waves: [
+      { from: 0, weight: 1 }, { from: 45, weight: 1 }, { from: 90, weight: 1 }, { from: 135, weight: 1 },
+      { from: 180, weight: 1 }, { from: 225, weight: 1 }, { from: 270, weight: 1 }, { from: 315, weight: 1 },
+    ],
+    refraction: 0.35,            // share of wave energy spread over all directions (wraps round headlands)
+    fetchScale: 3000,            // open-water distance (m) over which waves build to full size
+    dissipationLength: 150,      // distance (m) over breaking-depth water that damps waves by e
+    beachShielding: 1.0,         // soil thickness (m) that cuts wave erosion by e
+    platformRatio: 0.02,         // vertical platform lowering rate / horizontal cliff retreat rate
+    depthScale: 1.0,             // erosion decays below low tide over depthScale x waveHeight
+    attrition: 0.05,             // rate (m/yr, at full exposure) at which waves grind shore sediment to fines
+    debrisRetained: 0.3,         // fraction of eroded rock kept as beach/shore sediment (rest: fines, lost)
+    marineDiffusivity: 10,       // shore sediment diffusivity at full exposure (m^2/yr)
+    closureDepth: 10,            // depth (m) below which waves barely move sediment (e-folding)
+    maxSubsteps: 60,             // cap on diffusion substeps per step (D is reduced if it binds)
   },
   rockfall: {
     enabled: true,
@@ -659,6 +691,38 @@ const PRESETS = {
     },
     climate: { precipitation: 1.0, frost: 0.2 },
   },
+  'rocky-coast': {
+    description: 'Bands of hard granite and soft shale meeting stormy seas end-on: hard headlands, soft bays, sea cliffs and wave-cut platforms.',
+    time: { dt: 100 },
+    initial: { type: 'ramp', base: -40, height: 180, angle: 180, noise: { amplitude: 25, wavelength: 1200 }, soil: 0.3 },
+    uplift: { rate: 5e-5 },
+    boundary: { open: ['east'], seaLevel: 0 },
+    strata: {
+      layers: [{ rock: 'granite', thickness: 250 }, { rock: 'shale', thickness: 350 }, { rock: 'sandstone', thickness: 200 }, { rock: 'siltstone', thickness: 300 }],
+      top: 500, repeat: true, dip: 75, dipDirection: 90,
+    },
+    climate: { precipitation: 1.2, frost: 0.2 },
+    coast: {
+      waveHeight: 3, tidalRange: 3,
+      waves: [{ from: 0, weight: 3 }, { from: 30, weight: 1 }, { from: 330, weight: 1 }],
+    },
+  },
+  'marine-terraces': {
+    description: 'A sandstone coast rising 1 mm/yr under 41-kyr glacial sea-level cycles: each highstand cuts a platform that uplift lifts into a staircase of terraces.',
+    time: { dt: 250 },
+    initial: { type: 'ramp', base: -100, height: 360, angle: 180, noise: { amplitude: 6, wavelength: 1500 }, soil: 0.2 },
+    uplift: { rate: 1e-3 },
+    boundary: { open: ['east'], seaLevel: 0 },
+    strata: { layers: [{ rock: 'sandstone', thickness: 1e9 }] },
+    climate: { precipitation: 0.4, frost: 0.1 },
+    fluvial: { deposition: 0.3 },
+    hillslope: { diffusivity: 0.05 },
+    coast: {
+      seaLevelAmplitude: 30, seaLevelPeriod: 41000, seaLevelPhase: 90,
+      waveHeight: 2.5,
+      waves: [{ from: 0, weight: 2 }, { from: 45, weight: 1 }, { from: 315, weight: 1 }],
+    },
+  },
 };
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -749,6 +813,7 @@ class Lithology {
     this.cohesion = new Float64Array(R);
     this.frictionAngle = new Float64Array(R); // radians
     this.weathering = new Float64Array(R);
+    this.waveErodibility = new Float64Array(R);
     this.color = [];
     names.forEach((name, k) => {
       const r = params.rocks[name];
@@ -756,6 +821,7 @@ class Lithology {
       this.cohesion[k] = r.cohesion;
       this.frictionAngle[k] = (r.frictionAngle * Math.PI) / 180;
       this.weathering[k] = r.weathering;
+      this.waveErodibility[k] = r.waveErodibility ?? 0.1;
       this.color.push(r.color || '#888888');
     });
     const idx = (name) => names.indexOf(name);
@@ -764,8 +830,12 @@ class Lithology {
     this.layerRock = Int32Array.from(st.layers.map((l) => idx(l.rock)));
     // layerBottom[k] = depth below column top of the base of layer k
     this.layerBottom = new Float64Array(st.layers.length);
+    // Layer thickness is TRUE thickness, measured perpendicular to the bedding. We look
+    // layers up by vertical depth, and a layer of true thickness t dipping at angle
+    // `dip` spans t / cos(dip) vertically.
+    const vert = 1 / Math.cos(((st.dip || 0) * Math.PI) / 180);
     let d = 0;
-    st.layers.forEach((l, k) => { d += l.thickness; this.layerBottom[k] = d; });
+    st.layers.forEach((l, k) => { d += l.thickness * vert; this.layerBottom[k] = d; });
     this.columnThickness = d;
     this.repeat = !!st.repeat;
     this.basement = idx(st.basement);
@@ -834,10 +904,13 @@ class Lithology {
   rockAt(i, z) {
     if (this.bodyRock[i] >= 0 && z <= this.bodyTop[i]) return this.bodyRock[i];
     let depth = this.columnTop[i] - z;
-    if (depth < 0) return this.layerRock[0]; // above the column: top layer extends upward
-    if (depth >= this.columnThickness) {
-      if (!this.repeat) return this.basement;
-      depth %= this.columnThickness;
+    if (this.repeat) {
+      // a repeating sequence repeats both downwards and upwards
+      depth -= Math.floor(depth / this.columnThickness) * this.columnThickness;
+    } else if (depth < 0) {
+      return this.layerRock[0]; // above the column: top layer extends upward
+    } else if (depth >= this.columnThickness) {
+      return this.basement;
     }
     const lb = this.layerBottom;
     for (let k = 0; k < lb.length; k++) if (depth < lb[k]) return this.layerRock[k];
@@ -1094,7 +1167,7 @@ function fluvial(sim, dt) {
   const Hs = p.soilCoverScale;
   const G = p.deposition;
   const vegRed = sim.params.vegetation.erodibilityReduction;
-  const sea = sim.params.boundary.seaLevel;
+  const sea = sim.seaLevel;
   const lakeTol = 1e-3;
   const eroded = sim.scratch.eroded; // lowering depth this step (m)
   const zNew = sim.scratch.zNew;
@@ -1436,6 +1509,319 @@ function rockfall(sim, dt) {
   return { events, volume };
 }
 
+// ---- src/processes/coast.js ----
+// Coasts: wave exposure, sea-cliff retreat, shore-platform lowering, and the
+// reworking of sediment near the shore.
+//
+// SEA LEVEL may vary in time (seaLevelAt). Every cell below it is sea.
+//
+// WAVE EXPOSURE. For each cell near the shore we follow a ray towards each direction
+// waves come from (the wave climate) across the sea until it hits land or leaves the
+// grid. Rays run along the six lattice directions (see waveExposure). Along each ray:
+//   generation   = 1 - exp(-fetch / fetchScale)       waves grow with open water upwind
+//   dissipation  = exp(-shallowLength / dissipationLength)
+// where shallowLength is how far the ray runs over water shallower than the breaking
+// depth (waveHeight / 0.78). Exposure is the weighted mean of generation x dissipation
+// over the wave climate, between 0 (sheltered) and 1 (fully exposed). Dissipation is
+// the feedback that limits platform width: a wide shallow platform breaks the waves
+// before they reach the cliff (Trenhaile 2000, Marine Geology 166; Anderson, Densmore &
+// Ellis 1999, Basin Research 11). [adapted: a cheap stand-in for wave refraction and
+// shoaling, which this does not model]
+//
+// CLIFF RETREAT. Any land cell with sea beside it is attacked from the side: a sea
+// cliff, or on a gentle coast a low shore that will become one. Waves cut a notch at
+// its foot; the notch deepens horizontally at
+//   R = waveErodibility(rock at sea level) x weakness x exposure x exp(-soil / beachShielding)   (m/yr)
+// (the beach-shielding exponential follows the SCAPE model, Walkden & Hall 2005,
+// Coastal Engineering 52). When the notch reaches dx the cell has been eaten
+// through: the column collapses to low-tide level. A cliff can retreat at most one
+// cell per step, so keep dt < dx / (fastest retreat rate). A fraction `debrisRetained`
+// of the collapsed volume stays as loose debris on the cell; the rest (fines carried
+// off in suspension) leaves the domain. The debris shields the next cliff until the
+// sea clears it. [adapted: notch-and-collapse is our grid version of lateral retreat]
+//
+// PLATFORM LOWERING. Submerged cells lower vertically at
+//   platformRatio x R x f(depth),  f = 1 within the tidal range, decaying as
+//   exp(-(depth - tide/2) / (depthScale x waveHeight)) below it
+// (depth-decay of wave erosion: Sunamura 1992, "Geomorphology of Rocky Coasts";
+// Anderson et al. 1999). Eroded rock becomes soil in the same proportion as above.
+//
+// ATTRITION. Shore sediment is ground down to fines and carried away at
+//   attrition x exposure x f(depth)   (m/yr; f = 1 in the swash and tidal zone)
+// so debris from cliff falls is cleared in time and beaches survive mainly where
+// waves are weak or supply is high. [heuristic]
+//
+// SHORE SEDIMENT. Soil near the shore diffuses with diffusivity
+//   D = marineDiffusivity x exposure x exp(-depth / closureDepth)
+// down to well below the closure depth and up to the run-up limit above sea level,
+// which builds beaches, shorefaces and delta fronts and parks sand in sheltered bays.
+// (Depth-decaying marine diffusion as in basin models, e.g. Yuan et al. 2019.) Explicit
+// substeps are capped; if the cap binds, D is reduced to the stable value and the
+// step reports it.
+
+const BREAK_RATIO = 0.78; // breaking wave height / water depth
+
+/** Sea level (m) at time t (yr), or null when there is no sea. */
+function seaLevelAt(params, t) {
+  const base = params.boundary.seaLevel;
+  if (base == null) return null;
+  const c = params.coast;
+  if (Array.isArray(c.seaLevelCurve) && c.seaLevelCurve.length) {
+    const pts = c.seaLevelCurve;
+    if (t <= pts[0][0]) return base + pts[0][1];
+    for (let k = 1; k < pts.length; k++) {
+      if (t <= pts[k][0]) {
+        const [t0, z0] = pts[k - 1];
+        const [t1, z1] = pts[k];
+        return base + z0 + ((z1 - z0) * (t - t0)) / (t1 - t0);
+      }
+    }
+    return base + pts[pts.length - 1][1];
+  }
+  if (!c.seaLevelAmplitude) return base;
+  return base + c.seaLevelAmplitude * Math.sin((2 * Math.PI * t) / c.seaLevelPeriod + ((c.seaLevelPhase || 0) * Math.PI) / 180);
+}
+
+/** Lattice direction k points at azimuth 60k degrees (0 = east, 60 = north-east, ...). */
+const LATTICE_AZIMUTH = [0, 60, 120, 180, 240, 300];
+
+/**
+ * Split a wave climate onto the six lattice directions: each wave direction's weight
+ * goes to the two nearest lattice directions, linearly in angle.
+ * @returns {Float64Array} six weights summing to 1
+ */
+function latticeWaveWeights(waves) {
+  const w = new Float64Array(6);
+  let total = 0;
+  for (const { from, weight } of waves) {
+    const a = (((from % 360) + 360) % 360) / 60;
+    const k0 = Math.floor(a) % 6;
+    const f = a - Math.floor(a);
+    w[k0] += weight * (1 - f);
+    w[(k0 + 1) % 6] += weight * f;
+    total += weight;
+  }
+  if (total > 0) for (let k = 0; k < 6; k++) w[k] /= total;
+  return w;
+}
+
+/** For each lattice direction, cell indices sorted so a cell comes after its neighbour in that direction. */
+function directionOrders(grid) {
+  if (grid._dirOrders) return grid._dirOrders;
+  const orders = LATTICE_AZIMUTH.map((az) => {
+    const ux = Math.cos((az * Math.PI) / 180);
+    const uy = -Math.sin((az * Math.PI) / 180);
+    const idx = Array.from({ length: grid.size }, (_, i) => i);
+    const proj = (i) => grid.x[i] * ux + grid.y[i] * uy;
+    idx.sort((a, b) => proj(b) - proj(a)); // furthest along the direction first
+    return Int32Array.from(idx);
+  });
+  grid._dirOrders = orders;
+  return orders;
+}
+
+/**
+ * Wave exposure in [0, 1] for every cell in `cells`, written into `out`.
+ *
+ * Rays run along the six lattice directions, which land exactly on cell centres, so
+ * each ray's fetch and shallow-water length follow from its neighbour's by dynamic
+ * programming: one sweep of the grid per direction, O(n), instead of marching rays.
+ * The price is 60-degree angular resolution: wave directions in between are shared
+ * between the two nearest lattice directions.
+ * @param {import('../simulation.js').Simulation} sim
+ */
+function waveExposure(sim, sea, cells, count, out) {
+  const cp = sim.params.coast;
+  const { grid, z } = sim;
+  const n = grid.size;
+  const nb = grid.neighbors;
+  const dx = grid.dx;
+  const breakDepth = cp.waveHeight / BREAK_RATIO;
+  // Refraction and diffraction bend waves round headlands and towards the shore, so a
+  // share of the energy attacks from every direction. [heuristic]
+  const W = latticeWaveWeights(cp.waves);
+  const r = Math.min(1, Math.max(0, cp.refraction ?? 0));
+  for (let k = 0; k < 6; k++) W[k] = (1 - r) * W[k] + r / 6;
+  const orders = directionOrders(grid);
+  const ws = sim.scratch.waves || (sim.scratch.waves = { fetch: new Float64Array(n), shallow: new Float64Array(n) });
+  const { fetch, shallow } = ws;
+  for (let c = 0; c < count; c++) out[cells[c]] = 0;
+  for (let k = 0; k < 6; k++) {
+    if (W[k] === 0) continue;
+    const order = orders[k];
+    for (let s = 0; s < n; s++) {
+      const i = order[s];
+      const j = nb[6 * i + k];
+      if (j < 0) { fetch[i] = Infinity; shallow[i] = 0; continue; } // open sea beyond the grid
+      const depth = sea - z[j];
+      if (depth <= 0) { fetch[i] = dx; shallow[i] = 0; continue; } // land upwind
+      fetch[i] = dx + fetch[j];
+      shallow[i] = shallow[j] + (depth < breakDepth ? dx : 0);
+    }
+    for (let c = 0; c < count; c++) {
+      const i = cells[c];
+      const own = sea - z[i];
+      const sh = shallow[i] + (own > 0 && own < breakDepth ? dx / 2 : 0);
+      const gen = fetch[i] === Infinity ? 1 : 1 - Math.exp(-fetch[i] / cp.fetchScale);
+      out[i] += W[k] * gen * Math.exp(-sh / cp.dissipationLength);
+    }
+  }
+}
+
+/**
+ * @param {import('../simulation.js').Simulation} sim
+ * @param {number} dt years
+ * @returns {{exported:number, collapses:number, cliffRetreat:number, substeps:number, diffusivityCapped:boolean}}
+ */
+function coast(sim, dt) {
+  const cp = sim.params.coast;
+  const sea = sim.seaLevel;
+  const { grid, lith, rock, soil, z, boundaryOutlet, upliftCum } = sim;
+  const n = grid.size;
+  const nb = grid.neighbors;
+  const dx = grid.dx;
+  const ac = grid.cellArea;
+  const exposure = sim.waveExposureField;
+  exposure.fill(0);
+  const result = { exported: 0, collapses: 0, cliffRetreat: 0, substeps: 0, diffusivityCapped: false };
+  if (sea == null) return result;
+
+  const H = cp.waveHeight;
+  const halfTide = cp.tidalRange / 2;
+  const runup = halfTide + H; // top of the swash zone above mean sea level
+  const activeDepth = 3 * cp.closureDepth;
+  const keep = cp.debrisRetained;
+
+  // --- the coastal band: shallow sea, and land touching the sea ---
+  const band = sim.scratch.coastBand || (sim.scratch.coastBand = new Int32Array(n));
+  let count = 0;
+  for (let i = 0; i < n; i++) {
+    const depth = sea - z[i];
+    if (depth > 0) {
+      if (depth < activeDepth) band[count++] = i;
+      continue;
+    }
+    for (let k = 0; k < 6; k++) {
+      const j = nb[6 * i + k];
+      if (j >= 0 && z[j] < sea) { band[count++] = i; break; }
+    }
+  }
+  waveExposure(sim, sea, band, count, exposure);
+
+  // --- cliff notching and platform lowering ---
+  const notch = sim.notch;
+  for (let c = 0; c < count; c++) {
+    const i = band[c];
+    if (boundaryOutlet[i]) continue;
+    const ex = exposure[i];
+    if (ex <= 0) continue;
+    if (z[i] >= sea) {
+      // land touching the sea (a sea cliff, or a low shore): waves cut a notch at its foot
+      const k = lith.waveErodibility[lith.rockAt(i, sea - upliftCum[i])] * lith.weakness[i];
+      const R = k * ex * Math.exp(-soil[i] / cp.beachShielding);
+      notch[i] += R * dt;
+      result.cliffRetreat += R * dt;
+      if (notch[i] >= dx) {
+        const newRock = Math.min(rock[i], sea - halfTide);
+        const removed = rock[i] - newRock;
+        rock[i] = newRock;
+        soil[i] += keep * removed;
+        result.exported += (1 - keep) * removed * ac;
+        // carry the remainder (at most one more cell's worth): retreat is limited to one
+        // cell per step, so keep dt below dx / (fastest retreat rate)
+        notch[i] = Math.min(notch[i] - dx, dx);
+        result.collapses++;
+      }
+    } else {
+      // submerged platform or shoreface: vertical lowering of the rock beneath any soil
+      const depth = sea - rock[i];
+      const f = depth <= halfTide ? 1 : Math.exp(-(depth - halfTide) / (cp.depthScale * H));
+      const k = lith.waveErodibility[sim.surfaceRock[i]] * lith.weakness[i];
+      const lower = cp.platformRatio * k * ex * f * Math.exp(-soil[i] / cp.beachShielding) * dt;
+      rock[i] -= lower;
+      soil[i] += keep * lower;
+      result.exported += (1 - keep) * lower * ac;
+      notch[i] = 0;
+    }
+    // attrition: waves grind shore sediment to fines, fastest in the swash zone
+    if (soil[i] > 0 && cp.attrition > 0) {
+      const d = sea - z[i];
+      const g = d < -runup ? 0 : d <= halfTide ? 1 : Math.exp(-(d - halfTide) / (cp.depthScale * H));
+      const loss = Math.min(soil[i], cp.attrition * ex * g * dt);
+      soil[i] -= loss;
+      result.exported += loss * ac;
+    }
+    z[i] = rock[i] + soil[i];
+  }
+
+  // --- shore sediment diffusion (soil only), explicit substeps on the band ---
+  const D0 = cp.marineDiffusivity;
+  if (D0 > 0 && count > 0) {
+    const maxSub = cp.maxSubsteps;
+    const dtStable = (0.5 * dx * dx) / (3 * D0); // exposure and depth factors are <= 1
+    let substeps = Math.ceil(dt / dtStable);
+    let Dscale = 1;
+    if (substeps > maxSub) {
+      Dscale = (maxSub * dtStable) / dt;
+      substeps = maxSub;
+      result.diffusivityCapped = true;
+    }
+    result.substeps = substeps;
+    const h = dt / substeps;
+    const coef = ((2 / 3) * h * D0 * Dscale) / (dx * dx);
+    const inBand = sim.scratch.inBand || (sim.scratch.inBand = new Uint8Array(n));
+    for (let c = 0; c < count; c++) inBand[band[c]] = 1;
+    // Edge list with conductances, fixed for the step (they change slowly with z).
+    const es = sim.scratch.coastEdges || (sim.scratch.coastEdges = {
+      a: new Int32Array(6 * n), b: new Int32Array(6 * n), g: new Float64Array(6 * n),
+    });
+    let ne = 0;
+    for (let c = 0; c < count; c++) {
+      const i = band[c];
+      for (let k = 0; k < 6; k++) {
+        const j = nb[6 * i + k];
+        if (j < 0 || (inBand[j] && j < i)) continue; // each edge once
+        const d = sea - Math.max(z[i], z[j]); // depth over the shallower of the pair
+        if (d < -runup) continue;
+        const g = coef * 0.5 * (exposure[i] + exposure[j]) * Math.exp(-Math.max(d, 0) / cp.closureDepth);
+        if (g <= 0) continue;
+        es.a[ne] = i; es.b[ne] = j; es.g[ne] = g; ne++;
+      }
+    }
+    const flux = sim.scratch.coastFlux || (sim.scratch.coastFlux = new Float64Array(6 * n));
+    const outTotal = sim.scratch.outTotal;
+    const { a: ea, b: eb, g: eg } = es;
+    for (let sub = 0; sub < substeps; sub++) {
+      for (let e = 0; e < ne; e++) { outTotal[ea[e]] = 0; outTotal[eb[e]] = 0; }
+      for (let e = 0; e < ne; e++) {
+        const i = ea[e], j = eb[e];
+        const q = eg[e] * (z[i] - z[j]); // positive: i -> j
+        const up = q > 0 ? i : j;
+        // only band cells give sediment, and only if they have some
+        if (!inBand[up] || soil[up] <= 0) { flux[e] = 0; continue; }
+        flux[e] = q;
+        outTotal[up] += Math.abs(q);
+      }
+      // apply with the soil limit: no cell gives more than it has
+      for (let e = 0; e < ne; e++) {
+        const q0 = flux[e];
+        if (q0 === 0) continue;
+        const i = ea[e], j = eb[e];
+        const up = q0 > 0 ? i : j;
+        const q = outTotal[up] > soil[up] ? (q0 * soil[up]) / outTotal[up] : q0;
+        soil[i] -= q; z[i] -= q;
+        soil[j] += q; z[j] += q;
+      }
+      for (let c = 0; c < count; c++) {
+        const i = band[c];
+        if (soil[i] < 0) { z[i] -= soil[i]; soil[i] = 0; } // round-off only
+      }
+    }
+    for (let c = 0; c < count; c++) inBand[band[c]] = 0;
+  }
+  return result;
+}
+
 // ---- src/simulation.js ----
 // The simulation: state, the order of processes in a time step, and bookkeeping.
 //
@@ -1453,11 +1839,13 @@ function rockfall(sim, dt) {
 //   5. rivers       stream power incision + sediment deposition
 //   6. creep        nonlinear soil creep
 //   7. rockfall     Culmann cliff failure -> debris
+//   7b. coast       waves notch sea cliffs, lower platforms, spread shore sediment
 //   8. avalanche    over-steep soil and talus slide to the angle of repose
 //   9. boundaries   material reaching an open edge leaves the domain
 //
 // Operator splitting like this is first-order accurate in dt; keep dt small
 // compared with the timescales you care about (e.g. the rockfall timescale).
+
 
 
 
@@ -1492,6 +1880,10 @@ class Simulation {
     this.dzdt = new Float64Array(n);
     /** Recent rockfall thickness removed per cell (m), decaying over a few steps; for display. */
     this.rockfallActivity = new Float64Array(n);
+    /** Wave exposure 0..1 near the shore (0 elsewhere), from the last step. */
+    this.waveExposureField = new Float64Array(n);
+    /** Depth (m) of the wave-cut notch at the foot of each sea cliff. Part of the state. */
+    this.notch = new Float64Array(n);
     this.flow = {
       filled: new Float64Array(n),
       receiver: new Int32Array(n),
@@ -1513,7 +1905,9 @@ class Simulation {
     this.stepCount = 0;
     this.rng = new Rng(this.params.seed);
     this.budget = { uplift: 0, exported: 0 };
-    this.last = { substeps: 0, rockfallEvents: 0, rockfallVolume: 0, avalancheVolume: 0, exported: 0 };
+    this.last = { substeps: 0, rockfallEvents: 0, rockfallVolume: 0, avalancheVolume: 0, exported: 0, cliffCollapses: 0, coastSubsteps: 0 };
+    /** Current sea level (m), or null when there is no sea. */
+    this.seaLevel = seaLevelAt(this.params, 0);
 
     this._buildBoundaries();
     this._buildDerived();
@@ -1528,7 +1922,9 @@ class Simulation {
     sim.rock.set(snap.rock);
     sim.soil.set(snap.soil);
     sim.upliftCum.set(snap.upliftCum);
+    if (snap.notch) sim.notch.set(snap.notch);
     sim.time = snap.time;
+    sim.seaLevel = seaLevelAt(sim.params, sim.time);
     sim.stepCount = snap.stepCount;
     sim.budget = { ...snap.budget };
     sim._updateDerivedState();
@@ -1549,6 +1945,7 @@ class Simulation {
       rock: Array.from(this.rock),
       soil: Array.from(this.soil),
       upliftCum: Array.from(this.upliftCum),
+      notch: Array.from(this.notch),
     };
   }
 
@@ -1563,6 +1960,7 @@ class Simulation {
     }
     validate(next);
     this.params = next;
+    this.seaLevel = seaLevelAt(next, this.time);
     this._buildBoundaries();
     this._buildDerived();
     this._updateDerivedState();
@@ -1575,6 +1973,7 @@ class Simulation {
     const n = grid.size;
     const ac = grid.cellArea;
     this.scratch.zStart.set(z);
+    this.seaLevel = seaLevelAt(p, this.time + dt / 2);
 
     // 1. uplift
     let upliftVol = 0;
@@ -1632,6 +2031,18 @@ class Simulation {
     } else {
       this.last.rockfallEvents = 0;
       this.last.rockfallVolume = 0;
+    }
+
+    // 7b. coast: waves cut cliffs and platforms and rework shore sediment
+    if (p.coast.enabled && this.seaLevel != null) {
+      const c = coast(this, dt);
+      exported += c.exported;
+      this.last.cliffCollapses = c.collapses;
+      this.last.coastSubsteps = c.substeps;
+    } else {
+      this.waveExposureField.fill(0);
+      this.last.cliffCollapses = 0;
+      this.last.coastSubsteps = 0;
     }
 
     // 8. avalanche
@@ -1700,6 +2111,8 @@ class Simulation {
       rockfallEvents: this.last.rockfallEvents,
       rockfallVolume: this.last.rockfallVolume,
       exportedVolume: this.last.exported,
+      seaLevel: this.seaLevel,
+      cliffCollapses: this.last.cliffCollapses,
       creepSubsteps: this.last.substeps,
     };
   }
@@ -1800,10 +2213,17 @@ class Simulation {
   }
 
   _updateOutlets() {
-    const sea = this.params.boundary.seaLevel;
+    const sea = this.seaLevel;
+    let any = false;
+    let lowest = 0;
     for (let i = 0; i < this.grid.size; i++) {
       this.outlet[i] = this.boundaryOutlet[i] || (sea != null && this.z[i] < sea) ? 1 : 0;
+      if (this.outlet[i]) any = true;
+      if (this.z[i] < this.z[lowest]) lowest = i;
     }
+    // No open edge and no sea left (e.g. the sea floor was uplifted or the sea fell
+    // away): the lowest cell becomes the terminal sink of an internally drained basin.
+    if (!any) this.outlet[lowest] = 1;
   }
 
   _updateDerivedState() {
@@ -1835,6 +2255,7 @@ const VIEWS = {
   discharge: 'Drainage area',
   erosion: 'Erosion / deposition rate',
   rockfall: 'Recent rockfall',
+  waves: 'Wave exposure',
 };
 
 function hexToRgb(hex) {
@@ -1863,6 +2284,7 @@ const GREEN = [[0, [235, 225, 200]], [0.5, [150, 185, 95]], [1, [35, 95, 40]]];
 const BLUE = [[0, [245, 245, 240]], [0.4, [150, 190, 220]], [1, [20, 60, 140]]];
 const HEAT = [[0, [0, 0, 0]], [0.3, [200, 40, 20]], [0.7, [255, 170, 30]], [1, [255, 255, 200]]];
 const SOIL_RGB = [176, 152, 112];
+const SAND_RGB = [222, 204, 150];
 const VEG_RGB = [72, 112, 52];
 const LAKE_RGB = [70, 120, 175];
 const SEA_RGB = [40, 80, 140];
@@ -1914,7 +2336,7 @@ function cellColors(sim, view = 'terrain', out) {
   const shade = hillshade(sim, view === 'terrain' || view === 'geology' ? 2 : 1.5);
   const rockRgb = lith.color.map(hexToRgb);
   const { filled, area } = sim.flow;
-  const sea = sim.params.boundary.seaLevel;
+  const sea = sim.seaLevel;
   const cellA = grid.cellArea;
 
   let zmin = Infinity, zmax = -Infinity, amax = 0, emax = 1e-9;
@@ -1927,6 +2349,8 @@ function cellColors(sim, view = 'terrain', out) {
   }
   const zr = Math.max(1e-6, zmax - zmin);
   const logAmax = Math.log(Math.max(amax / cellA, 2));
+  const cp = sim.params.coast;
+  const beachTop = sea != null && cp ? sea + cp.tidalRange / 2 + cp.waveHeight : null;
   const riverStart = Math.min(Math.log(150), 0.6 * logAmax); // contributing cells at which rivers show
 
   for (let i = 0; i < n; i++) {
@@ -1968,19 +2392,30 @@ function cellColors(sim, view = 'terrain', out) {
         c = t > 0.01 ? ramp(HEAT, 0.3 + 0.7 * t) : [g, g, g];
         break;
       }
+      case 'waves': {
+        const g = 80 + 110 * s;
+        const e = sim.waveExposureField[i];
+        c = water === 2 && e === 0 ? [g * 0.5, g * 0.55, g * 0.7] : e > 0 ? ramp(HEAT, 0.25 + 0.75 * e) : [g, g, g];
+        if (sim.notch[i] > 0) c = [255, 255, 255];
+        break;
+      }
       case 'terrain':
       default: {
         const rc = rockRgb[surfaceRock[i]];
         const cover = 1 - Math.exp(-soil[i] / 0.3);
         c = [0, 1, 2].map((k) => rc[k] + cover * (SOIL_RGB[k] - rc[k]));
         c = c.map((v, k) => v + veg[i] * (VEG_RGB[k] - v));
+        if (beachTop !== null && soil[i] > 0.2 && z[i] < beachTop) c = SAND_RGB.slice(); // beach sand
         c = c.map((v) => v * lit);
         const t = (Math.log(Math.max(area[i] / cellA, 1)) - riverStart) / (logAmax - riverStart);
         if (t > 0 && !water) c = c.map((v, k) => v + Math.min(1, 0.4 + t) * (LAKE_RGB[k] - v));
         if (water === 1) c = LAKE_RGB.map((v) => v * (0.85 + 0.15 * s));
         if (water === 2) {
-          const depth = Math.min(1, (sea - z[i]) / 50);
-          c = SEA_RGB.map((v) => v * (1 - 0.5 * depth) + 40 * (1 - depth));
+          // shallow water shows the bed (platforms, shoals); deep water darkens
+          const depth = Math.min(1, (sea - z[i]) / 40);
+          const bed = soil[i] > 0.2 ? SAND_RGB : rockRgb[surfaceRock[i]];
+          const shallow = Math.exp(-(sea - z[i]) / 4);
+          c = SEA_RGB.map((v, k) => (v * (1 - 0.5 * depth) + 40 * (1 - depth)) * (1 - 0.5 * shallow) + 0.5 * shallow * bed[k] * (0.7 + 0.3 * s));
         }
       }
     }
@@ -2031,7 +2466,7 @@ function paint(pm, colors, rgba, background = [24, 24, 28]) {
 function crossSection(sim, row, width, height, rgba) {
   const { grid, z, rock, lith, upliftCum } = sim;
   const filled = sim.flow.filled;
-  const sea = sim.params.boundary.seaLevel;
+  const sea = sim.seaLevel;
   const cols = grid.cols;
   row = Math.max(0, Math.min(grid.rows - 1, row | 0));
   let zmin = Infinity, zmax = -Infinity;
@@ -2089,6 +2524,11 @@ const SLIDERS = [
   { path: 'hillslope.diffusivity', label: 'Creep diffusivity', unit: 'm²/yr', min: 1e-4, max: 0.5, log: true },
   { path: 'hillslope.criticalSlope', label: 'Soil repose slope', unit: '', min: 0.2, max: 1.5 },
   { path: 'weathering.enabled', label: 'Weathering (soil production)', toggle: true },
+  { group: 'Coast (when there is a sea)' },
+  { path: 'coast.waveHeight', label: 'Wave height', unit: 'm', min: 0.2, max: 8, log: true },
+  { path: 'coast.seaLevelAmplitude', label: 'Sea-level swing', unit: 'm', min: 0, max: 120 },
+  { path: 'coast.seaLevelPeriod', label: 'Sea-level period', unit: 'yr', min: 5000, max: 200000, log: true },
+  { path: 'coast.marineDiffusivity', label: 'Shore sediment mobility', unit: 'm²/yr', min: 0.1, max: 100, log: true },
   { group: 'Rockfall' },
   { path: 'rockfall.enabled', label: 'Rockfall enabled', toggle: true },
   { path: 'rockfall.timescale', label: 'Failure timescale', unit: 'yr', min: 10, max: 1e5, log: true },
@@ -2316,7 +2756,8 @@ function draw() {
   const s = sim.stats();
   $('stats').textContent =
     `t = ${(s.time / 1000).toFixed(1)} kyr  step ${s.step}  z ${s.minElevation.toFixed(0)}…${s.maxElevation.toFixed(0)} m  ` +
-    `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}`;
+    `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}` +
+    (s.seaLevel != null ? `  sea level ${s.seaLevel.toFixed(1)} m  cliff collapses ${s.cliffCollapses}` : '');
   drawLegend(view);
 }
 
@@ -2327,7 +2768,7 @@ function drawLegend(view) {
   for (let i = 0; i < sim.grid.size; i++) used.add(sim.surfaceRock[i]);
   for (const k of sim.lith.layerRock) used.add(k);
   host.innerHTML = [...used].sort().map((k) => `<span style="--c:${sim.lith.color[k]}">${sim.lith.names[k]}</span>`).join('') +
-    (view === 'terrain' ? '<span style="--c:#b09870">soil / talus</span><span style="--c:#487034">vegetation</span><span style="--c:#4678af">water</span>' : '');
+    (view === 'terrain' ? '<span style="--c:#b09870">soil / talus</span><span style="--c:#decc96">beach sand</span><span style="--c:#487034">vegetation</span><span style="--c:#4678af">water</span>' : '');
 }
 
 function loop() {
@@ -2358,7 +2799,10 @@ mapCanvas.addEventListener('mousemove', (ev) => {
     `cell (${g.col(i)}, ${g.row(i)})  z ${sim.z[i].toFixed(1)} m  soil ${sim.soil[i].toFixed(2)} m  ` +
     `rock ${sim.lith.names[sim.surfaceRock[i]]}  drainage ${(sim.flow.area[i] / 1e6).toFixed(3)} km²  ` +
     `vegetation ${(100 * sim.veg[i]).toFixed(0)}%  dz/dt ${(sim.dzdt[i] * 1000).toFixed(3)} mm/yr` +
-    (lake > 0.05 ? `  lake ${lake.toFixed(1)} m deep` : '');
+    (lake > 0.05 ? `  lake ${lake.toFixed(1)} m deep` : '') +
+    (sim.seaLevel != null && sim.z[i] < sim.seaLevel ? `  sea ${(sim.seaLevel - sim.z[i]).toFixed(1)} m deep` : '') +
+    (sim.waveExposureField[i] > 0 ? `  waves ${(100 * sim.waveExposureField[i]).toFixed(0)}%` : '') +
+    (sim.notch[i] > 0 ? `  notch ${sim.notch[i].toFixed(1)} m` : '');
 });
 mapCanvas.addEventListener('click', (ev) => {
   const i = cellAtEvent(ev);

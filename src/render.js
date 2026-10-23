@@ -10,6 +10,7 @@ export const VIEWS = {
   discharge: 'Drainage area',
   erosion: 'Erosion / deposition rate',
   rockfall: 'Recent rockfall',
+  waves: 'Wave exposure',
 };
 
 export function hexToRgb(hex) {
@@ -38,6 +39,7 @@ const GREEN = [[0, [235, 225, 200]], [0.5, [150, 185, 95]], [1, [35, 95, 40]]];
 const BLUE = [[0, [245, 245, 240]], [0.4, [150, 190, 220]], [1, [20, 60, 140]]];
 const HEAT = [[0, [0, 0, 0]], [0.3, [200, 40, 20]], [0.7, [255, 170, 30]], [1, [255, 255, 200]]];
 const SOIL_RGB = [176, 152, 112];
+const SAND_RGB = [222, 204, 150];
 const VEG_RGB = [72, 112, 52];
 const LAKE_RGB = [70, 120, 175];
 const SEA_RGB = [40, 80, 140];
@@ -89,7 +91,7 @@ export function cellColors(sim, view = 'terrain', out) {
   const shade = hillshade(sim, view === 'terrain' || view === 'geology' ? 2 : 1.5);
   const rockRgb = lith.color.map(hexToRgb);
   const { filled, area } = sim.flow;
-  const sea = sim.params.boundary.seaLevel;
+  const sea = sim.seaLevel;
   const cellA = grid.cellArea;
 
   let zmin = Infinity, zmax = -Infinity, amax = 0, emax = 1e-9;
@@ -102,6 +104,8 @@ export function cellColors(sim, view = 'terrain', out) {
   }
   const zr = Math.max(1e-6, zmax - zmin);
   const logAmax = Math.log(Math.max(amax / cellA, 2));
+  const cp = sim.params.coast;
+  const beachTop = sea != null && cp ? sea + cp.tidalRange / 2 + cp.waveHeight : null;
   const riverStart = Math.min(Math.log(150), 0.6 * logAmax); // contributing cells at which rivers show
 
   for (let i = 0; i < n; i++) {
@@ -143,19 +147,30 @@ export function cellColors(sim, view = 'terrain', out) {
         c = t > 0.01 ? ramp(HEAT, 0.3 + 0.7 * t) : [g, g, g];
         break;
       }
+      case 'waves': {
+        const g = 80 + 110 * s;
+        const e = sim.waveExposureField[i];
+        c = water === 2 && e === 0 ? [g * 0.5, g * 0.55, g * 0.7] : e > 0 ? ramp(HEAT, 0.25 + 0.75 * e) : [g, g, g];
+        if (sim.notch[i] > 0) c = [255, 255, 255];
+        break;
+      }
       case 'terrain':
       default: {
         const rc = rockRgb[surfaceRock[i]];
         const cover = 1 - Math.exp(-soil[i] / 0.3);
         c = [0, 1, 2].map((k) => rc[k] + cover * (SOIL_RGB[k] - rc[k]));
         c = c.map((v, k) => v + veg[i] * (VEG_RGB[k] - v));
+        if (beachTop !== null && soil[i] > 0.2 && z[i] < beachTop) c = SAND_RGB.slice(); // beach sand
         c = c.map((v) => v * lit);
         const t = (Math.log(Math.max(area[i] / cellA, 1)) - riverStart) / (logAmax - riverStart);
         if (t > 0 && !water) c = c.map((v, k) => v + Math.min(1, 0.4 + t) * (LAKE_RGB[k] - v));
         if (water === 1) c = LAKE_RGB.map((v) => v * (0.85 + 0.15 * s));
         if (water === 2) {
-          const depth = Math.min(1, (sea - z[i]) / 50);
-          c = SEA_RGB.map((v) => v * (1 - 0.5 * depth) + 40 * (1 - depth));
+          // shallow water shows the bed (platforms, shoals); deep water darkens
+          const depth = Math.min(1, (sea - z[i]) / 40);
+          const bed = soil[i] > 0.2 ? SAND_RGB : rockRgb[surfaceRock[i]];
+          const shallow = Math.exp(-(sea - z[i]) / 4);
+          c = SEA_RGB.map((v, k) => (v * (1 - 0.5 * depth) + 40 * (1 - depth)) * (1 - 0.5 * shallow) + 0.5 * shallow * bed[k] * (0.7 + 0.3 * s));
         }
       }
     }
@@ -206,7 +221,7 @@ export function paint(pm, colors, rgba, background = [24, 24, 28]) {
 export function crossSection(sim, row, width, height, rgba) {
   const { grid, z, rock, lith, upliftCum } = sim;
   const filled = sim.flow.filled;
-  const sea = sim.params.boundary.seaLevel;
+  const sea = sim.seaLevel;
   const cols = grid.cols;
   row = Math.max(0, Math.min(grid.rows - 1, row | 0));
   let zmin = Infinity, zmax = -Infinity;

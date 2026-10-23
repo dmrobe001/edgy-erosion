@@ -21,6 +21,11 @@ const SLIDERS = [
   { path: 'hillslope.diffusivity', label: 'Creep diffusivity', unit: 'm²/yr', min: 1e-4, max: 0.5, log: true },
   { path: 'hillslope.criticalSlope', label: 'Soil repose slope', unit: '', min: 0.2, max: 1.5 },
   { path: 'weathering.enabled', label: 'Weathering (soil production)', toggle: true },
+  { group: 'Coast (when there is a sea)' },
+  { path: 'coast.waveHeight', label: 'Wave height', unit: 'm', min: 0.2, max: 8, log: true },
+  { path: 'coast.seaLevelAmplitude', label: 'Sea-level swing', unit: 'm', min: 0, max: 120 },
+  { path: 'coast.seaLevelPeriod', label: 'Sea-level period', unit: 'yr', min: 5000, max: 200000, log: true },
+  { path: 'coast.marineDiffusivity', label: 'Shore sediment mobility', unit: 'm²/yr', min: 0.1, max: 100, log: true },
   { group: 'Rockfall' },
   { path: 'rockfall.enabled', label: 'Rockfall enabled', toggle: true },
   { path: 'rockfall.timescale', label: 'Failure timescale', unit: 'yr', min: 10, max: 1e5, log: true },
@@ -248,7 +253,8 @@ function draw() {
   const s = sim.stats();
   $('stats').textContent =
     `t = ${(s.time / 1000).toFixed(1)} kyr  step ${s.step}  z ${s.minElevation.toFixed(0)}…${s.maxElevation.toFixed(0)} m  ` +
-    `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}`;
+    `soil ${s.meanSoil.toFixed(2)} m  rockfalls ${s.rockfallEvents}` +
+    (s.seaLevel != null ? `  sea level ${s.seaLevel.toFixed(1)} m  cliff collapses ${s.cliffCollapses}` : '');
   drawLegend(view);
 }
 
@@ -259,7 +265,7 @@ function drawLegend(view) {
   for (let i = 0; i < sim.grid.size; i++) used.add(sim.surfaceRock[i]);
   for (const k of sim.lith.layerRock) used.add(k);
   host.innerHTML = [...used].sort().map((k) => `<span style="--c:${sim.lith.color[k]}">${sim.lith.names[k]}</span>`).join('') +
-    (view === 'terrain' ? '<span style="--c:#b09870">soil / talus</span><span style="--c:#487034">vegetation</span><span style="--c:#4678af">water</span>' : '');
+    (view === 'terrain' ? '<span style="--c:#b09870">soil / talus</span><span style="--c:#decc96">beach sand</span><span style="--c:#487034">vegetation</span><span style="--c:#4678af">water</span>' : '');
 }
 
 function loop() {
@@ -290,7 +296,10 @@ mapCanvas.addEventListener('mousemove', (ev) => {
     `cell (${g.col(i)}, ${g.row(i)})  z ${sim.z[i].toFixed(1)} m  soil ${sim.soil[i].toFixed(2)} m  ` +
     `rock ${sim.lith.names[sim.surfaceRock[i]]}  drainage ${(sim.flow.area[i] / 1e6).toFixed(3)} km²  ` +
     `vegetation ${(100 * sim.veg[i]).toFixed(0)}%  dz/dt ${(sim.dzdt[i] * 1000).toFixed(3)} mm/yr` +
-    (lake > 0.05 ? `  lake ${lake.toFixed(1)} m deep` : '');
+    (lake > 0.05 ? `  lake ${lake.toFixed(1)} m deep` : '') +
+    (sim.seaLevel != null && sim.z[i] < sim.seaLevel ? `  sea ${(sim.seaLevel - sim.z[i]).toFixed(1)} m deep` : '') +
+    (sim.waveExposureField[i] > 0 ? `  waves ${(100 * sim.waveExposureField[i]).toFixed(0)}%` : '') +
+    (sim.notch[i] > 0 ? `  notch ${sim.notch[i].toFixed(1)} m` : '');
 });
 mapCanvas.addEventListener('click', (ev) => {
   const i = cellAtEvent(ev);

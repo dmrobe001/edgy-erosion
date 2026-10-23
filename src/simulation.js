@@ -14,6 +14,7 @@
 //   5. rivers       stream power incision + sediment deposition
 //   6. creep        nonlinear soil creep
 //   7. rockfall     Culmann cliff failure -> debris
+//   7b. coast       waves notch sea cliffs, lower platforms, spread shore sediment
 //   8. avalanche    over-steep soil and talus slide to the angle of repose
 //   9. boundaries   material reaching an open edge leaves the domain
 //
@@ -28,6 +29,7 @@ import { routeFlow } from './flow.js';
 import { fluvial } from './processes/fluvial.js';
 import { creep, avalanche } from './processes/hillslope.js';
 import { rockfall } from './processes/rockfall.js';
+import { coast, seaLevelAt } from './processes/coast.js';
 
 export class Simulation {
   /**
@@ -54,6 +56,10 @@ export class Simulation {
     this.dzdt = new Float64Array(n);
     /** Recent rockfall thickness removed per cell (m), decaying over a few steps; for display. */
     this.rockfallActivity = new Float64Array(n);
+    /** Wave exposure 0..1 near the shore (0 elsewhere), from the last step. */
+    this.waveExposureField = new Float64Array(n);
+    /** Depth (m) of the wave-cut notch at the foot of each sea cliff. Part of the state. */
+    this.notch = new Float64Array(n);
     this.flow = {
       filled: new Float64Array(n),
       receiver: new Int32Array(n),
@@ -75,7 +81,9 @@ export class Simulation {
     this.stepCount = 0;
     this.rng = new Rng(this.params.seed);
     this.budget = { uplift: 0, exported: 0 };
-    this.last = { substeps: 0, rockfallEvents: 0, rockfallVolume: 0, avalancheVolume: 0, exported: 0 };
+    this.last = { substeps: 0, rockfallEvents: 0, rockfallVolume: 0, avalancheVolume: 0, exported: 0, cliffCollapses: 0, coastSubsteps: 0 };
+    /** Current sea level (m), or null when there is no sea. */
+    this.seaLevel = seaLevelAt(this.params, 0);
 
     this._buildBoundaries();
     this._buildDerived();
@@ -90,7 +98,9 @@ export class Simulation {
     sim.rock.set(snap.rock);
     sim.soil.set(snap.soil);
     sim.upliftCum.set(snap.upliftCum);
+    if (snap.notch) sim.notch.set(snap.notch);
     sim.time = snap.time;
+    sim.seaLevel = seaLevelAt(sim.params, sim.time);
     sim.stepCount = snap.stepCount;
     sim.budget = { ...snap.budget };
     sim._updateDerivedState();
@@ -111,6 +121,7 @@ export class Simulation {
       rock: Array.from(this.rock),
       soil: Array.from(this.soil),
       upliftCum: Array.from(this.upliftCum),
+      notch: Array.from(this.notch),
     };
   }
 
@@ -125,6 +136,7 @@ export class Simulation {
     }
     validate(next);
     this.params = next;
+    this.seaLevel = seaLevelAt(next, this.time);
     this._buildBoundaries();
     this._buildDerived();
     this._updateDerivedState();
@@ -137,6 +149,7 @@ export class Simulation {
     const n = grid.size;
     const ac = grid.cellArea;
     this.scratch.zStart.set(z);
+    this.seaLevel = seaLevelAt(p, this.time + dt / 2);
 
     // 1. uplift
     let upliftVol = 0;
@@ -194,6 +207,18 @@ export class Simulation {
     } else {
       this.last.rockfallEvents = 0;
       this.last.rockfallVolume = 0;
+    }
+
+    // 7b. coast: waves cut cliffs and platforms and rework shore sediment
+    if (p.coast.enabled && this.seaLevel != null) {
+      const c = coast(this, dt);
+      exported += c.exported;
+      this.last.cliffCollapses = c.collapses;
+      this.last.coastSubsteps = c.substeps;
+    } else {
+      this.waveExposureField.fill(0);
+      this.last.cliffCollapses = 0;
+      this.last.coastSubsteps = 0;
     }
 
     // 8. avalanche
@@ -262,6 +287,8 @@ export class Simulation {
       rockfallEvents: this.last.rockfallEvents,
       rockfallVolume: this.last.rockfallVolume,
       exportedVolume: this.last.exported,
+      seaLevel: this.seaLevel,
+      cliffCollapses: this.last.cliffCollapses,
       creepSubsteps: this.last.substeps,
     };
   }
@@ -362,10 +389,17 @@ export class Simulation {
   }
 
   _updateOutlets() {
-    const sea = this.params.boundary.seaLevel;
+    const sea = this.seaLevel;
+    let any = false;
+    let lowest = 0;
     for (let i = 0; i < this.grid.size; i++) {
       this.outlet[i] = this.boundaryOutlet[i] || (sea != null && this.z[i] < sea) ? 1 : 0;
+      if (this.outlet[i]) any = true;
+      if (this.z[i] < this.z[lowest]) lowest = i;
     }
+    // No open edge and no sea left (e.g. the sea floor was uplifted or the sea fell
+    // away): the lowest cell becomes the terminal sink of an internally drained basin.
+    if (!any) this.outlet[lowest] = 1;
   }
 
   _updateDerivedState() {

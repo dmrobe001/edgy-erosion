@@ -10,7 +10,8 @@ It is plain JavaScript (ES modules) with **no dependencies** and no build step. 
 `src/` files run in both places.
 
 The model combines tectonic uplift, soil production, river incision and deposition,
-soil creep, cliff collapse (rockfall) and talus avalanching. It works over layered,
+soil creep, cliff collapse (rockfall), talus avalanching, and wave attack on coasts
+(sea cliffs, shore platforms, beaches, marine terraces under changing sea level). It works over layered,
 dipping and intruded rock, and climate and vegetation modulate the rates. The physics is
 documented, with citations and an honest list of simplifications, in
 **[docs/MODEL.md](docs/MODEL.md)**.
@@ -44,7 +45,7 @@ Rebuild it after changing `src/` or `web/`.
 - **Sliders** change uplift, climate, vegetation, river, hillslope and rockfall parameters
   *while it runs*.
 - **View** switches between terrain, elevation, surface geology, soil depth, vegetation,
-  drainage area, erosion rate and recent rockfall. Hover for cell values. Click to move
+  drainage area, erosion rate, recent rockfall and wave exposure. Hover for cell values. Click to move
   the cross-section, which shows the strata beneath the surface.
 - **All parameters (JSON)** shows the complete parameter set. That JSON *is* the
   experiment: paste it back, or load it from a file, to reproduce a run exactly.
@@ -103,6 +104,8 @@ snapshot, so a run can be continued. Run `node bin/erode.js --help` for details.
 | `badlands` | weak, bare, thinly layered rock: dense gullies |
 | `volcanic-necks` | soft sediment cut by basalt dikes and plugs: walls and towers emerge as the land wears down |
 | `coastal-plateau` | layered plateau meeting the sea: deltas and drowned valleys |
+| `rocky-coast` | bands of hard and soft rock meeting the sea end-on: headlands, bays, sea cliffs, platforms |
+| `marine-terraces` | a coast rising 1 mm/yr under 41-kyr sea-level cycles: a staircase of uplifted wave-cut platforms |
 
 Presets are only starting points. Every number in them lives in `src/params.js`, and the
 units and meanings are commented there.
@@ -125,6 +128,7 @@ units and meanings are commented there.
 | `hillslope` | `diffusivity`, `criticalSlope` | soil creep and angle of repose |
 | `weathering` | `productionDepth`, `frostBoost`, `moistureExponent` | soil production |
 | `rockfall` | `enabled`, `timescale`, `frostFactor` | cliff collapse |
+| `coast` | `seaLevelAmplitude`, `seaLevelPeriod`, `seaLevelCurve`, `waveHeight`, `waves`, `tidalRange`, `marineDiffusivity`, `attrition` | sea level through time, wave climate, cliff retreat, shore sediment |
 
 **Scale matters.** Cliffs and rockfall need `dx` small compared with the cliff heights
 the rock can support: tens of metres or less. On a coarse grid, cliffs smear into slopes.
@@ -150,7 +154,7 @@ src/                 the simulation (browser + Node)
   hexgrid.js         hex lattice geometry and neighbours
   flow.js            lakes, flow directions, drainage area
   lithology.js       rock type at any place and depth
-  processes/         fluvial.js, hillslope.js, rockfall.js
+  processes/         fluvial.js, hillslope.js, rockfall.js, coast.js
   params.js          defaults, rock library, presets
   render.js          colouring, rasterising, cross-sections
 web/                 browser front end (app.js, style.css); index.html at the root

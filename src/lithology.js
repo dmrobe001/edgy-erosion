@@ -27,6 +27,7 @@ export class Lithology {
     this.cohesion = new Float64Array(R);
     this.frictionAngle = new Float64Array(R); // radians
     this.weathering = new Float64Array(R);
+    this.waveErodibility = new Float64Array(R);
     this.color = [];
     names.forEach((name, k) => {
       const r = params.rocks[name];
@@ -34,6 +35,7 @@ export class Lithology {
       this.cohesion[k] = r.cohesion;
       this.frictionAngle[k] = (r.frictionAngle * Math.PI) / 180;
       this.weathering[k] = r.weathering;
+      this.waveErodibility[k] = r.waveErodibility ?? 0.1;
       this.color.push(r.color || '#888888');
     });
     const idx = (name) => names.indexOf(name);
@@ -42,8 +44,12 @@ export class Lithology {
     this.layerRock = Int32Array.from(st.layers.map((l) => idx(l.rock)));
     // layerBottom[k] = depth below column top of the base of layer k
     this.layerBottom = new Float64Array(st.layers.length);
+    // Layer thickness is TRUE thickness, measured perpendicular to the bedding. We look
+    // layers up by vertical depth, and a layer of true thickness t dipping at angle
+    // `dip` spans t / cos(dip) vertically.
+    const vert = 1 / Math.cos(((st.dip || 0) * Math.PI) / 180);
     let d = 0;
-    st.layers.forEach((l, k) => { d += l.thickness; this.layerBottom[k] = d; });
+    st.layers.forEach((l, k) => { d += l.thickness * vert; this.layerBottom[k] = d; });
     this.columnThickness = d;
     this.repeat = !!st.repeat;
     this.basement = idx(st.basement);
@@ -112,10 +118,13 @@ export class Lithology {
   rockAt(i, z) {
     if (this.bodyRock[i] >= 0 && z <= this.bodyTop[i]) return this.bodyRock[i];
     let depth = this.columnTop[i] - z;
-    if (depth < 0) return this.layerRock[0]; // above the column: top layer extends upward
-    if (depth >= this.columnThickness) {
-      if (!this.repeat) return this.basement;
-      depth %= this.columnThickness;
+    if (this.repeat) {
+      // a repeating sequence repeats both downwards and upwards
+      depth -= Math.floor(depth / this.columnThickness) * this.columnThickness;
+    } else if (depth < 0) {
+      return this.layerRock[0]; // above the column: top layer extends upward
+    } else if (depth >= this.columnThickness) {
+      return this.basement;
     }
     const lb = this.layerBottom;
     for (let k = 0; k < lb.length; k++) if (depth < lb[k]) return this.layerRock[k];

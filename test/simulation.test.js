@@ -13,7 +13,7 @@ test('every preset runs and stays finite', () => {
   }
 });
 
-for (const name of ['mesa-country', 'coastal-plateau', 'alpine']) {
+for (const name of ['mesa-country', 'coastal-plateau', 'alpine', 'rocky-coast', 'marine-terraces']) {
   test(`volume budget closes for ${name}: change = uplift - exported`, () => {
     const sim = new Simulation(small(name));
     const v0 = sim.volume();
