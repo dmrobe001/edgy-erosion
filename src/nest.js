@@ -31,6 +31,7 @@ import { Simulation, referenceFrame } from './simulation.js';
 import { deepMerge } from './params.js';
 import { fbm } from './rng.js';
 import { azimuthalProjection, lonLatToVector } from './sphere.js';
+import { faultMeanUplift, ruptureLength } from './processes/earthquakes.js';
 
 /**
  * Linear interpolation of a per-cell field of a hex-lattice simulation at (x, y):
@@ -160,10 +161,12 @@ export function zoomIn(parent, { center, factor = 4, cols = 128, rows = 128, dt,
  * @param {number} [o.dt] child time step (default planet dt x dx / planet spacing)
  * @param {number} [o.smooth] width of the interpolation kernel in planet cell spacings;
  *   0 = linear on the triangles of planet cells (shows their facets at the patch scale)
+ * @param {object|false} [o.faults] plate boundaries crossing the patch become faults (see
+ *   planetFaults); options { coupling, thrustDip, normalDip }, or false for none
  * @param {object} [o.params] parameter overrides for the child (e.g. erodibilities)
  * @returns {Simulation}
  */
-export function zoomFromPlanet(planet, { lon, lat, dx, factor = 32, cols = 128, rows = 128, dt, roughness = 0.3, smooth = 0.4, correctionIterations = 48, params: over = {} } = {}) {
+export function zoomFromPlanet(planet, { lon, lat, dx, factor = 32, cols = 128, rows = 128, dt, roughness = 0.3, smooth = 0.4, correctionIterations = 48, faults = {}, params: over = {} } = {}) {
   const mesh = planet.mesh;
   dx = dx ?? mesh.spacing / factor;
   const rowSpacing = (Math.sqrt(3) / 2) * dx;
@@ -195,7 +198,169 @@ export function zoomFromPlanet(planet, { lon, lat, dx, factor = 32, cols = 128, 
   const project = (p) => proj.forward([P3[3 * p], P3[3 * p + 1], P3[3 * p + 2]]);
   refine(parentView(planet), child, map, project, { roughness, correctionIterations, wavelength: mesh.spacing, seed: (planet.params.seed | 0) + 4049 });
   Object.assign(child.zoom, { level: 1, factor: fac, center: [0, 0], parentDx: mesh.spacing, planet: { lon, lat } });
+  child.zoom.boundaries = [];
+  if (faults !== false && child.fields.uplift) addPlanetFaults(planet, child, project, proj, faults);
   return child;
+}
+
+/**
+ * Least-squares straight lines through boundary-edge midpoints: one line, split at the
+ * median along it (recursively, up to `depth` times) while the midpoints stray more than
+ * `tolerance` from it.
+ */
+function segments(edges, tolerance, depth) {
+  const m = edges.length;
+  let cx = 0, cy = 0;
+  for (const e of edges) { cx += e.x / m; cy += e.y / m; }
+  let sxx = 0, sxy = 0, syy = 0;
+  for (const e of edges) { sxx += (e.x - cx) ** 2; sxy += (e.x - cx) * (e.y - cy); syy += (e.y - cy) ** 2; }
+  const ang = 0.5 * Math.atan2(2 * sxy, sxx - syy);
+  const ux = Math.cos(ang), uy = Math.sin(ang);
+  let scatter = 0, smin = Infinity, smax = -Infinity;
+  const along = edges.map((e) => {
+    scatter = Math.max(scatter, Math.abs((e.x - cx) * uy - (e.y - cy) * ux));
+    const s = (e.x - cx) * ux + (e.y - cy) * uy;
+    smin = Math.min(smin, s); smax = Math.max(smax, s);
+    return s;
+  });
+  if (depth > 0 && scatter > tolerance && m >= 6) {
+    const order = edges.map((e, k) => k).sort((p, q) => along[p] - along[q]);
+    const h = m >> 1;
+    return [...segments(order.slice(0, h).map((k) => edges[k]), tolerance, depth - 1),
+      ...segments(order.slice(h).map((k) => edges[k]), tolerance, depth - 1)];
+  }
+  return [{ edges, cx, cy, ux, uy, smin, smax, scatter }];
+}
+
+/**
+ * Plate boundaries that cross a planet patch become faults on it.
+ *
+ * Each pair of plates meeting inside the patch (with at least two shared planet-cell
+ * edges there) gives a fault: the least-squares line through the midpoints of those edges,
+ * split into up to four straight segments where the boundary curves (see segments). Ends
+ * that reach the patch margin continue past it, so ruptures can start outside.
+ * Per segment, the plates' relative velocity across the boundary sets its kind and rate:
+ *   converging   a thrust (dip thrustDip) whose raised side is the overriding plate;
+ *   diverging    a normal fault (dip normalDip) whose raised side is the higher plate;
+ *   sliding past (normal rate under half the relative speed) a transform: earthquakes here
+ *                move the ground vertically only, so transforms are listed but get no fault.
+ * Slip rate = coupling x (normal rate) / cos(dip): the fraction of the plate motion taken
+ * up by surface-rupturing slip on this one fault; the rest goes on the deep plate interface,
+ * other faults and aseismic creep. [heuristic: coupling is a knob, default 0.1]
+ *
+ * The planet's uplift rate already contains the boundary's long-term vertical motion, so
+ * the faults' expected long-term uplift (faultMeanUplift) is subtracted from the patch's
+ * smooth uplift field. Long-term uplift therefore still equals the planet's; the
+ * earthquakes only deliver it in steps, with the ground near the fault sinking slowly
+ * between events (interseismic strain, the elastic-rebound cycle of Reid 1910).
+ */
+function addPlanetFaults(planet, child, project, proj, { coupling = 0.1, thrustDip = 30, normalDip = 60 } = {}) {
+  const mesh = planet.mesh;
+  const P3 = mesh.pos;
+  const cg = child.grid;
+  const b = cg.bounds;
+  const margin = mesh.spacing;
+  const xy = new Map();
+  const where = (p) => {
+    if (!xy.has(p)) {
+      const v = project(p);
+      xy.set(p, v && v[0] > b.xmin - margin && v[0] < b.xmax + margin && v[1] > b.ymin - margin && v[1] < b.ymax + margin ? v : null);
+    }
+    return xy.get(p);
+  };
+  const P = planet.plateCount;
+  const pairs = new Map();
+  const va = [0, 0, 0], vb = [0, 0, 0];
+  for (let p = 0; p < mesh.size; p++) {
+    const pp = where(p);
+    if (!pp) continue;
+    for (let k = 0; k < 6; k++) {
+      const q = mesh.neighbors[6 * p + k];
+      if (q < 0 || q < p || planet.owner[q] === planet.owner[p]) continue;
+      const qq = where(q);
+      if (!qq) continue;
+      // orient from the lower-numbered plate's cell to the other's
+      const [ca, cb] = planet.owner[p] < planet.owner[q] ? [p, q] : [q, p];
+      const A = planet.owner[ca], B = planet.owner[cb];
+      const key = A * P + B;
+      let e = pairs.get(key);
+      if (!e) pairs.set(key, (e = { a: A, b: B, edges: [] }));
+      let mx = P3[3 * ca] + P3[3 * cb], my = P3[3 * ca + 1] + P3[3 * cb + 1], mz = P3[3 * ca + 2] + P3[3 * cb + 2];
+      const ml = Math.hypot(mx, my, mz); mx /= ml; my /= ml; mz /= ml;
+      planet.velocity(A, mx, my, mz, va);
+      planet.velocity(B, mx, my, mz, vb);
+      // velocity of plate A relative to B, carried into patch coordinates (m/yr)
+      const tau = 1e4, R = planet.params.radius;
+      const m0 = proj.forward([mx, my, mz]);
+      const m1 = proj.forward([mx + ((va[0] - vb[0]) * tau) / R, my + ((va[1] - vb[1]) * tau) / R, mz + ((va[2] - vb[2]) * tau) / R]);
+      const a2 = where(ca), b2 = where(cb);
+      e.edges.push({
+        x: (a2[0] + b2[0]) / 2, y: (a2[1] + b2[1]) / 2,
+        vx: (m1[0] - m0[0]) / tau, vy: (m1[1] - m0[1]) / tau,
+        cells: [[A, a2, planet.sim.z[ca]], [B, b2, planet.sim.z[cb]]],
+      });
+    }
+  }
+  const F = child.frame;
+  const ep = child.params.earthquakes;
+  // ruptures shorter than a cell would be invisible: start where they span one
+  const minM = Math.max(ep.minMagnitude, (Math.log10(cg.dx / 1000) + 3.22) / 0.69);
+  const maxM = Math.max(ep.maxMagnitude, minM + 0.5);
+  const beyond = 2 * ruptureLength(maxM);
+  const list = [];
+  for (const e of pairs.values()) {
+    if (e.edges.length < 2) continue;
+    // a curved boundary becomes up to four straight segments
+    for (const seg of segments(e.edges, Math.max(0.3 * mesh.spacing, 20 * cg.dx), 2)) {
+      const m = seg.edges.length;
+      let vx = 0, vy = 0;
+      const side = { [e.a]: [0, 0, 0, 0], [e.b]: [0, 0, 0, 0] };
+      for (const ed of seg.edges) {
+        vx += ed.vx / m; vy += ed.vy / m;
+        for (const [plate, w, z] of ed.cells) { const sd = side[plate]; sd[0] += w[0]; sd[1] += w[1]; sd[2] += z; sd[3]++; }
+      }
+      // across the fitted line, from plate A's side towards B's: > 0 means the plates approach
+      let nx = seg.uy, ny = -seg.ux;
+      if ((side[e.b][0] / side[e.b][3] - side[e.a][0] / side[e.a][3]) * nx + (side[e.b][1] / side[e.b][3] - side[e.a][1] / side[e.a][3]) * ny < 0) { nx = -nx; ny = -ny; }
+      const closing = vx * nx + vy * ny;
+      const rel = Math.hypot(vx, vy);
+      const info = { plates: [e.a, e.b], edges: m, closingRate: closing, relativeSpeed: rel, scatter: seg.scatter };
+      if (Math.abs(closing) < 0.5 * rel) { child.zoom.boundaries.push({ ...info, kind: 'transform', fault: null }); continue; }
+      const converging = closing > 0;
+      // raised side: the overriding plate at a convergent boundary, else the higher one
+      let up = side[e.a][2] / side[e.a][3] >= side[e.b][2] / side[e.b][3] ? e.a : e.b;
+      if (converging) up = planet.polarity.get(e.a * P + e.b) ?? up;
+      let { cx, cy, ux, uy, smin, smax } = seg;
+      const sd = side[up];
+      if ((sd[0] / sd[3] - cx) * uy - (sd[1] / sd[3] - cy) * ux < 0) { ux = -ux; uy = -uy; [smin, smax] = [-smax, -smin]; } // raised plate on the left
+      // ends that reach the patch's margin continue well past it; inner ends stop short
+      const nearEdge = (s) => {
+        const x = cx + ux * s, y = cy + uy * s;
+        return x < b.xmin + mesh.spacing || x > b.xmax - mesh.spacing || y < b.ymin + mesh.spacing || y > b.ymax - mesh.spacing;
+      };
+      const s0 = smin - (nearEdge(smin) ? beyond : 0.5 * mesh.spacing);
+      const s1 = smax + (nearEdge(smax) ? beyond : 0.5 * mesh.spacing);
+      const dip = converging ? thrustDip : normalDip;
+      const fault = {
+        x0: (cx + ux * s0 - F.x) / F.width, y0: (cy + uy * s0 - F.y) / F.height,
+        x1: (cx + ux * s1 - F.x) / F.width, y1: (cy + uy * s1 - F.y) / F.height,
+        dip, slipRate: (coupling * Math.abs(closing)) / Math.cos((dip * Math.PI) / 180),
+        upliftShare: converging ? 0.8 : 0.3,
+      };
+      list.push(fault);
+      child.zoom.boundaries.push({ ...info, kind: converging ? 'thrust' : 'normal', raised: up, fault });
+    }
+  }
+  if (!list.length) return;
+  child.setParams({ earthquakes: { enabled: true, faults: list, minMagnitude: minM, maxMagnitude: maxM } });
+  // keep the long-term uplift equal to the planet's: subtract what the faults deliver
+  const smooth = Float64Array.from(child.fields.uplift);
+  child.zoom.planetUplift = Float64Array.from(smooth);
+  for (let k = 0; k < list.length; k++) {
+    const mean = faultMeanUplift(child, k);
+    for (let i = 0; i < smooth.length; i++) smooth[i] -= mean[i];
+  }
+  child.setFields({ uplift: smooth });
 }
 
 /** Linear interpolation on the triangles of sphere-mesh cell centres. */

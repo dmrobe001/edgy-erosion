@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Planet } from '../src/planet.js';
 import { zoomFromPlanet, compareWithParent } from '../src/nest.js';
+import { faultMeanUplift } from '../src/processes/earthquakes.js';
 
 const small = { subdivisions: 16, plates: { count: 6 } };
 
@@ -121,4 +122,48 @@ test('a patch zoomed out of a planet keeps its block means, sea level, uplift an
   assert.ok(Math.abs(child.precipWeight[mid] / pl.sim.precipWeight[c] - 1) < 0.2);
   child.run(5);
   for (const a of [child.rock, child.soil, child.z]) assert.ok(a.every(Number.isFinite));
+});
+
+test('a plate boundary crossing a patch becomes a fault with the plates\' convergence, and long-term uplift still matches the planet', () => {
+  // two plates converging along the meridian x = 0 where y < 0 (see the spreading test)
+  const pl = new Planet({ subdivisions: 32, plates: { count: 2 }, continents: { fraction: 0 } });
+  const R = pl.params.radius;
+  const w = 0.02 / R;
+  pl.setPlates((i) => (pl.mesh.pos[3 * i] > 0 ? 0 : 1), [[0, 0, -w], [0, 0, w]]);
+  pl.run(30); // long enough for subduction to start and pick the overriding plate
+  // erosion off so uplift can be measured; fewer, larger events keep the test quick
+  const quiet = { fluvial: { enabled: false }, hillslope: { enabled: false }, weathering: { enabled: false }, rockfall: { enabled: false }, earthquakes: { minMagnitude: 6.5 } };
+  const child = zoomFromPlanet(pl, { lon: -90, lat: 0, factor: 24, cols: 80, rows: 80, params: quiet });
+  const thrusts = child.zoom.boundaries.filter((b) => b.kind === 'thrust');
+  assert.ok(thrusts.length >= 1, JSON.stringify(child.zoom.boundaries.map((b) => b.kind)));
+  // at longitude -90 the plates close head-on at 2 w R = 4 cm/yr
+  for (const t of thrusts) {
+    assert.ok(Math.abs(t.closingRate / (2 * w * R) - 1) < 0.1, `closing ${t.closingRate}`);
+    assert.ok(Math.abs(t.fault.slipRate - (0.1 * t.closingRate) / Math.cos(Math.PI / 6)) < 1e-12);
+    assert.equal(t.raised, pl.polarity.get(0 * 2 + 1), 'the overriding plate is raised');
+    // the trace runs north-south, like the boundary (the meridian through the patch centre)
+    const F = child.frame;
+    const dxw = (t.fault.x1 - t.fault.x0) * F.width, dyw = (t.fault.y1 - t.fault.y0) * F.height;
+    assert.ok(Math.abs(dyw) > 5 * Math.abs(dxw), 'north-south trace');
+  }
+  // the smooth field plus what the faults deliver on average is the planet's uplift, exactly
+  const total = Float64Array.from(child.upliftField);
+  child.params.earthquakes.faults.forEach((f, k) => { const m = faultMeanUplift(child, k); for (let i = 0; i < total.length; i++) total[i] += m[i]; });
+  for (let i = 0; i < total.length; i++) {
+    if (child.boundaryOutlet[i]) continue;
+    assert.ok(Math.abs(total[i] - child.zoom.planetUplift[i]) < 1e-12, `cell ${i}`);
+  }
+  // and a long run delivers it: mean change near the fault over 2 Myr against the planet's rate
+  const z0 = Float64Array.from(child.z);
+  const steps = 100;
+  child.run(steps);
+  const T = steps * child.params.time.dt;
+  let got = 0, want = 0, cnt = 0;
+  const g = child.grid;
+  for (let i = 0; i < g.size; i++) {
+    if (child.boundaryOutlet[i] || g.col(i) < 10 || g.col(i) > 69 || g.row(i) < 10 || g.row(i) > 69) continue;
+    got += child.z[i] - z0[i]; want += child.zoom.planetUplift[i] * T; cnt++;
+  }
+  assert.ok(child.quakes.count > 100, `${child.quakes.count} earthquakes`);
+  assert.ok(Math.abs(got - want) < 0.1 * Math.abs(want) + cnt * 1, `mean change ${(got / cnt).toFixed(1)} m vs planet ${(want / cnt).toFixed(1)} m`);
 });

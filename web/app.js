@@ -441,10 +441,23 @@ function draw() {
     $('zoom-compare').textContent =
       `Against the frozen level above, over ${c.parentCells} of its cells: mean elevation ${c.meanElevation.child.toFixed(1)} m ` +
       `(level above, extrapolated at its last rate: ${c.meanElevation.expected.toFixed(1)} m); largest river leaving ` +
-      `${km2(c.largestExitArea.child)} km² (level above: ${km2(c.largestExitArea.parent)} km²).`;
+      `${km2(c.largestExitArea.child)} km² (level above: ${km2(c.largestExitArea.parent)} km²).` + boundarySummary();
   } else {
     $('zoom-compare').textContent = '';
   }
+}
+
+/** The plate boundaries a planet patch inherited, and the faults made from them. */
+function boundarySummary() {
+  const bs = sim.zoom?.boundaries;
+  if (!bs) return '';
+  if (!bs.length) return ' No plate boundary crosses this patch.';
+  return ' Plate boundaries here: ' + bs.map((b) => {
+    const rate = `${(Math.abs(b.closingRate) * 100).toFixed(1)} cm/yr ${b.closingRate > 0 ? 'closing' : 'opening'}`;
+    return b.fault
+      ? `${b.kind} fault (plates ${b.plates.join('/')}, ${rate}, slip ${(b.fault.slipRate * 1000).toFixed(2)} mm/yr, plate ${b.raised} side raised)`
+      : `transform (plates ${b.plates.join('/')}, sliding ${(b.relativeSpeed * 100).toFixed(1)} cm/yr; no fault: only vertical slip is modelled)`;
+  }).join('; ') + '.';
 }
 
 /** Fault traces (dashed), and this step's ruptures (bright), on a landscape map. */

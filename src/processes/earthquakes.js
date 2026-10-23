@@ -85,7 +85,10 @@ function faultModel(sim, k) {
     potency += averageDisplacement(M) * Math.min(ruptureLength(M), Lf);
   }
   potency /= Q;
-  const model = { key, x0, y0, sx, sy, length: Lf, along, across, rate: (fault.slipRate * Lf) / potency, meanPotency: potency };
+  // cells sorted by position along the fault, so an event visits only the cells near it
+  const order = Int32Array.from({ length: g.size }, (_, i) => i).sort((a, b) => along[a] - along[b]);
+  const alongSorted = Float64Array.from(order, (i) => along[i]);
+  const model = { key, x0, y0, sx, sy, length: Lf, along, across, order, alongSorted, rate: (fault.slipRate * Lf) / potency, meanPotency: potency };
   cache[k] = model;
   return model;
 }
@@ -99,10 +102,9 @@ function faultModel(sim, k) {
  *   first point); default random, keeping the rupture on the fault
  * @returns {object} the event, also appended to sim.quakes.events
  */
-export function triggerEarthquake(sim, k, M, center) {
+export function triggerEarthquake(sim, k, M, center, fm = faultModel(sim, k)) {
   const ep = sim.params.earthquakes;
   const fault = ep.faults[k];
-  const fm = faultModel(sim, k);
   const { rock, upliftCum, boundaryOutlet, shaking } = sim;
   const area = sim.grid.area;
   const L = Math.min(ruptureLength(M), fm.length);
@@ -115,13 +117,22 @@ export function triggerEarthquake(sim, k, M, center) {
   const decay = fault.decayLength ?? ruptureWidth(M);
   const r0 = shakingLength(M);
   let volume = 0;
-  for (let i = 0; i < sim.grid.size; i++) {
+  // cells within the rupture's along-strike span, plus a margin where shaking matters
+  // (only to rockfall: without it, shaking is not worth computing)
+  const shake = sim.params.rockfall.enabled;
+  const reach = half + (shake ? 5 * r0 : 0);
+  const first = lowerBound(fm.alongSorted, c - reach);
+  const last = lowerBound(fm.alongSorted, c + reach);
+  for (let k = first; k < last; k++) {
+    const i = fm.order[k];
     const s = fm.along[i] - c;
     const d = fm.across[i];
     // shaking: by distance to the rupture segment
-    const ds = Math.max(0, Math.abs(s) - half);
-    const sh = Math.exp(-Math.hypot(ds, d) / r0);
-    if (sh > shaking[i]) shaking[i] = sh;
+    if (shake) {
+      const ds = Math.max(0, Math.abs(s) - half);
+      const sh = Math.exp(-Math.hypot(ds, d) / r0);
+      if (sh > shaking[i]) shaking[i] = sh;
+    }
     if (boundaryOutlet[i] || Math.abs(s) >= half) continue;
     const t = throwPeak * Math.sqrt(1 - (s / half) * (s / half)) * Math.exp(-Math.abs(d) / decay);
     const u = d > 0 ? share * t : -(1 - share) * t;
@@ -142,6 +153,59 @@ export function triggerEarthquake(sim, k, M, center) {
   return ev;
 }
 
+/** First index of a sorted array whose value is >= v. */
+function lowerBound(a, v) {
+  let lo = 0, hi = a.length;
+  while (lo < hi) { const m = (lo + hi) >> 1; if (a[m] < v) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+/**
+ * Long-term mean rate of surface uplift (m/yr) that fault k's earthquakes produce at each
+ * cell: the event rate times the expected vertical displacement per event, averaged over
+ * magnitudes (quantile quadrature) and over rupture positions (uniform along the fault,
+ * so slip tapers towards the fault's ends). The integral of the elliptical slip profile
+ * over rupture centres is done in closed form. Used to keep a zoomed patch's long-term
+ * uplift equal to its planet's while earthquakes deliver part of it.
+ */
+export function faultMeanUplift(sim, k) {
+  const ep = sim.params.earthquakes;
+  const fault = ep.faults[k];
+  const fm = faultModel(sim, k);
+  const Q = 200;
+  const Lf = fm.length;
+  const share = fault.upliftShare ?? ep.upliftShare;
+  const sinDip = sinD(fault.dip ?? 60);
+  // integral of sqrt(1 - t^2) from 0 to t
+  const G = (t) => { t = Math.max(-1, Math.min(1, t)); return 0.5 * (t * Math.sqrt(1 - t * t) + Math.asin(t)); };
+  const out = new Float64Array(sim.grid.size);
+  for (let q = 0; q < Q; q++) {
+    const M = sampleMagnitude((q + 0.5) / Q, ep.bValue, ep.minMagnitude, ep.maxMagnitude);
+    const L = Math.min(ruptureLength(M), Lf);
+    const half = L / 2;
+    const peak = (4 / Math.PI) * averageDisplacement(M);
+    const W = fault.decayLength ?? ruptureWidth(M);
+    const cmin = half, cmax = Lf - half;
+    for (let i = 0; i < out.length; i++) {
+      const s = fm.along[i];
+      let slip; // expected slip at s per event of this magnitude
+      if (cmax - cmin < 1e-9 * Lf) {
+        const t = (s - Lf / 2) / half;
+        slip = Math.abs(t) < 1 ? peak * Math.sqrt(1 - t * t) : 0;
+      } else {
+        const lo = Math.max(cmin, s - half), hi = Math.min(cmax, s + half);
+        slip = hi > lo ? (peak * half * (G((hi - s) / half) - G((lo - s) / half))) / (cmax - cmin) : 0;
+      }
+      if (slip === 0) continue;
+      const d = fm.across[i];
+      out[i] += slip * Math.exp(-Math.abs(d) / W) * (d > 0 ? share : -(1 - share));
+    }
+  }
+  const scale = (fm.rate * sinDip) / Q;
+  for (let i = 0; i < out.length; i++) out[i] *= scale;
+  return out;
+}
+
 /**
  * Draw this step's earthquakes on every fault and apply them.
  * @returns {number} events this step
@@ -156,7 +220,7 @@ export function earthquakes(sim, dt) {
     let t = -Math.log(1 - sim.quakeRng.next()) / fm.rate;
     while (t < dt) {
       const M = sampleMagnitude(sim.quakeRng.next(), ep.bValue, ep.minMagnitude, ep.maxMagnitude);
-      triggerEarthquake(sim, k, M);
+      triggerEarthquake(sim, k, M, undefined, fm);
       t += -Math.log(1 - sim.quakeRng.next()) / fm.rate;
     }
   }

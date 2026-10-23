@@ -392,6 +392,44 @@ true distances and directions from the centre. The patch then works like `zoomIn
   (`regionalErosionParams`). [adapted: a rule of thumb, not a derivation]
 - **Further down.** `zoomIn` refines the patch; uplift and rainfall fields pass down too.
 
+**Plate boundaries become faults.** Every pair of plates meeting inside the patch (at
+least two shared planet-cell edges) becomes a fault (`addPlanetFaults` in `src/nest.js`).
+- **Trace.** The least-squares line through the midpoints of the shared edges. Where the
+  boundary curves (midpoints stray more than about a third of a planet cell from the line),
+  it is split at the median into up to four straight segments. Ends that reach the patch
+  margin run on past it, so ruptures can start outside; inner ends stop half a planet
+  cell beyond the last edge.
+- **Kind.** The plates' relative velocity, carried into patch coordinates and resolved
+  across the fitted line, decides it:
+  - **converging** → a thrust dipping 30°, overriding plate raised, `upliftShare` 0.8;
+  - **diverging** → a normal fault dipping 60°, higher plate raised, `upliftShare` 0.3;
+  - **sliding past** (normal rate under half the relative speed) → a transform. It is
+    listed, but gets no fault, because only vertical slip is modelled.
+  - Rates are resolved across the fitted line, not along each cell edge. Edge directions
+    zigzag up to 60° off the boundary, and resolving along them read an 8 cm/yr head-on
+    convergence as 6.3.
+- **Slip rate** = coupling × normal rate / cos(dip). `coupling` (default 0.1) is the share
+  of the plate motion taken up by surface-rupturing slip on this one fault; the rest goes
+  to the deep plate interface, other faults and creep. [heuristic: a knob, not a
+  measurement]
+- **Magnitudes.** The smallest becomes the one whose rupture spans a cell
+  (log₁₀ L(km) = log₁₀ dx(km)), since smaller events would be invisible.
+- **No double counting.** The planet's uplift rate already includes the boundary's
+  long-term vertical motion. So the faults' expected long-term uplift (`faultMeanUplift`)
+  is subtracted from the patch's smooth uplift field:
+  - **The expectation is exact.** It averages over magnitudes and over rupture positions
+    along the fault (slip tapers towards the ends), with the elliptical slip profile
+    integrated in closed form.
+  - **Long-term uplift is unchanged.** It still equals the planet's. The earthquakes only
+    deliver it in steps, with the ground near the fault sinking slowly between events.
+    This is the elastic-rebound cycle (Reid 1910): interseismic strain undone by sudden slip.
+
+Check (in the tests): two plates closing head-on at 4 cm/yr give a north–south thrust
+whose measured closing rate is the prescribed one. With erosion off, the patch's mean
+change matched the planet's uplift. In a longer version of the same set-up (8 cm/yr,
+4.2 Myr, about 2.7 million earthquakes) the mean change was −128.8 m against the planet's
+−128.6 m.
+
 The chain is planet (~190 km) → region (~5 km) → landscape (~600 m) → … In one run on the
 `earth-like` planet, a patch centred on an active margin was compared with its frozen
 planet over 2 Myr:
@@ -422,6 +460,8 @@ planet over 2 Myr:
 | earthquakes: maximum-likelihood b (Aki 1965) recovers the Gutenberg–Richter b to 3%; over 1 Myr (~5600 events) the mean throw matches slip rate × sin(dip) × time to 5% (measured 1.3%); a fault offsets the strata; a fresh scarp under linear creep matches the error-function profile H/2·(1 + erf(d / 2√(Dt))) (Hanks et al. 1984) to 1% of its height (measured 0.04%); shaking fells cliffs that stand without it; runs are deterministic through snapshots | `earthquakes.test.js` |
 | planet: isostasy gives the reference continent, the ridge depth, √age subsidence and 0.15 m of rebound per metre eroded; crust volume closes to 1e-10 of the total; a single rotating plate makes and destroys no crust and keeps its continent's area within 3% while turning by ωt; two plates spreading for 40 Myr give an age–distance slope matching the 4 cm/yr half rate to 10% (measured 4.07), and a trench where they converge; deterministic | `planet.test.js` |
 | planet → patch: block means kept (< 0.5 m), sea level equal, uplift and rainfall fields carried over | `planet.test.js` |
+| planet → patch faults: a convergent boundary becomes a north–south thrust with the prescribed 4 cm/yr closing (to 10%), slip = coupling × closing / cos(dip), the overriding plate raised; smooth field + expected fault uplift equals the planet's uplift exactly; over 2 Myr of earthquakes the patch's mean change matches the planet's uplift to 10% | `planet.test.js` |
+| the expected-uplift field of a fault, including the taper past a fault end inside the domain, matches a 2-Myr stochastic run to 3% in every band (measured about 1%) | `earthquakes.test.js` |
 
 These are all checks of internal consistency and numerics. **None of them shows that the
 landscapes are geologically realistic.** That is a matter of judgement and of calibrating
@@ -462,10 +502,11 @@ against real topography, which has not been done.
     neither vanish nor grow without limit over ~10⁸ yr. They are not calibrated against
     real denudation rates.
   - **Cell size.** At 150–200 km cells, a "mountain range" is one or two cells wide.
-- **Earthquakes** move the ground vertically only. There are no strike-slip offsets of
-  channels, no aftershocks or clustering, and faults are fixed straight lines. A planet
-  patch does not yet get faults from the plate boundaries crossing it: its tectonics
-  arrive as a smooth uplift field.
+- **Earthquakes** move the ground vertically only: there are no strike-slip offsets of
+  channels, so transform boundaries get no fault. There are no aftershocks or clustering,
+  and faults are fixed straight lines. On a planet patch, a fault is frozen where the
+  boundary was at the hand-off, although the real boundary would move with the plates.
+  The coupling that sets its slip rate is a guess.
 - **Not modelled:** explicit water depth or flood hydraulics; groundwater; chemical
   dissolution (karst); glaciers; wind; isostasy at landscape scale; lateral channel migration and meanders;
   deep-seated landslides; sediment grain size; porosity (rock and soil volumes are

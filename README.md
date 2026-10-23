@@ -62,8 +62,9 @@ Rebuild it after changing `src/` or `web/`.
   boundaries (convergent, divergent, transform), ocean-floor age and crust thickness, on
   a map or a globe you can drag. The cross-section runs along a parallel and shows crustal
   roots under mountains. *Zoom in…* on a planet lays a flat regional patch (factor 8–64
-  finer) on it, inheriting its topography, uplift and rainfall; zoom again to reach
-  landscape scale.
+  finer) on it, inheriting its topography, uplift and rainfall. Plate boundaries crossing
+  the patch become faults (thrusts where plates converge, normal faults where they
+  part) that slip in earthquakes. Zoom again to reach landscape scale.
 - **Earthquake!** (for presets with faults, e.g. `earthquake-scarp`) slips the first
   fault in a magnitude-7 event; ruptures flash yellow on the map.
 - **Export** saves the current view as PNG, or a snapshot (full state plus parameters)

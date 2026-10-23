@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Simulation } from '../src/simulation.js';
-import { sampleMagnitude, averageDisplacement, ruptureLength, faultRate } from '../src/processes/earthquakes.js';
+import { sampleMagnitude, averageDisplacement, ruptureLength, faultRate, faultMeanUplift } from '../src/processes/earthquakes.js';
 import { Rng } from '../src/rng.js';
 import { rockfall } from '../src/processes/rockfall.js';
 
@@ -160,4 +160,34 @@ test('shaking brings down cliffs that were close to failing', () => {
   assert.ok(Math.min(...shaken.shaking) > 0.8);
   const r = rockfall(shaken, 1);
   assert.ok(r.events >= 20, `${r.events} cliff failures under shaking`);
+});
+
+test('the expected-uplift field matches a long run, including the taper towards a fault end', () => {
+  const sim = new Simulation({
+    ...quiet,
+    grid: { cols: 60, rows: 20, dx: 50 },
+    time: { dt: 2e3 },
+    earthquakes: {
+      // a 2.2 km fault ending inside the 3 km domain, with displacement concentrated near it
+      faults: [{ x0: -0.1, y0: 0.5, x1: 0.62, y1: 0.5, dip: 45, slipRate: 2e-3, upliftShare: 0.7, decayLength: 300 }],
+      minMagnitude: 5.5, maxMagnitude: 6.2,
+    },
+  });
+  const expected = faultMeanUplift(sim, 0);
+  const z0 = Float64Array.from(sim.z);
+  const T = 2e6;
+  sim.run(T / 2e3);
+  // compare column-band averages of the rows next to the trace on each side
+  const g = sim.grid;
+  for (const [lo, hi] of [[2, 12], [20, 30], [33, 37], [38, 42]]) {
+    for (const side of [-1, 1]) {
+      let got = 0, want = 0;
+      for (let i = 0; i < g.size; i++) {
+        const c = g.col(i), fy = (g.y[i] - sim.frame.y) / sim.frame.height;
+        if (c < lo || c >= hi) continue;
+        if (side > 0 ? fy < 0.5 && fy > 0.36 : fy > 0.5 && fy < 0.64) { got += sim.z[i] - z0[i]; want += expected[i] * T; }
+      }
+      assert.ok(Math.abs(got - want) < 0.03 * Math.abs(want) + 50, `columns ${lo}-${hi}, side ${side}: ${got.toFixed(1)} vs ${want.toFixed(1)}`);
+    }
+  }
 });
