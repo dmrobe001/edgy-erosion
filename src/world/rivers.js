@@ -108,7 +108,7 @@ export function drainageStatistics(d, { channelArea, flatSlope = 0 }) {
     hack: { exponent: hack.slope, coefficient: 10 ** hack.intercept, r2: hack.r2, bins: hack.points },
     slopeArea: { concavity: -sa.slope, steepness: 10 ** sa.intercept, r2: sa.r2, bins: sa.points },
     channelCells: aH.length,
-    areaRange: aH.length ? [Math.min(...aH), Math.max(...aH)] : [0, 0],
+    areaRange: aH.reduce((r, v) => [Math.min(r[0], v), Math.max(r[1], v)], aH.length ? [Infinity, -Infinity] : [0, 0]),
   };
 }
 

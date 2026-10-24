@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hierarchical Terrain</title>
+<style>
+  :root { --bg: #f6f5f1; --fg: #222; --muted: #666; --line: #d8d4ca; --accent: #2f6db0; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --bg: #16171a; --fg: #e8e6e1; --muted: #9a978f; --line: #34363b; --accent: #7fb0e8; } }
+  body { margin: 0; font: 14px/1.45 system-ui, sans-serif; background: var(--bg); color: var(--fg); }
+  main { max-width: 1060px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 18px; margin: 0 0 8px; }
+  nav { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 8px 0; }
+  nav button, .crumb { border: 1px solid var(--line); background: transparent; color: var(--fg); border-radius: 6px; padding: 4px 10px; cursor: pointer; font: inherit; }
+  .crumb.current { border-color: var(--accent); color: var(--accent); }
+  canvas { width: 100%; max-width: 1024px; height: auto; display: block; border: 1px solid var(--line); border-radius: 4px; cursor: crosshair; image-rendering: auto; }
+  #info, #status { color: var(--muted); margin: 6px 0; min-height: 1.4em; }
+  .hint { color: var(--muted); font-size: 13px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Hierarchical terrain: planet to metres</h1>
+  <p class="hint">Click the planet to open a 310-km region; click a region to open the 9.8-km landscape there, and again for a 305-m site. Arrows move to neighbouring tiles; neighbours are built ahead of time.</p>
+  <nav id="crumbs"></nav>
+  <nav>
+    <button id="up" title="Zoom out">Up</button>
+    <button data-side="W" title="West">&larr;</button>
+    <button data-side="N" title="North">&uarr;</button>
+    <button data-side="S" title="South">&darr;</button>
+    <button data-side="E" title="East">&rarr;</button>
+  </nav>
+  <canvas id="view" width="1024" height="512"></canvas>
+  <div id="info"></div>
+  <div id="status">building the planet…</div>
+</main>
+<script type="module" src="./viewer.js"></script>
+</body>
+</html>

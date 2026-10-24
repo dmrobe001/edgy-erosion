@@ -30,10 +30,26 @@ result is a pure function of the world seed and the tile address. Progress, deci
 and measured budgets are in **[docs/PLAN.md](docs/PLAN.md)**; the new code lives in
 `src/world/`:
 
+To try the viewer, run `npm run serve` and open
+<http://localhost:8000/web/world/>. Click the planet to open a 310-km region, then a
+9.8-km landscape inside it, then a 305-m site with 1.2-m nodes (channels, talus,
+boulders, individual trees). Arrows move to neighbouring tiles. Tiles are cached in
+IndexedDB, and their neighbours are built ahead of time. Regions use WebGPU where the
+browser has it; without it they fall back to a JavaScript reference that takes about
+30 s per region.
+
+From code:
+
 ```js
-import { generatePlanet } from './src/world/l0.js';
-const planet = generatePlanet('my world'); // ~10 s: fields, river graph, dated events
+import { World } from './src/world/pipeline.js';
+import { tileAt } from './src/world/cubesphere.js';
+const world = new World('my world');            // the planet is built on first use (~9 s)
+const site = await world.tile({ level: 3, face: 1, i: 22367, j: 11819 }); // parents first
 ```
+
+Gates: `node --test` (all levels, seams, consistency, variety, zoom) and
+`node scripts/browser-gate.js` (the planet's 10-s budget and golden hashes in
+Chromium, the region solver on WebGPU, the zoom path in the viewer).
 
 Everything below describes the first version, which stays in the tree and is tagged
 `v1-hex-erosion`.

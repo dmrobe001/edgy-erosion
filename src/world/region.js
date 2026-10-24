@@ -475,13 +475,15 @@ const OFF = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [-1, 1], [1, -1], [-1, -1
 export function finishRegion(input, raw) {
   const { nx, ny, dx, halo: h, n } = input;
   const N = nx * ny;
-  // consistency with the parent: block means back to the parent's; the sea and the
-  // fixed border (shared with the neighbours) are left alone
+  // consistency with the parent: block means back to the parent's; the fixed border
+  // (shared with the neighbours) is left alone
   const elevation = Float32Array.from(raw.w);
   const keep = new Uint8Array(N);
-  for (let c = 0; c < N; c++) if (input.flags[c] & (FLAG_OUTLET | FLAG_FIXED)) keep[c] = 1;
+  for (let c = 0; c < N; c++) if (input.flags[c] & FLAG_FIXED) keep[c] = 1;
   for (let c = 0; c < N; c++) if (input.flags[c] & FLAG_FIXED) elevation[c] = input.z[c];
   const consistency = correctBlockMeans(elevation, input, keep, input.options.finalPasses ?? 40);
+  // the sea floor takes part in the correction but stays under the sea
+  for (let c = 0; c < N; c++) if ((input.flags[c] & FLAG_OUTLET) && !(input.flags[c] & FLAG_FIXED) && elevation[c] > -0.5) elevation[c] = -0.5;
   // the drainage of the final surface, routed exactly on the CPU (priority flood where
   // needed): the extracted network does not depend on the solver's last-iteration
   // transients or on GPU rounding, and every node drains

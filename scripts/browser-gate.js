@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The browser gates: run the generator in headless Chromium (Playwright) and check it
 // against the design's budgets and the golden hashes stored by the Node tests.
-//   node scripts/browser-gate.js [seed] [--only=planet|region] [--tiles=3]
+//   node scripts/browser-gate.js [seed] [--only=planet|region|zoom] [--tiles=3]
 // Needs the `playwright` package and a Chromium it can launch.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -77,6 +77,19 @@ if (!only || only === 'region') {
     check(r.results.every((t) => t.concavity > 0.3 && t.concavity < 0.7 && t.concavityR2 > 0.6), `slope-area: concavities ${r.results.map((t) => t.concavity.toFixed(2)).join(', ')} within 0.3-0.7 (r2 > 0.6)`);
     const cmp = r.results.find((t) => t.cpu);
     if (cmp) check(cmp.gpuCpuRms < 0.02 * cmp.relief, `GPU matches the CPU reference: ${cmp.gpuCpuRms.toFixed(2)} m rms (< 2% of relief)`);
+  } else ok = false;
+}
+
+if (!only || only === 'zoom') {
+  console.log('-- milestone 5: zoom (planet to 1 m in the viewer)');
+  const r = await runPage(`../world/?auto=1&store=0&seed=${encodeURIComponent(seed)}`);
+  if (!r.error) {
+    for (const st of r.steps) console.log(`      ${st.label.padEnd(28)} ${st.key.padEnd(18)} ${st.seconds.toFixed(2)} s  ${st.source}`);
+    const by = (label) => r.steps.find((st) => st.label === label);
+    check(by('site') && by('site').info.includes('trees'), 'zoomed from the planet to a 1.2-m site tile');
+    check(by('site again (cache)').seconds < 0.1 && by('landscape again (cache)').seconds < 0.1, `revisits come from the cache (${by('site again (cache)').seconds.toFixed(3)} s, ${by('landscape again (cache)').seconds.toFixed(3)} s)`);
+    const nb = by('site neighbour (prefetched)');
+    check(nb.source.startsWith('from cache'), `a neighbouring site was prefetched (${nb.seconds.toFixed(3)} s, ${nb.source})`);
   } else ok = false;
 }
 
