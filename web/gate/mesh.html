@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Mesh region gate</title></head>
+<body>
+<pre id="log">building the planet, then mesh region tiles on WebGPU...</pre>
+<script type="module">
+  const params = new URLSearchParams(location.search);
+  const worker = new Worker('./mesh-worker.js', { type: 'module' });
+  worker.onmessage = (e) => {
+    window.gateResult = e.data;
+    document.getElementById('log').textContent = JSON.stringify(e.data, null, 2);
+  };
+  worker.onerror = (e) => { window.gateResult = { error: e.message }; };
+  worker.postMessage({ seed: params.get('seed') || 'gate', full: params.get('full') !== '0' });
+</script>
+</body>
+</html>

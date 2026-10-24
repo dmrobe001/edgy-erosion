@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // The browser gates: run the generator in headless Chromium (Playwright) and check it
 // against the design's budgets and the golden hashes stored by the Node tests.
-//   node scripts/browser-gate.js [seed] [--only=planet|region|zoom] [--tiles=3]
+//   node scripts/browser-gate.js [seed] [--only=planet|region|zoom|mesh] [--tiles=3] [--small]
 // Needs the `playwright` package and a Chromium it can launch.
 import { createServer } from 'node:http';
 import { readFile } from 'node:fs/promises';
@@ -77,6 +77,26 @@ if (!only || only === 'region') {
     check(r.results.every((t) => t.concavity > 0.3 && t.concavity < 0.7 && t.concavityR2 > 0.6), `slope-area: concavities ${r.results.map((t) => t.concavity.toFixed(2)).join(', ')} within 0.3-0.7 (r2 > 0.6)`);
     const cmp = r.results.find((t) => t.cpu);
     if (cmp) check(cmp.gpuCpuRms < 0.02 * cmp.relief, `GPU matches the CPU reference: ${cmp.gpuCpuRms.toFixed(2)} m rms (< 2% of relief)`);
+  } else ok = false;
+}
+
+if (only === 'mesh') {
+  console.log('-- milestone 2 on the irregular mesh: region with simulated seams');
+  const full = !args.includes('--small');
+  const r = await runPage(`mesh.html?seed=${encodeURIComponent(seed)}&full=${full ? 1 : 0}`);
+  if (!r.error) {
+    const soft = r.adapter.architecture === 'swiftshader';
+    console.log(`      WebGPU adapter: ${r.adapter.vendor} ${r.adapter.architecture}${soft ? ' (software emulation on the CPU: times say nothing about a real GPU)' : ''}`);
+    const s = r.small;
+    console.log(`      ${s.cells}-cell tile ${s.tile}: GPU ${s.gpuSeconds.toFixed(1)} s, CPU ${s.cpuSeconds.toFixed(1)} s; Hack ${s.gpu.hack.toFixed(2)} / ${s.cpu.hack.toFixed(2)}, concavity ${s.gpu.concavity.toFixed(2)} / ${s.cpu.concavity.toFixed(2)} (GPU / CPU)`);
+    check(s.rms < 0.02 * s.relief, `GPU graph solver matches the CPU reference: ${s.rms.toFixed(2)} m rms over ${s.relief.toFixed(0)} m relief (< 2%)`);
+    if (r.full) {
+      const f = r.full;
+      console.log(`      full tile ${f.tile} (planet ${f.planetElevation.toFixed(0)} m), strips and corners included: ${f.seconds.toFixed(1)} s, Hack ${f.hack.toFixed(2)} (r2 ${f.hackR2.toFixed(2)}), concavity ${f.concavity.toFixed(2)} (r2 ${f.concavityR2.toFixed(2)}), block means within ${f.consistency.toFixed(1)} m`);
+      check(f.seconds < 1, `full tile under 1 s: ${f.seconds.toFixed(1)} s${soft ? ' [not measurable here: software GPU]' : ''}`);
+      check(f.hack > 0.45 && f.hack < 0.7 && f.hackR2 > 0.9, `Hack's law: ${f.hack.toFixed(2)} within 0.45-0.7`);
+      check(f.concavity > 0.3 && f.concavity < 0.7 && f.concavityR2 > 0.6, `slope-area: concavity ${f.concavity.toFixed(2)} within 0.3-0.7`);
+    }
   } else ok = false;
 }
 

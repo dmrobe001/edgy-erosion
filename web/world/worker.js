@@ -2,6 +2,8 @@
 import { World, indexedDBStore } from '../../src/world/pipeline.js';
 import { getDevice, gpuSolver } from '../../src/world/gpu.js';
 import { cpuSolver } from '../../src/world/region.js';
+import { gpuGraphSolver } from '../../src/world/gpugraph.js';
+import { cpuGraphSolver } from '../../src/world/regionmesh.js';
 import { tileAt, parseTileKey, neighborOf, tileKey, childrenOf, WORLD_LAYOUT } from '../../src/world/cubesphere.js';
 import { spherePixelMap } from '../../src/render.js';
 import { SITE_COVER } from '../../src/world/site.js';
@@ -10,11 +12,14 @@ import { GENERATOR_VERSION } from '../../src/world/l0.js';
 let world = null, solverName = 'CPU', pixelMap = null;
 const W0 = 1024, H0 = 512;
 
-async function init(seed, useStore) {
+async function init(seed, useStore, region = 'raster') {
   const device = await getDevice().catch(() => null);
   solverName = device ? `WebGPU (${device.adapterInfo?.architecture || device.adapterInfo?.vendor || 'gpu'})` : 'CPU reference (no WebGPU: slow)';
+  const mesh = region === 'mesh';
+  if (mesh) solverName += ', level 1 on the irregular mesh';
   world = new World(seed, {
-    regionSolver: device ? (input) => gpuSolver(device, input) : cpuSolver,
+    region,
+    regionSolver: mesh ? (device ? (win) => gpuGraphSolver(device, win) : cpuGraphSolver) : device ? (input) => gpuSolver(device, input) : cpuSolver,
     store: useStore ? indexedDBStore() : null,
   });
 }
@@ -81,7 +86,7 @@ self.onmessage = async (ev) => {
   const msg = ev.data;
   try {
     if (msg.type === 'init') {
-      await init(msg.seed, msg.store !== false);
+      await init(msg.seed, msg.store !== false, msg.region);
       const t0 = performance.now();
       const img = renderPlanet();
       self.postMessage({ type: 'planet', ...img, info: `planet · ${world.planet().stats.cells} cells · built in ${((performance.now() - t0) / 1000).toFixed(1)} s · ${GENERATOR_VERSION} · level 1 on ${solverName}` }, [img.rgba.buffer]);

@@ -78,7 +78,7 @@ document.addEventListener('keydown', (e) => {
   if (side && current) { e.preventDefault(); go(tileKey(neighborOf(parseTileKey(current), side))); }
 });
 
-await request({ type: 'init', seed, store: params.get('store') !== '0' });
+await request({ type: 'init', seed, store: params.get('store') !== '0', region: params.get('region') === 'mesh' ? 'mesh' : 'raster' });
 drawCrumbs();
 
 // ?auto=1: the browser gate's zoom path (planet -> a region -> landscape -> site), then

@@ -11,14 +11,19 @@
 //                 quadrant's centre: how much drainage organises around tile centres
 //   slope step    rms change of slope across the internal seams (m per node)
 //
-//   node scripts/seam-diagnosis.js [seed] [out-dir]
+// With --mesh, (c) the same four tiles on the irregular mesh with simulated seams
+// (regionmesh.js) join the comparison, as a third panel.
+//
+//   node scripts/seam-diagnosis.js [seed] [out-dir] [--mesh]
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { generatePlanet } from '../src/world/l0.js';
 import { regionInput, runRegionCPU, regionSeams } from '../src/world/region.js';
 import { tileAt, WORLD_LAYOUT } from '../src/world/cubesphere.js';
+import { meshRegionContext, meshRegionTile } from '../src/world/regionmesh.js';
 import { encodePng } from '../bin/png.js';
 
-const [seed = 'example', out = 'out/seams'] = process.argv.slice(2);
+const withMesh = process.argv.includes('--mesh');
+const [seed = 'example', out = 'out/seams'] = process.argv.slice(2).filter((a) => !a.startsWith('--'));
 mkdirSync(out, { recursive: true });
 const planet = generatePlanet(seed);
 const e = planet.fields.elevation, P = planet.mesh.pos;
@@ -28,12 +33,12 @@ const t = tileAt(1, P[3 * c], P[3 * c + 1], P[3 * c + 2]);
 const i0 = t.i - (t.i % 2), j0 = t.j - (t.j % 2);
 const n = WORLD_LAYOUT.tileCells, M = 2 * n + 1; // mosaic nodes per side
 
-// (a) four tiles
+// (a) four tiles (and (c) on the mesh)
+async function mosaic(make) {
 const quad = new Float32Array(M * M), quadRec = new Int32Array(M * M).fill(-1);
-const s1 = regionSeams(planet);
 let t0 = performance.now();
 for (const [di, dj] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
-  const r = await runRegionCPU(regionInput(planet, { level: 1, face: t.face, i: i0 + di, j: j0 + dj }, {}, WORLD_LAYOUT, s1));
+  const r = await make({ level: 1, face: t.face, i: i0 + di, j: j0 + dj });
   const m = r.nodes, rec = r.drainage.receiver;
   for (let cj = 0; cj < m; cj++) for (let ci = 0; ci < m; ci++) {
     const g = (dj * n + cj) * M + di * n + ci, k = cj * m + ci;
@@ -45,7 +50,16 @@ for (const [di, dj] of [[0, 0], [1, 0], [0, 1], [1, 1]]) {
   console.log(`tile ${di},${dj}: Hack ${r.stats.hack.exponent.toFixed(2)}, concavity ${r.stats.slopeArea.concavity.toFixed(2)}`);
 }
 console.log(`four tiles: ${((performance.now() - t0) / 1000).toFixed(0)} s`);
-
+return { quad, quadRec };
+}
+const s1 = regionSeams(planet);
+const { quad, quadRec } = await mosaic((a) => runRegionCPU(regionInput(planet, a, {}, WORLD_LAYOUT, s1)));
+let meshQ = null;
+if (withMesh) {
+  const mctx = meshRegionContext(planet, {});
+  meshQ = await mosaic((a) => meshRegionTile(mctx, a));
+}
+let t0;
 // (b) one domain
 const big = { rootTiles: WORLD_LAYOUT.rootTiles / 2, branching: WORLD_LAYOUT.branching, tileCells: 2 * n };
 t0 = performance.now();
@@ -93,12 +107,14 @@ const radial = (rec) => {
   }
   return s / cnt;
 };
-const fq = flowField(quadRec), fo = flowField(oneRec);
+const runs = [['four tiles', quad, quadRec], ['one domain', one, oneRec]];
+if (meshQ) runs.push(['four mesh tiles', meshQ.quad, meshQ.quadRec]);
 const rows = [];
-for (const [name, f] of [['four tiles', fq], ['one domain', fo]]) {
+for (const [name, , rec] of runs) {
+  const f = flowField(rec);
   const seamsJ = (jump(f, n, true) + jump(f, n, false)) / 2;
   const middles = (jump(f, n / 2, true) + jump(f, n / 2, false) + jump(f, n + n / 2, true) + jump(f, n + n / 2, false)) / 4;
-  rows.push({ run: name, 'seam jump': seamsJ.toFixed(3), 'jump across tile middles': middles.toFixed(3), 'radial index': radial(name === 'four tiles' ? quadRec : oneRec).toFixed(3) });
+  rows.push({ run: name, 'seam jump': seamsJ.toFixed(3), 'jump across tile middles': middles.toFixed(3), 'radial index': radial(rec).toFixed(3) });
 }
 // elevation and slope steps across the seams (difference of one-sided gradients)
 const steps = (z) => {
@@ -110,16 +126,15 @@ const steps = (z) => {
   }
   return Math.sqrt(ds / cnt);
 };
-rows[0]['slope step at seam (m per node, rms)'] = steps(quad).toFixed(1);
-rows[1]['slope step at seam (m per node, rms)'] = steps(one).toFixed(1);
+runs.forEach(([, z], k) => { rows[k]['slope step at seam (m per node, rms)'] = steps(z).toFixed(1); });
 console.table(rows);
 
 // pictures, side by side
-const W = 2 * M + 8, H = M, rgba = new Uint8ClampedArray(4 * W * H).fill(255);
+const W = runs.length * (M + 8) - 8, H = M, rgba = new Uint8ClampedArray(4 * W * H).fill(255);
 let zmax = 0;
 for (const v of one) zmax = Math.max(zmax, v);
 const dx = rb.dx;
-[[quad, 0], [one, M + 8]].forEach(([z, x0]) => {
+runs.map(([, z], k) => [z, k * (M + 8)]).forEach(([z, x0]) => {
   for (let j = 0; j < M; j++) for (let i = 0; i < M; i++) {
     const k = (M - 1 - j) * M + i, o = 4 * (j * W + x0 + i), h = z[k];
     let col = h <= 0 ? [45, 85, 150] : [70 + 175 * h / zmax, 115 + 120 * h / zmax, 65 + 160 * h / zmax];
@@ -129,4 +144,4 @@ const dx = rb.dx;
   }
 });
 writeFileSync(`${out}/four-tiles-vs-one-domain.png`, encodePng(W, H, rgba));
-console.log(`wrote ${out}/four-tiles-vs-one-domain.png (left: four tiles; right: one domain)`);
+console.log(`wrote ${out}/four-tiles-vs-one-domain.png (left to right: ${runs.map((r) => r[0]).join('; ')})`);
