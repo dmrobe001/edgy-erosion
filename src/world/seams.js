@@ -169,7 +169,7 @@ function findCrossings(ctx, C, sC, edgeKeyStr) {
     const jitter = (uniform(key, L.id) - 0.5) * span;
     const node = Math.max(3, Math.min(n - 3, Math.round((t + jitter) * n)));
     const intoC = outward > 0 ? qa < g0 : qa >= g0; // flows from beyond the edge into C
-    found.push({ node, area: L.area, inflowToCanonical: intoC, links: [L.id] });
+    found.push({ node, area: L.area, sed: L.sed ? Array.from(L.sed) : null, inflowToCanonical: intoC, links: [L.id] });
   }
   // merge crossings closer than 4 nodes (the larger river's place wins); areas of
   // rivers flowing the same way add up
@@ -178,7 +178,10 @@ function findCrossings(ctx, C, sC, edgeKeyStr) {
   for (const x of found) {
     const near = kept.find((k) => Math.abs(k.node - x.node) < 4);
     if (!near) { kept.push(x); continue; }
-    if (near.inflowToCanonical === x.inflowToCanonical) { near.area += x.area; near.links.push(...x.links); }
+    if (near.inflowToCanonical === x.inflowToCanonical) {
+      near.area += x.area; near.links.push(...x.links);
+      if (near.sed && x.sed) for (let k = 0; k < near.sed.length; k++) near.sed[k] += x.sed[k];
+    }
   }
   return kept.sort((x, y) => x.node - y.node);
 }
@@ -240,7 +243,7 @@ export function sideBorder(ctx, addr, side) {
     for (let t = 0; t <= n; t++) z[t] = rec.z[reversed ? n - t : t];
     const mine = tileKey(addr) === rec.canonical;
     const crossings = rec.crossings.map((x) => ({
-      node: reversed ? n - x.node : x.node, area: x.area, z: x.z, links: x.links, minor: !!x.minor,
+      node: reversed ? n - x.node : x.node, area: x.area, sed: x.sed || null, z: x.z, links: x.links, minor: !!x.minor,
       inflow: mine ? x.inflowToCanonical : !x.inflowToCanonical,
     }));
     return { key: rec.key, z, crossings };

@@ -13,9 +13,11 @@
 //                exposed rock's critical slope topples half its excess onto the node
 //                below until stable (Bak, Tang & Wiesenfeld 1987 in spirit; the critical
 //                slopes are angles of repose and of rock-mass strength)
-//   fans         transport-limited deposition: sediment eroded upstream travels down the
-//                drainage tree and is laid down where the carrying capacity (Kc A S) drops,
-//                at mountain fronts and valley mouths
+//   deposition   sediment in three grain classes travels down the drainage tree, from
+//                upstream and from the rivers entering the tile (with the level-1 flux
+//                they carry); each node lays down a share that grows as drainage area
+//                shrinks relative to the node's own (Davy & Lague 2009), so gravel settles
+//                in fans at valley mouths and fine sediment travels on
 //   glaciers     during a glaciation in the event log (if recent enough to show), nodes
 //                colder than the threshold carry ice: erosion by sliding ice scales with
 //                ice discharge and reaches across the whole ice-covered width, so valleys
@@ -57,7 +59,11 @@ export const LANDSCAPE_DEFAULTS = {
   D: 0.005,                      // creep, m^2/yr
   relief: { base: 2, perSlope: 0.35, wavelength: 1200, octaves: 5, gain: 0.55 },
   landslideSweeps: 12,
-  fans: { capacity: 2e-3, deposit: 0.5 },   // Kc (m^3/yr per m^2 of area per unit slope); share of the excess laid down per node
+  // deposition (Davy & Lague 2009): a node lays down the share 1 - exp(-G a / A) of each
+  // grain class arriving (a: its own area, A: its drainage area), as at level 1
+  G: [0.05, 0.6, 2.5],
+  // share of eroded rock per grain class (fine, sand, gravel) by material class, as at level 1
+  grains: [[0.5, 0.3, 0.2], [0.3, 0.4, 0.3], [0.4, 0.35, 0.25], [0.45, 0.3, 0.25], [0.6, 0.35, 0.05]],
   glacier: { threshold: -2, K: 2e-4, widen: 1.5 }, // deg C mean annual during the glaciation; ice erodibility; ice spreads this many nodes per sqrt(km^2) of area
   channelArea: 2e5,              // m^2 for the river graph and statistics
   finalPasses: 40,
@@ -144,6 +150,8 @@ function toParent(addr, n2, ci, cj, layout) {
  */
 export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, layout = WORLD_LAYOUT) {
   const smp = landscapeSampler(parent, worldSeed, { ...options, radius: parentSeams.radius });
+  // the parent level's border records: from its seam context, or (mesh level 1) from the tiles themselves
+  const borderOf = (a, side) => (parentSeams.sideBorder ? parentSeams.sideBorder(a, side) : sideBorder(parentSeams, a, side));
   const n1 = layout.tileCells, m = parent.nodes, P1 = parent.addr;
   const b = layout.branching, per = n1 / b;
   // drainage links of the parent (node to receiver), as unit vectors
@@ -153,7 +161,8 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
     const r = rec[c];
     if (r < 0 || area[c] < 4 * parent.dx * parent.dx) continue;
     const ci = c % m, cj = (c - ci) / m, ri = r % m, rj = (r - ri) / m;
-    links.push({ id: c, from: nodePosition(P1, n1, ci, cj, undefined, layout), to: nodePosition(P1, n1, ri, rj, undefined, layout), area: area[c] });
+    const sed = parent.fields.sediment ? [0, 1, 2].map((k) => parent.fields.sediment[k * rec.length + c]) : null;
+    links.push({ id: c, from: nodePosition(P1, n1, ci, cj, undefined, layout), to: nodePosition(P1, n1, ri, rj, undefined, layout), area: area[c], sed });
   }
   // which side of the parent an edge of child C lies on, if any
   const onParentSide = (C, sC) => {
@@ -178,14 +187,14 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
       if (on) {
         // the parent's own seam: only its shared record and this level's noise (never
         // either parent's interior, so tiles under both parents compute the same)
-        const pb = sideBorder(parentSeams, parentOf(C, layout), on.side);
+        const pb = borderOf(parentOf(C, layout), on.side);
         const xs = pb.crossings.filter((x) => x.node >= on.k0 && x.node <= on.k0 + per);
         for (let t = 0; t <= n; t++) {
           z[t] = borderValue(pb.z, on.k0 + (t * per) / n, pos[t]);
           const near = xs.some((x) => Math.abs((x.node - on.k0) * (n / per) - t) < n / per / 2);
           if (near) z[t] = Math.fround(cubic1(pb.z, on.k0 + (t * per) / n));
         }
-        const crossings = xs.map((x) => ({ node: Math.round((x.node - on.k0) * (n / per)), area: x.area, inflowToCanonical: x.inflow, links: [], z: x.z }));
+        const crossings = xs.map((x) => ({ node: Math.round((x.node - on.k0) * (n / per)), area: x.area, sed: x.sed || null, inflowToCanonical: x.inflow, links: [], z: x.z }));
         for (const x of crossings) z[x.node] = x.z;
         return { z, crossings };
       }
@@ -197,7 +206,13 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
       const [x1, y1] = toParent(tile, n, ci, cj, layout);
       // a corner on its parent's border takes the border record's value there
       const onB = x1 === 0 ? ['W', y1] : x1 === n1 ? ['E', y1] : y1 === 0 ? ['S', x1] : y1 === n1 ? ['N', x1] : null;
-      if (onB) return borderValue(sideBorder(parentSeams, parentOf(tile, layout), onB[0]).z, onB[1], pos);
+      // a corner of the parent itself: its value alone (any record through it holds the same),
+      // so tiles under any of the parents sharing it compute it alike
+      if (onB && (onB[1] === 0 || onB[1] === n1)) {
+        const z0 = parentSeams.cornerZ ? parentSeams.cornerZ(pos) : borderOf(parentOf(tile, layout), onB[0]).z[onB[1]];
+        return smp.withNoise(z0, 0, pos).z;
+      }
+      if (onB) return borderValue(borderOf(parentOf(tile, layout), onB[0]).z, onB[1], pos);
       if (tileKey(parentOf(tile, layout)) !== tileKey(P1)) throw new Error(`level-2 corner under another parent: ${tileKey(tile)} ${corner} at parent node ${x1},${y1}; this parent ${tileKey(P1)}`);
       return smp.sample(x1, y1, pos).z;
     },
@@ -332,12 +347,16 @@ export function landscapeInput(parent, ctx, addr, events, options = {}, layout =
       flags[c] = 2 | (bd.z[t] <= 0 ? 1 : 0);
     }
   }
-  const inflow = new Float32Array(N);
+  const inflow = new Float32Array(N), sedIn = new Float32Array(3 * N);
   const inward = { W: [1, 0], E: [-1, 0], S: [0, 1], N: [0, -1] };
   const exits = [];
   for (const side of SIDES) for (const x of border[side].crossings) {
     const [bi, bj] = sideNode(side, x.node, n);
-    if (x.inflow) inflow[(bj + inward[side][1]) * nx + bi + inward[side][0]] += x.area;
+    if (x.inflow) {
+      const c = (bj + inward[side][1]) * nx + bi + inward[side][0];
+      inflow[c] += x.area;
+      if (x.sed) for (let k = 0; k < 3; k++) sedIn[k * N + c] += x.sed[k];
+    }
     else { flags[bj * nx + bi] = 3; exits.push([bi, bj]); }
   }
   // pinned rivers (design): each inflowing river is pre-carved along the parent's
@@ -371,7 +390,7 @@ export function landscapeInput(parent, ctx, addr, events, options = {}, layout =
   // was this place glaciated recently enough to still show it?
   const glaciation = events.find((e) => e.kind === 'glaciation' && e.time < (o.glacialMemory ?? 2e5));
   return {
-    addr, key, n, nx, ny: nx, dx, z, base, U, P, inflow, tempSL, material, zeta, flags, border,
+    addr, key, n, nx, ny: nx, dx, z, base, U, P, inflow, sedIn, tempSL, material, zeta, flags, border,
     block, locIds, locW, locK: 16, glaciation, options: o,
   };
 }
@@ -395,7 +414,7 @@ export function runLandscape(input) {
   const before = new Float64Array(N);
   const rec = rs.receiver;
   const held = Uint8Array.from(flags, (f) => (f ? 1 : 0));
-  const Qs = new Float64Array(N), reach = new Float32Array(N);
+  const Qk = new Float64Array(3 * N), reach = new Float32Array(N);
   for (let step = 0; step < o.steps; step++) {
     // exposed rock
     for (let c = 0; c < N; c++) {
@@ -456,19 +475,33 @@ export function runLandscape(input) {
       for (let c = 0; c < N; c++) D[c] = ice[c] ? o.D * 400 : o.D;
     } else D.fill(o.D);
     rs.diffuse(z, { dt, D, fixed: held });
-    // fans: sediment down the tree, deposited where capacity falls short
-    Qs.fill(0);
+    // sediment down the tree, by grain class (Davy & Lague 2009): what arrives from
+    // upstream and from beyond the tile, plus what each node eroded this step, less what
+    // it lays down: the share 1 - exp(-G a / A) of each class. Laying down may not lift a
+    // node more than 2 m above its receiver (the rest travels on), so fans grow at mouths
+    // and valley floors aggrade instead of walls of sediment building up.
+    for (let c = 0; c < N; c++) for (let k = 0; k < 3; k++) Qk[k * N + c] = input.sedIn ? input.sedIn[k * N + c] : 0;
     for (let k = rs.orderCount - 1; k >= 0; k--) {
       const c = rs.order[k], r = rec[c];
-      if (flags[c]) continue;
-      Qs[c] += Math.max(0, before[c] - z[c]) * dx * dx;
-      const S = r !== c ? Math.max(0, (z[c] - z[r]) / rs.recDist[c]) : 0;
-      const cap = o.fans.capacity * A[c] * S * dt;
-      if (Qs[c] > cap) {
-        const dep = Math.min((Qs[c] - cap) * o.fans.deposit, 0.5 * dx * dx * Math.max(0, (r !== c ? z[r] - z[c] : 0) + 2));
-        if (dep > 0) { z[c] += dep / (dx * dx); Qs[c] -= dep; record.deposit[c] += dep / (dx * dx); }
+      const gr = o.grains[material[c]];
+      const made = Math.max(0, before[c] - z[c]) * dx * dx / dt; // m^3/yr eroded here
+      let laid = 0;
+      if (!flags[c]) {
+        const room = Math.max(0, (r !== c ? z[r] - z[c] : 0) + 2) * dx * dx / dt;
+        const share = (kk) => 1 - Math.exp(-o.G[kk] * dx * dx / Math.max(A[c], dx * dx));
+        let want = 0;
+        for (let kk = 0; kk < 3; kk++) want += Qk[kk * N + c] * share(kk);
+        const scale = want > room ? room / want : 1;
+        for (let kk = 0; kk < 3; kk++) {
+          const l = Qk[kk * N + c] * share(kk) * scale;
+          Qk[kk * N + c] -= l; laid += l;
+        }
+        if (laid > 0) { const h = (laid * dt) / (dx * dx); z[c] += h; record.deposit[c] += h; }
       }
-      if (r !== c) Qs[r] += Qs[c];
+      for (let kk = 0; kk < 3; kk++) {
+        Qk[kk * N + c] += made * gr[kk];
+        if (r !== c) Qk[kk * N + r] += Qk[kk * N + c];
+      }
     }
     // landslides: topple slopes beyond the rock's critical slope. The first sweep visits
     // every node; later ones only the nodes a failure touched (a worklist)

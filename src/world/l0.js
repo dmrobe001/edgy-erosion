@@ -10,7 +10,7 @@ import { Planet, MATERIAL_NAMES } from '../planet.js';
 import { MinHeap } from '../flow.js';
 import { worldKey, deriveKey } from './hash.js';
 
-export const GENERATOR_VERSION = 'hg-0.2';
+export const GENERATOR_VERSION = 'hg-0.3';
 
 /**
  * Level-0 settings. The defaults run in about 9 s in Node or a Chromium worker on one
@@ -88,6 +88,16 @@ function packPlanet(planet, { o, key, worldSeed, upliftSum, windowSteps }) {
   const material = planet.material();
   removePinholes(mesh, elevation, material, temperature, o.lapseRate);
   const { area, receiver, order } = drainage(mesh, elevation);
+  // [conjecture] sediment flux (m^3/yr) leaving each cell along the drainage tree, for
+  // the rivers that enter finer tiles: land eroding as fast as rock rises (steady state,
+  // which is what level 1 relaxes towards), gathered downstream
+  const sedimentFlux = new Float32Array(n);
+  {
+    const acc = new Float64Array(n);
+    for (let i = 0; i < n; i++) if (elevation[i] > 0) acc[i] = Math.max(0, uplift[i]) * mesh.area[i];
+    for (let k = order.length - 1; k >= 0; k--) { const i = order[k]; if (receiver[i] >= 0) acc[receiver[i]] += acc[i]; }
+    for (let i = 0; i < n; i++) sedimentFlux[i] = elevation[i] > 0 ? acc[i] : 0;
+  }
   for (let i = 0; i < n; i++) {
     // [conjecture] a placeholder until a weathering model runs at level 1: deeper where
     // warm and wet and low, nothing under the sea or on the highest ground
@@ -116,7 +126,7 @@ function packPlanet(planet, { o, key, worldSeed, upliftSum, windowSteps }) {
     key,
     mesh,
     seaLevel: 0,
-    fields: { elevation, material, uplift, precip, temperature, regolith, drainageArea: area },
+    fields: { elevation, material, uplift, precip, temperature, regolith, drainageArea: area, sedimentFlux },
     plates: { owner: Int32Array.from(planet.owner), boundary: Uint8Array.from(planet.boundary) },
     // each land cell's downstream neighbour on the drainage tree (-1: sea, or no outflow)
     flow: { receiver },

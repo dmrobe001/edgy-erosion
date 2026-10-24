@@ -13,6 +13,7 @@ import { generatePlanet, GENERATOR_VERSION } from './l0.js';
 import { regionInput, runRegion, cpuSolver, regionSeams } from './region.js';
 import { landscapeSeams, landscapeInput, runLandscape } from './landscape.js';
 import { siteSeams, buildSite } from './site.js';
+import { meshRegionContext, meshRegionTile, meshBorders, cpuGraphSolver } from './regionmesh.js';
 import { parentOf, tileKey, WORLD_LAYOUT } from './cubesphere.js';
 
 /** What a level keeps of a result (enough to render it and to build its children). */
@@ -22,6 +23,7 @@ function keepOf(level, r) {
       addr: r.addr, n: r.n, nodes: r.nodes, dx: r.dx, fields: r.fields, stats: r.stats,
       drainage: { receiver: r.drainage.receiver, area: r.drainage.area, nx: r.drainage.nx, dx: r.drainage.dx },
       crossings: r.rivers.crossings, riverReaches: r.rivers.edges.length, kFactor: r.kFactor,
+      ...(r.mesh ? { mesh: true, borders: r.borders } : {}),
     };
   }
   if (level === 2) {
@@ -38,15 +40,21 @@ export class World {
    * @param {number|string} seed
    * @param {object} [o]
    * @param {object} [o.layout]
-   * @param {(input:object) => object} [o.regionSolver] solver factory for level 1 (default: CPU reference)
+   * @param {'raster'|'mesh'} [o.region] level 1 on square rasters with seam records (default), or
+   *   on the irregular mesh with simulated seams (regionmesh.js; much slower on the CPU)
+   * @param {(input:object) => object} [o.regionSolver] solver factory for level 1 (default: CPU
+   *   reference; for the mesh, a factory of windows)
    * @param {{get(key:string):Promise<any>, put(key:string, v:any):Promise<void>}} [o.store]
+   * @param {object} [o.regionOptions] options for the mesh level 1 (MESH_REGION_DEFAULTS)
    * @param {object} [o.planetOptions]
    * @param {number} [o.memory] tiles kept in memory
    */
   constructor(seed, o = {}) {
     this.seed = String(seed);
     this.layout = o.layout || WORLD_LAYOUT;
-    this.regionSolver = o.regionSolver || cpuSolver;
+    this.region = o.region || 'raster';
+    this.regionOptions = o.regionOptions || {};
+    this.regionSolver = o.regionSolver || (this.region === 'mesh' ? cpuGraphSolver : cpuSolver);
     this.store = o.store || null;
     this.planetOptions = o.planetOptions || {};
     this.memory = o.memory || 24;
@@ -58,7 +66,7 @@ export class World {
     this._seams = new Map();
   }
 
-  key(addr) { return `${GENERATOR_VERSION}|${this.seed}|${tileKey(addr)}`; }
+  key(addr) { return `${GENERATOR_VERSION}${this.region === 'mesh' ? 'm' : ''}|${this.seed}|${tileKey(addr)}`; }
 
   /** The planet (level 0), built once. */
   planet() {
@@ -108,6 +116,10 @@ export class World {
   async _generate(addr) {
     const planet = this.planet();
     const L = this.layout;
+    if (addr.level === 1 && this.region === 'mesh') {
+      if (!this._mesh) this._mesh = meshRegionContext(planet, this.regionOptions, L);
+      return keepOf(1, await meshRegionTile(this._mesh, addr, this.regionSolver));
+    }
     if (addr.level === 1) {
       const input = regionInput(planet, addr, {}, L, this._regionSeams());
       const solver = await this.regionSolver(input);
@@ -136,7 +148,8 @@ export class World {
 
   _landscapeSeams(l1) {
     const k = `2:${tileKey(l1.addr)}`;
-    if (!this._seams.has(k)) this._seams.set(k, landscapeSeams(l1, this._regionSeams(), this.planet().worldSeed, {}, this.layout));
+    const parentSeams = l1.mesh ? meshBorders(l1, this.planet().mesh.radius, this.layout) : this._regionSeams();
+    if (!this._seams.has(k)) this._seams.set(k, landscapeSeams(l1, parentSeams, this.planet().worldSeed, {}, this.layout));
     return this._seams.get(k);
   }
 

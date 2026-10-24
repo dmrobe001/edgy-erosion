@@ -348,10 +348,13 @@ export function restrictToBlocks(field, block, mask) {
  * Bring a child field's block means back to the parent's (design principle 1): the
  * residual per block is spread back by the same barycentric interpolation that built
  * the child, a few times over (each pass removes most of what is left). Cells with
- * keep[c] set (the sea) are not moved. Returns the largest remaining |residual| (m) over
+ * keep[c] set (the sea) are not moved. With `sampledOnly`, blocks with fewer than
+ * minCells free cells, or less than half of them free, are left alone (a narrow window
+ * sees only slivers of them, and a window with pinned borders can move only a few of
+ * their cells: correcting those is ill-conditioned). Returns the largest remaining |residual| (m) over
  * blocks with at least minCells cells.
  */
-export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50) {
+export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50, sampledOnly = false) {
   const { block, locIds, locW, base } = input;
   const L = input.locK || 3;
   const N = field.length;
@@ -362,7 +365,10 @@ export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50
   const blk = Int32Array.from(block, (b) => dense.get(b));
   const loc = Int32Array.from(locIds, (b) => (dense.has(b) ? dense.get(b) : -1));
   const target = new Float64Array(B), count = new Float64Array(B), sum = new Float64Array(B), resid = new Float64Array(B);
-  for (let c = 0; c < N; c++) { target[blk[c]] += base[c]; count[blk[c]]++; }
+  const free = new Float64Array(B);
+  for (let c = 0; c < N; c++) { target[blk[c]] += base[c]; count[blk[c]]++; if (!(keep && keep[c])) free[blk[c]]++; }
+  // with sampledOnly, a block is corrected (and counted) only if enough of it is free to move
+  const sampled = (k) => free[k] >= minCells && free[k] >= 0.5 * count[k];
   for (let k = 0; k < B; k++) target[k] = target[k] / count[k] + (input.bias?.get(ids[k]) || 0);
   let worst = 0;
   for (let pass = 0; pass <= passes; pass++) {
@@ -371,7 +377,8 @@ export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50
     worst = 0;
     for (let k = 0; k < B; k++) {
       resid[k] = target[k] - sum[k] / count[k];
-      if (count[k] >= minCells) worst = Math.max(worst, Math.abs(resid[k]));
+      if (sampledOnly && !sampled(k)) resid[k] = 0;
+      else if (count[k] >= minCells) worst = Math.max(worst, Math.abs(resid[k]));
     }
     if (pass === passes) break;
     for (let c = 0; c < N; c++) {
