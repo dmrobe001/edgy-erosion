@@ -47,16 +47,19 @@ gates with `node scripts/browser-gate.js` (headless Chromium through Playwright)
    in headless Chromium in 8.5-9.4 s, and its field hashes match the golden ones Node
    checks (`test/golden.json`, now `hg-0.2`).
 2. **Region (L1) benchmark**: GPU stream power erosion and drainage graph extraction.
-   *Gate: each tile under 1 s; Hack's law and slope-area checks pass.* **Partly
-   passed.** The WGSL solver runs and agrees with its CPU reference; Hack's law passes
-   on every tile tried (exponents 0.50-0.67); slope-area concavity falls within
-   0.3-0.7 on most tiles (0.33-0.59 in the Node runs) but not all (below). **The 1 s
-   budget cannot be checked here**: this container's only WebGPU adapter is
-   SwiftShader, a CPU emulation, where a tile takes about 30 s, the same as the
-   JavaScript reference. A real GPU should do it in a fraction of a second (200
-   iterations of about 20 kernel dispatches over 66 000 nodes, plus about 0.3 s of CPU
-   work per tile), but that is an estimate, not a measurement. To measure it, run
-   `npm run serve` and open `/web/gate/region.html` in a browser with a GPU.
+   *Gate: each tile under 1 s; Hack's law and slope-area checks pass.* **Not passed.**
+   - The WGSL solver runs and agrees with its CPU reference (rms difference under 2% of
+     relief).
+   - Hack's law passes on every tile tried: exponents 0.51-0.69 with r2 above 0.9.
+   - Slope-area concavity within 0.3-0.7 holds on uplifting tiles (0.35-0.59 in Node
+     runs). It fails on low-uplift tiles still adjusting to their boundaries: the last
+     browser run picked three such tiles and got -0.09, 0.29 and 0.26.
+   - **The 1 s budget cannot be checked here.** This container's only WebGPU adapter is
+     SwiftShader, a CPU emulation, where a tile takes 35-41 s. A real GPU should take a
+     fraction of a second: 200 iterations of about 20 kernel dispatches over 66 000
+     nodes, plus about 0.3 s of CPU work per tile. That is an estimate, not a
+     measurement. To measure it, run `npm run serve` and open `/web/gate/region.html`
+     in a browser with a GPU.
 3. **Seams**: corner and edge records, river crossings, halos. *Gate: the
    order-independence test produces bitwise identical seams.* **Passed**
    (`test/seams.test.js`, and across a level-1 seam at level 2 in
