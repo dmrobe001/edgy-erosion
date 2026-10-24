@@ -19,6 +19,10 @@
 // iteration and carried between iterations. Deposition enters the erosion update
 // explicitly: z' = (w + dt D + F z_r) / (1 + F), D the deposition rate (m/yr).
 //
+// Optionally, nodes relax towards a reference surface each iteration, z += r (zRef - z)
+// (a relaxation zone, as nested weather models use at their lateral boundaries: Davies
+// 1976, Q. J. R. Meteorol. Soc. 102), so a window blends into a neighbour's solution.
+//
 // All arithmetic in 32-bit floats, as on the GPU.
 
 export const FLAG_OUTLET = 1, FLAG_FIXED = 2;
@@ -44,6 +48,8 @@ export class GraphSolver {
     this.flags = Uint32Array.from(fields.flags);
     this.inflow = fields.inflow ? Float32Array.from(fields.inflow) : new Float32Array(n);
     this.sedIn = fields.sedIn ? Float32Array.from(fields.sedIn) : new Float32Array(CLASSES * n);
+    this.relax = fields.relax ? Float32Array.from(fields.relax) : null; // per-node rate, 0-1 per iteration
+    this.zRef = fields.zRef ? Float32Array.from(fields.zRef) : null;
     this.frac = fields.frac ? Float32Array.from(fields.frac) : Float32Array.from({ length: CLASSES * n }, (_, k) => (k < n ? 0.4 : k < 2 * n ? 0.4 : 0.2));
     this.w = new Float32Array(n);
     for (let i = 0; i < n; i++) this.w[i] = this.flags[i] & (FLAG_OUTLET | FLAG_FIXED) ? this.z[i] : BIG;
@@ -154,6 +160,11 @@ export class GraphSolver {
           z[i] = f(zn[i] + f(f(D * dt / area[i]) * s));
         }
       } else z.set(zn);
+      // 6b. relaxation towards the reference surface
+      if (this.relax) {
+        const { relax, zRef } = this;
+        for (let i = 0; i < n; i++) if (relax[i] > 0 && !held(i)) z[i] = f(z[i] + f(relax[i] * f(zRef[i] - z[i])));
+      }
       // 7. restart the fill from the eroded surface (or from above where unresolved)
       for (let i = 0; i < n; i++) w[i] = held(i) || rec[i] >= 0 ? z[i] : BIG;
       this.iterations++;

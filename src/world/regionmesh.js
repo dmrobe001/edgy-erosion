@@ -45,6 +45,11 @@ export const MESH_REGION_DEFAULTS = {
   calibration: 0.8,
   calibrationHeight: 4, // the calibration's controller: kHeight and nudgeTime times these
   calibrationTime: 3,
+  // experiments, off by default (docs/PLAN.md): both leave visible lines or flat-topped
+  // blocks along the bands, where a tile's surface and a strip's disagree
+  tileSteer: false, // tiles trim the calibrated erodibility (tapered towards their bands)...
+  kTaper: 3,        // ... over this many times `taper`
+  relax: 0,         // relaxation rate per iteration next to a pinned band (fading over `taper`)
   margin: 8,        // cells of extra window for triangulation (connectivity settles within ~5)
   G: GRAPH_DEFAULTS.G,
   // share of eroded rock in each grain class (fine, sand, gravel) by material class:
@@ -147,6 +152,7 @@ function buildWindow(ctx, frame, rect, classify) {
 
 /** Pin the nodes a shared solution holds in `ids`, and take in what it sends into the window. */
 function pinFrom(win, sol, ids) {
+  sol.pinnedHere ||= new Set(ids);
   for (const id of ids) {
     const i = win.idIndex.get(id);
     if (i === undefined) continue;
@@ -165,6 +171,40 @@ function pinFrom(win, sol, ids) {
     if (ri === undefined || win.pinned[ri] || (win.flags[ri] & FLAG_FIXED)) continue;
     win.inflow[ri] += sol.A[s];
     for (let k = 0; k < CLASSES; k++) win.sedIn[k * win.n + ri] += sol.Qs[k * sol.n + s];
+  }
+}
+
+/**
+ * A relaxation zone inside a window's pinned border: free nodes within `T` hops of a
+ * pinned node are drawn towards the solution that pinned it, at the rate
+ * rmax (1 - hops / T)^2 per iteration, so the window's own surface blends into the
+ * shared one instead of meeting it in a step (or a moat where the two disagree).
+ */
+function relaxTowards(win, sources, T, rmax) {
+  const { g, n } = win;
+  const hops = new Int32Array(n).fill(-1), from = new Int32Array(n).fill(-1), queue = new Int32Array(n);
+  let head = 0, tail = 0;
+  for (let i = 0; i < n; i++) {
+    if (!win.pinned[i]) continue;
+    const k = sources.findIndex((s) => s.idIndex.has(win.ids[i]) && s.pinnedHere?.has(win.ids[i]));
+    hops[i] = 0; from[i] = k; queue[tail++] = i;
+  }
+  while (head < tail) {
+    const i = queue[head++];
+    if (hops[i] >= T) continue;
+    for (let e = g.off[i]; e < g.off[i + 1]; e++) {
+      const j = g.nbr[e];
+      if (hops[j] >= 0 || (win.flags[j] & FLAG_FIXED)) continue;
+      hops[j] = hops[i] + 1; from[j] = from[i]; queue[tail++] = j;
+    }
+  }
+  win.relax = new Float32Array(n); win.zRef = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    if (hops[i] <= 0 || from[i] < 0) continue;
+    const s = sources[from[i]], k = s.idIndex.get(win.ids[i]);
+    if (k === undefined || (s.flags[k] & FLAG_FIXED)) continue;
+    win.relax[i] = rmax * (1 - hops[i] / T) ** 2;
+    win.zRef[i] = s.z[k];
   }
 }
 
@@ -221,6 +261,9 @@ async function solveWindow(ctx, win, makeSolver, { shared = false, mask = null, 
   // nodes over `taper` cells: overlapping windows then share the same erodibility where
   // they meet, and no step is left where a free surface meets a pinned band
   const weight = taperWeights(win.g, keep, o.taper);
+  // erodibility trims fade out over a longer distance: a sharp change of erodibility
+  // raises a ridge along it
+  const kWeight = o.tileSteer && !shared && steer === null ? taperWeights(win.g, keep, o.kTaper * o.taper) : weight;
   // erodibility from the blocks' calibrations (a calibration window steers its own)
   if (steer === null) {
     const blocks = [...new Set(win.locIds)].sort((a, b) => a - b);
@@ -237,12 +280,31 @@ async function solveWindow(ctx, win, makeSolver, { shared = false, mask = null, 
   let lastLnK = 0, lnSum = 0, lnCount = 0;
   const params = { dt, m: o.m, D: o.D, eps: o.eps, G: o.G };
   for (let done = 0; done < o.iterations;) {
-    const count = steer !== null ? Math.min(o.nudgeEvery, o.iterations - done) : o.iterations - done;
+    const local = steer === null && !shared && o.tileSteer;
+    const count = steer !== null || local ? Math.min(o.nudgeEvery, o.iterations - done) : o.iterations - done;
     await solver.run(count, params);
     done += count;
     if (done >= o.iterations) break;
     const z = await solver.readZ();
     const now = restrictToBlocks(z, win.block, land);
+    if (local) {
+      // a tile trims the calibrated erodibility per block (region.js's controller), the
+      // trim fading out towards its bands: the calibration window's drainage differs
+      // from the tile's, so a block's mean misses by some tens of metres
+      const lnK = new Map();
+      for (const [bk, e] of now) {
+        if (e.count < 400) continue;
+        const tg = target.get(bk);
+        const err = (e.sum / e.count - tg.sum / tg.count - (win.bias.get(bk) || 0)) / o.kHeight;
+        const I = Math.max(-lnMax, Math.min(lnMax, (integral.get(bk) || 0) + (err * count * dt) / tau));
+        integral.set(bk, I);
+        lnK.set(bk, Math.max(-lnMax, Math.min(lnMax, err + I)));
+      }
+      const fk = prolongBlocks(lnK, win, new Float32Array(n));
+      for (let i = 0; i < n; i++) K[i] = win.K[i] * Math.exp(kWeight[i] * fk[i]);
+      await solver.setK(K);
+      continue;
+    }
     // one block, one number: the erodibility factor of the whole window
     const b = steer, e = now.get(b), tg = target.get(b);
     if (!e) break;
@@ -262,6 +324,7 @@ async function solveWindow(ctx, win, makeSolver, { shared = false, mask = null, 
   if (steer !== null) return { lnK: lnCount ? lnSum / lnCount : lastLnK };
   const z = Float32Array.from(raw.z);
   for (let i = 0; i < n; i++) if (keep[i]) z[i] = win.z[i];
+  const zEroded = Float32Array.from(z);
   // strips and corners are left as eroded (a correction there would differ from the
   // tiles' where they meet); a tile corrects its free nodes, tapered towards its bands.
   // Its block means are those over the tile itself (free nodes and the inner half of
@@ -278,7 +341,7 @@ async function solveWindow(ctx, win, makeSolver, { shared = false, mask = null, 
     sub.forEach((i, q) => { z[i] = zs[q]; });
   }
   for (let i = 0; i < n; i++) if ((win.flags[i] & FLAG_OUTLET) && !(win.flags[i] & FLAG_FIXED) && z[i] > -0.5) z[i] = -0.5;
-  return { ...win, rawConsistency: win.rawConsistency, z, rec: Int32Array.from(raw.rec), recDist: Float32Array.from(raw.recDist), A: Float32Array.from(raw.A), Qs: Float32Array.from(raw.Qs), dep: raw.dep ? Float32Array.from(raw.dep) : null, consistency, iterations: raw.iterations };
+  return { ...win, rawConsistency: win.rawConsistency, z, zEroded, rec: Int32Array.from(raw.rec), recDist: Float32Array.from(raw.recDist), A: Float32Array.from(raw.A), Qs: Float32Array.from(raw.Qs), dep: raw.dep ? Float32Array.from(raw.dep) : null, consistency, iterations: raw.iterations };
 }
 
 /** min(1, hops / taper) from the nearest held node, by breadth-first search on the graph. */
@@ -401,6 +464,7 @@ export async function meshRegionTile(ctx, addr, makeSolver = cpuGraphSolver) {
   const win = buildWindow(ctx, addr, rect, (fa, fb) => (fa < r.a0 - bandOut || fa > r.a0 + r.size + bandOut || fb < r.b0 - bandOut || fb > r.b0 + r.size + bandOut ? 'open' : 'free'));
   for (const c of corners) pinFrom(win, c, c.coreIds);
   for (const s of SIDES) pinFrom(win, strips[s], strips[s].bandIds);
+  if (o.relax > 0) relaxTowards(win, [...corners, ...SIDES.map((sd) => strips[sd])], o.taper, o.relax);
   const inTile = Uint8Array.from({ length: win.n }, (_, i) => {
     const fa = win.fab[2 * i], fb = win.fab[2 * i + 1];
     return fa >= r.a0 && fa <= r.a0 + r.size && fb >= r.b0 && fb <= r.b0 + r.size ? 1 : 0;
@@ -534,14 +598,16 @@ function finishMeshTile(ctx, addr, sol, strips, corners) {
   const mask = Uint8Array.from(inTile, (t, i) => (t && !sol.pinned[i] && inherited[i] <= 0.5 * sol.A[i] ? 1 : 0));
   const d = { receiver: recv, dist: Float32Array.from(recv, (q, i) => (q < 0 ? 1 : sol.recDist[i])), area: sol.A, z: sol.z, mask, coords: (i) => [sol.fab[2 * i], sol.fab[2 * i + 1]] };
   const stats = drainageStatistics(d, { channelArea: ctx.o.channelArea, flatSlope: 3 * ctx.o.eps });
+  // the same, on the surface as eroded (before the block-mean correction)
+  const eroded = drainageStatistics({ ...d, z: sol.zEroded }, { channelArea: ctx.o.channelArea, flatSlope: 3 * ctx.o.eps });
   const rivers = extractRiverGraph(d, { channelArea: ctx.o.channelArea });
   return {
     addr, n, nodes: m, dx: meanSpacing(sol), mesh: true,
     fields: { elevation, uplift, precip, material, drainageArea: area, temperature, sediment: sed },
     drainage: { receiver, area, nx: m, dx: meanSpacing(sol) },
-    stats: { ...stats, consistency, beforeCorrection: sol.rawConsistency },
+    stats: { ...stats, consistency, beforeCorrection: sol.rawConsistency, eroded: { hack: eroded.hack, slopeArea: eroded.slopeArea } },
     rivers,
-    solution: { n: sol.n, ids: sol.ids, z: sol.z, rec: sol.rec, A: sol.A, pinned: sol.pinned, inTile, g: sol.g, base: sol.base, flags: sol.flags },
+    solution: { n: sol.n, ids: sol.ids, z: sol.z, zEroded: sol.zEroded, recDist: sol.recDist, rec: sol.rec, A: sol.A, pinned: sol.pinned, inTile, g: sol.g, base: sol.base, flags: sol.flags },
     strips: Object.fromEntries(SIDES.map((s) => [s, strips[s].key])),
   };
 }

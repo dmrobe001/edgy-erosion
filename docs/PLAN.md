@@ -45,7 +45,7 @@ gates with `node scripts/browser-gate.js` (headless Chromium through Playwright)
 1. **Planet (L0)**: plates, crustal thickening, isostasy, event log. *Gate: under 10 s
    in the browser; golden-seed hashes stable.* **Passed.** Level 0 runs in a Web Worker
    in headless Chromium in 8.5-9.4 s, and its field hashes match the golden ones Node
-   checks (`test/golden.json`, now `hg-0.2`).
+   checks (`test/golden.json`, now `hg-0.3`).
 2. **Region (L1) benchmark**: GPU stream power erosion and drainage graph extraction.
    *Gate: each tile under 1 s; Hack's law and slope-area checks pass.* **Not passed.**
    - The WGSL solver runs and agrees with its CPU reference (rms difference under 2% of
@@ -78,6 +78,118 @@ gates with `node scripts/browser-gate.js` (headless Chromium through Playwright)
    the child within a parent cell, snow only where cold, site seams identical. The
    viewer (`/web/world/`) zooms planet to 1.2 m with IndexedDB caching and neighbour
    prefetch (`test/pipeline.test.js` checks that a cached tile equals a regenerated one).
+
+## Level 1 on an irregular mesh, with simulated seams
+
+The square-raster level 1 above has two flaws that show at a glance in a 2 x 2 block
+of tiles (`node scripts/seam-diagnosis.js`):
+- **Seams are walls.** Each tile is solved alone between fixed edges. Rivers cross only
+  where the planet's do, so every edge becomes a straight divide. Drainage organises
+  around each tile's middle, and the slope jumps at the seams.
+- **The lattice shows.** Eight-neighbour flow on a square grid prefers eight directions,
+  whatever the seams do. A single domain solved in one piece has the same texture.
+
+`regionmesh.js` addresses both. It is optional for now (`World({region: 'mesh'})`,
+viewer `?region=mesh`), because it costs several times as much.
+
+- **One global irregular mesh** (`pointmesh.js`). Each level-1 cell holds one point,
+  jittered within 80% of the cell by the world hash. A window of the mesh is
+  triangulated: Delaunay, in a stereographic projection about the window's centre
+  (which keeps circles circles, so the triangulation is the sphere's). Geometry
+  (lengths, Voronoi areas, cotangent weights) is in 3-D. Two windows triangulate their
+  common points alike once a point is more than about 6 cells inside both (tested to
+  7, across a cube-face edge too).
+- **A graph solver** (`graphsolver.js`, WGSL in `gpugraph.js`). These are the passes of
+  `jacobi.js` with neighbours from compressed rows. It adds sediment in three grain
+  classes with Davy & Lague (2009) deposition: a node lays down the share
+  1 - exp(-G a / A) of each class arriving, with G = 0.05, 0.6 and 2.5 for fine, sand
+  and gravel. Two checks: without deposition the steady state is exactly K A^m S = U;
+  with it, sediment leaving equals uplift times area to 0.1%.
+- **Simulated seams.** Generation runs in dimension order, and every piece depends on
+  the planet alone:
+  - A **corner patch** is a square window about a tile corner. It is solved with an
+    open outer ring held at the planet's elevation. Its core (20 cells either way) is
+    then fixed.
+  - An **edge strip** is a window 56 cells deep either side of a tile edge, its ends
+    pinned to the two corner cores. Its band (8 cells either side of the edge) is then
+    fixed.
+  - A **tile** pins its four bands and four cores and erodes the rest.
+  
+  Where the shared solution routes water from a pinned node into a window's free
+  interior, that water and its sediment enter there. So rivers cross seams wherever the
+  strip's drainage takes them, not only where the planet's rivers do. The planet's
+  rivers enter strips and corner patches where its flow links cross into them, with
+  drainage area and sediment flux.
+- **Bitwise seams.** Border nodes are sampled once from the shared strip and corner
+  solutions at the canonical tile's nodes, and reoriented for the other tile. Tests:
+  order independence, bitwise borders, and crossings that agree (with inflow flipped
+  and sediment equal), across a cube-face edge too (`test/regionmesh.test.js`).
+- **Products** are the same rasters as before (elevation, area, sediment by class, and
+  so on, at the tile's 257 x 257 nodes), so levels 2 and 3 run unchanged. Level 2
+  reads its parent's border records from the tile itself (`meshBorders`).
+
+**Erodibility, consistency and what they cost.** The raster tiles steer erodibility per
+block while they erode, which keeps block means within a few metres. Steering each
+mesh window separately does not work: windows that overlap settle on different
+erodibility, and a tile grows rims a few hundred metres high along its pinned bands.
+What runs now:
+- **Calibration.** Each planet cell's erodibility factor is steered once, in a window
+  centred on it (0.8 cell spacings each way, an open ring at the parent's elevation).
+  The factor is one number for the window, with lower controller gains than
+  `region.js`, averaged over the second half of the run. Every window then uses these
+  factors (interpolated barycentrically), so all windows erode with the same
+  erodibility.
+- **Correction.** Strips and corners are left as eroded. A tile corrects its own block
+  means (`correctBlockMeans`) over the tile itself, fading the correction out over
+  24 cells towards its bands.
+
+Measured at full size, seed `example`, on one CPU core. Each block is a 2 x 2 group of
+tiles, compared using `node scripts/seam-diagnosis.js example out --mesh`:
+
+| | raster tiles | one domain | mesh tiles |
+| --- | --- | --- | --- |
+| flow-direction jump across seams (across tile middles) | 0.68 (0.37) | 0.33 (0.38) | 0.45 (0.41) |
+| radial index (drainage organised around tile centres) | -0.09 | -0.02 | -0.04 |
+| rms slope step at seams, m per node | 1079 | 139 | 30 |
+| Hack exponent | 0.54-0.60 | 0.54 | 0.53-0.58 |
+| slope-area concavity | 0.24-0.59 | 0.48 | 0.17-0.38 |
+| CPU time for the four tiles | 139 s | 132 s | 2325 s |
+
+- **Seams.** The seams and the lattice are gone, by eye and by these measures.
+- **Concavity is low, and the correction causes it.** On the surface as eroded, before
+  correction (`stats.eroded`), the mesh tiles' concavity is 0.51-0.59 (checked at
+  96-cell tiles). The calibrated erodibility leaves block means 90-350 m off the
+  parent's. Spread over a planet cell (about 160 km), that correction tilts the trunk
+  channels, whose own fall over that distance is about 100 m.
+- **Time.** Most of the 2325 s is calibration windows, about 5 per tile. The WGSL
+  solver runs them all on a GPU (`gpugraph.js`, 0.6% of relief from the CPU on
+  SwiftShader). A real GPU has not been measured.
+
+Tried and left off (options in `MESH_REGION_DEFAULTS`):
+- **Trimming the calibrated erodibility per tile** (`tileSteer`), with the trim fading
+  out towards the bands. Block means were then 30-60 m off before correction, and
+  concavity was 0.43-0.58. But faint lines appear along the bands, where the strip's
+  surface (calibrated only) meets the tile's (trimmed).
+- **A relaxation zone** (`relax`, CPU only), as nested weather models use at their
+  lateral boundaries (Davies 1976). It moves the mismatch inward rather than removing
+  it, leaving a moat where the zone ends.
+- **Scaling instead of shifting** in the correction. Scaling elevations above base
+  level preserves slope-area exponents along a path, but a factor that varies over
+  160 km tilts trunks just the same.
+
+The underlying mismatch is that a strip sees only 56 cells of catchment on either
+side of its edge. Its band channels carry less water than the tile's rivers bring to
+them, so the strip's band stands too high for the tile.
+
+**Sediment through the levels.**
+- Level 0 has a `sedimentFlux` field (`hg-0.3`) [conjecture: land eroding at the rock
+  uplift rate, gathered down the planet's drainage tree].
+- Crossings at every level carry `sed`, the flux per grain class, beside the drainage
+  area.
+- Level 2 lays sediment down by the same Davy–Lague rule, fed by the level-1 flux of
+  the rivers entering the tile. This replaces the capacity rule for fans.
+- Deposition at a node is capped at 2 m above its receiver per step. The rest travels
+  on.
 
 ## Measured against the budgets
 
@@ -154,7 +266,8 @@ lakes. **Level 3:** about 0.5 s per tile.
   profile are implemented (`minorSpacing`) but off by default: they raised local base
   levels and flattened the tiles' drainage (concavity fell from 0.56 to 0.1 on the
   test tile). The design accepts some of this ("a child-scale channel running parallel
-  to an edge has no clean representation").
+  to an edge has no clean representation"). Level 1 on the mesh (above) replaces the
+  walls with simulated seams.
 - **Slope-area concavity varies between tiles.** It is 0.47-0.59 on uplifted tiles.
   Tiles whose boundary hands them a river high above the sea, or a large closed basin,
   are still adjusting after 5 Myr and give 0.14-0.3. Natural landscapes out of

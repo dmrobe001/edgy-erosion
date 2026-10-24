@@ -177,6 +177,7 @@ const USES = {
  */
 export function gpuGraphSolver(device, win) {
   const g = win.g, n = g.n, E = g.nbr.length;
+  if (win.relax && win.relax.some((r) => r > 0)) throw new Error('gpuGraphSolver: relaxation zones (regionmesh relax option) run on the CPU only');
   const usage = GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST;
   const buf = (len, data, Type = Float32Array) => {
     const b = device.createBuffer({ size: Math.max(4, len * 4), usage });
