@@ -4342,6 +4342,48 @@ class Planet {
     }
   }
 
+  /** max over cells of (sum of face / dist) / area: the explicit-diffusion stability bound (cached). */
+  _diffusionWorst() {
+    if (this._worst) return this._worst;
+    const { neighbors: nb, dist, face, area, size: n } = this.mesh;
+    let worst = 0;
+    for (let i = 0; i < n; i++) {
+      let t = 0;
+      for (let k = 0; k < 6; k++) { const e = 6 * i + k; if (nb[e] >= 0) t += face[e] / dist[e]; }
+      worst = Math.max(worst, t / area[i]);
+    }
+    return (this._worst = worst);
+  }
+
+  /**
+   * The seed cells and every cell within `rings` steps of them (through cells of the
+   * same plate if sameOwner), in increasing index order. Leaves this._mark set to 1 on
+   * exactly those cells.
+   */
+  _dilate(seeds, rings, sameOwner) {
+    const n = this.mesh.size, nb = this.mesh.neighbors, own = this.owner;
+    const mark = this._mark || (this._mark = new Uint8Array(n));
+    mark.fill(0);
+    let front = Int32Array.from(seeds);
+    for (const i of front) mark[i] = 1;
+    let count = front.length;
+    const next = this._dilateBuf || (this._dilateBuf = new Int32Array(n));
+    for (let r = 0; r < rings && front.length; r++) {
+      let m = 0;
+      for (const i of front) {
+        for (let k = 0; k < 6; k++) {
+          const j = nb[6 * i + k];
+          if (j >= 0 && !mark[j] && (!sameOwner || own[j] === own[i])) { mark[j] = 1; next[m++] = j; }
+        }
+      }
+      front = next.slice(0, m);
+      count += m;
+    }
+    const out = new Int32Array(count);
+    for (let i = 0, c = 0; i < n; i++) if (mark[i]) out[c++] = i;
+    return out;
+  }
+
   /**
    * Place this step's scraped-off and arc crust: spread it over the overriding plate
    * with a diffusion of width ~arcWidth (arcs stand a few hundred km behind trenches;
@@ -4355,12 +4397,7 @@ class Planet {
     let any = false;
     for (let i = 0; i < n; i++) if (vol[i] > 0) { any = true; break; }
     if (!any) return;
-    let worst = 0;
-    for (let i = 0; i < n; i++) {
-      let t = 0;
-      for (let k = 0; k < 6; k++) { const e = 6 * i + k; if (nb[e] >= 0) t += face[e] / dist[e]; }
-      worst = Math.max(worst, t / area[i]);
-    }
+    const worst = this._diffusionWorst();
     // each pass adds about 0.45 / worst x 2 to the variance (m^2); worst ~ 4 / spacing^2
     const w = this.params.crust.arcWidth;
     const passes = Math.min(200, Math.ceil((w * w * worst) / 0.9));
@@ -4368,16 +4405,10 @@ class Planet {
     // only cells within 3 widths of a source take part (beyond, the spread is negligible);
     // edges leading out of that set carry nothing, so volume is still conserved exactly
     const rings = Math.ceil((3 * w) / mesh.spacing) + 1;
-    const inSet = new Uint8Array(n);
-    let set = [];
-    for (let i = 0; i < n; i++) if (vol[i] > 0) { inSet[i] = 1; set.push(i); }
-    for (let r = 0, front = set.slice(); r < rings; r++) {
-      const next = [];
-      for (const i of front) for (let k = 0; k < 6; k++) { const j = nb[6 * i + k]; if (j >= 0 && !inSet[j] && this.owner[j] === this.owner[i]) { inSet[j] = 1; next.push(j); } }
-      set = set.concat(next);
-      front = next;
-    }
-    set.sort((a, b) => a - b);
+    const seeds = [];
+    for (let i = 0; i < n; i++) if (vol[i] > 0) seeds.push(i);
+    const set = this._dilate(seeds, rings, true);
+    const inSet = this._mark;
     const u = new Float64Array(n), ua = new Float64Array(n);
     for (let it = 0; it < passes; it++) {
       for (const i of set) { u[i] = vol[i] / area[i]; ua[i] = volArc[i] / area[i]; }
@@ -4421,12 +4452,7 @@ class Planet {
     const { neighbors: nb, dist, face, area } = mesh;
     const h0 = cr.flowThreshold;
     const th = Float64Array.from(this.thickness);
-    let worst = 0;
-    for (let i = 0; i < n; i++) {
-      let s = 0;
-      for (let k = 0; k < 6; k++) { const e = 6 * i + k; if (nb[e] >= 0) s += face[e] / dist[e]; }
-      worst = Math.max(worst, s / area[i]);
-    }
+    const worst = this._diffusionWorst();
     // thicker crust is hotter and weaker at depth: it flows faster, as (1 + (excess / e0)^2)
     const e0 = cr.flowScale;
     let emax = 0;
@@ -4437,11 +4463,17 @@ class Planet {
     if ((dt * D * fmax * worst) / 0.5 > cap) fmax = Math.max(1, (0.5 * cap) / (dt * D * worst));
     const subs = Math.min(cap, Math.max(1, Math.ceil((dt * D * fmax * worst) / 0.5)));
     const hstep = dt / subs;
-    const out = new Float64Array(n);
-    const flux = new Float64Array(6 * n);
+    // only cells within `subs` steps of crust above the threshold can take part (flow
+    // reaches one cell further per substep), so the loops run over that set alone
+    const seeds = [];
+    for (let i = 0; i < n; i++) if (th[i] > h0) seeds.push(i);
+    if (!seeds.length) return;
+    const active = this._dilate(seeds, subs, true);
+    const out = this._flowOut || (this._flowOut = new Float64Array(n));
+    const flux = this._flowFlux || (this._flowFlux = new Float64Array(6 * n));
     for (let it = 0; it < subs; it++) {
-      out.fill(0);
-      for (let i = 0; i < n; i++) {
+      for (const i of active) out[i] = 0;
+      for (const i of active) {
         const ei = th[i] - h0;
         for (let k = 0; k < 6; k++) {
           const e = 6 * i + k;
@@ -4456,11 +4488,11 @@ class Planet {
           out[q > 0 ? i : j] += Math.abs(q);
         }
       }
-      for (let i = 0; i < n; i++) {
+      for (const i of active) {
         const avail = Math.max(0, th[i] - h0) * area[i];
         out[i] = out[i] > avail ? avail / out[i] : 1;
       }
-      for (let i = 0; i < n; i++) {
+      for (const i of active) {
         for (let k = 0; k < 6; k++) {
           const e = 6 * i + k;
           const q0 = flux[e];
@@ -4709,7 +4741,7 @@ class Planet {
   /** Sea level that holds `volume` of water over the current topography (bisection). */
   _seaLevelForVolume(volume) {
     let lo = -12000, hi = 12000;
-    for (let it = 0; it < 60; it++) {
+    for (let it = 0; it < 40; it++) { // 24 km / 2^40: far below a micron
       const mid = 0.5 * (lo + hi);
       if (this._waterBelow(mid) < volume) lo = mid; else hi = mid;
     }

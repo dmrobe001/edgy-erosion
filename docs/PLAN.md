@@ -39,42 +39,41 @@ stays in the tree and keeps working; the hierarchical generator grows beside it 
 
 ## Milestones
 
-The design's roadmap is an embedded block that did not come through in the exported
-document. This is a reconstruction from its text; correct it if the original differs.
+Each milestone closes with an automated gate.
 
-1. **Foundation.** Stateless seeding, tile addresses with edge and corner identities,
-   level-0 planet tile in about 10 s, golden hashes. *Gate: determinism (golden test).*
-   **Done.**
-2. **Region (level 1).** Prolongation from level 0 with a discarded halo; corner and
-   edge records from the parent alone (edge profiles, river crossings with discharge and
-   drainage area); implicit stream power with edges as walls and crossings as the only
-   sinks and sources; restriction check. *Gate: consistency within epsilon, seams
-   bitwise identical, order independence.* **Started:** the solver and its benchmark.
-3. **Landscape (level 2).** Threshold landsliding, fans, glacial carving where the event
-   log says so, lithology from material. *Gate: seam continuity and the plausibility
-   statistics (Hack's law, slope-area concavity, Horton ratios).*
-4. **Site (level 3).** Port the detail layer to tiles honouring crossings. *Gate: the
-   variety test.*
-5. **Platform.** Web Workers, IndexedDB cache, a zooming viewer, WebGPU where available.
-   *Gate: order independence in the browser, time budgets.*
+1. **Planet (L0)**: plates, crustal thickening, isostasy, event log. *Gate: under 10 s
+   in the browser; golden-seed hashes stable.* **Passed**: `node scripts/browser-gate.js`
+   runs level 0 in a Web Worker in headless Chromium in 8.5-9.4 s, and its golden hashes
+   match the ones `node --test` checks (`test/golden.json`).
+2. **Region (L1) benchmark**: GPU stream power erosion and drainage graph extraction.
+   *Gate: each tile under 1 s; Hack's law and slope-area checks pass.*
+3. **Seams**: corner and edge records, river crossings, halos. *Gate: the
+   order-independence test produces bitwise identical seams.*
+4. **Landscape (L2)**: landslides, alluvial fans, glaciation, lithology contrasts.
+   *Gate: local maps vary beyond noise; consistency holds within tolerance at every
+   level.*
+5. **Site (L3) and full zoom**: feature placement, rendering, caching, prefetch. *Gate:
+   zooming from planet to 1 m produces no contradictions across levels.*
 
 ## Measured against the budgets
 
 From `node scripts/bench-world.js`, on the development container (Node 22, one core).
 
-**Level 0, about 10 s budget: nearly met, at coarser cells than designed.** It takes
-about 11 s for 23 042 cells about 160 km apart, 500 Myr in 250 steps of 2 Myr. The design asks for
+**Level 0, 10 s budget: met, at coarser cells than designed.** It takes about 9 s in
+Node and 8.5-9.4 s in a Chromium worker for 23 042 cells about 160 km apart, 500 Myr
+in 250 steps of 2 Myr. The design asks for
 30-50 km cells. That is about 16x the cells at 40 km, and about 4x the steps (plates may
 move only half a cell per substep), so roughly 60x the work: far out of reach on one
 CPU core. Each level-1 tile still sees about 2 x 2 level-0 cells. The coarse level-0
 map then leaves more of the regional structure to level 1, which is where it is
 cheapest to make.
 
-The speed-ups that got level 0 to about 11 s (from about 50 s), none of which changes
+The speed-ups that got level 0 to about 9 s (from about 50 s), none of which changes
 the model:
 - each world cell looks up only the plates that owned it or a neighbour last substep,
   not all of them;
-- arc crust is spread only over cells within three arc widths of where it was made;
+- arc crust is spread only over cells within three arc widths of where it was made,
+  and crustal flow runs only within reach of crust above the flow threshold;
 - the explicit crustal-flow substeps are capped, and the flow law's speed-up is capped
   with them;
 - river routing is replaced by elevation-dependent denudation (Ahnert 1970) above a

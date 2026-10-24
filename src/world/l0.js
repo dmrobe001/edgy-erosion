@@ -13,8 +13,8 @@ import { worldKey, deriveKey } from './hash.js';
 export const GENERATOR_VERSION = 'hg-0.1';
 
 /**
- * Level-0 settings. The defaults run in about 11 s in Node on one core (measured on the
- * development container): 23 042 cells about 160 km apart, 250 steps of 2 Myr. The
+ * Level-0 settings. The defaults run in about 9 s in Node or a Chromium worker on one
+ * core (measured on the development container; scripts/browser-gate.js): 23 042 cells about 160 km apart, 250 steps of 2 Myr. The
  * design's 30-50 km cells would need about 60x the work; see docs/PLAN.md.
  */
 export const L0_DEFAULTS = {

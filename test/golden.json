@@ -1,0 +1,22 @@
+{
+  "_note": "Field hashes of generated tiles (FNV-1a over the Float32/Uint8 bytes). A change is either a deliberate, versioned model change (bump GENERATOR_VERSION, regenerate with node scripts/golden.js) or a bug.",
+  "version": "hg-0.1",
+  "l0": {
+    "seed": 7,
+    "options": {
+      "subdivisions": 12,
+      "duration": 20000000,
+      "dt": 2000000,
+      "upliftWindow": 4000000
+    },
+    "hashes": {
+      "elevation": "4dba2976",
+      "material": "37106f2d",
+      "uplift": "61763e85",
+      "precip": "b46f0d05",
+      "temperature": "22ad8421",
+      "regolith": "f5956342",
+      "drainageArea": "c73b4d90"
+    }
+  }
+}

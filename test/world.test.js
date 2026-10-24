@@ -1,5 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { philox4x32, worldKey, deriveKey, uniform, normal, fieldHash } from '../src/world/hash.js';
 import {
   faceToVector, vectorToFace, tileAt, tileKey, neighborOf, cornerTiles, edgeKey, cornerKey,
@@ -99,11 +100,12 @@ test('cube-sphere: children tile their parent', () => {
   assert.deepEqual(parentOf({ level: 1, face: 0, i: 3, j: 4 }), { level: 0, face: -1, i: 0, j: 0 });
 });
 
-const SMALL_L0 = { subdivisions: 12, duration: 2e7, dt: 2e6, upliftWindow: 4e6 };
+const GOLDEN = JSON.parse(readFileSync(new URL('./golden.json', import.meta.url), 'utf8'));
+const SMALL_L0 = GOLDEN.l0.options;
 
 test('level 0 is a pure function of the world seed (golden hashes)', () => {
-  const a = generatePlanet(7, SMALL_L0);
-  const b = generatePlanet(7, SMALL_L0);
+  const a = generatePlanet(GOLDEN.l0.seed, SMALL_L0);
+  const b = generatePlanet(GOLDEN.l0.seed, SMALL_L0);
   const c = generatePlanet(8, SMALL_L0);
   const hashes = (t) => Object.fromEntries(Object.entries(t.fields).map(([k, v]) => [k, fieldHash(v)]));
   assert.deepEqual(hashes(a), hashes(b));
@@ -111,14 +113,10 @@ test('level 0 is a pure function of the world seed (golden hashes)', () => {
   assert.deepEqual(a.events, b.events);
   // Stored on the development machine (Node 22, V8). A change here is either a
   // deliberate, versioned model change (bump GENERATOR_VERSION and update these) or a bug.
-  assert.equal(a.version, 'hg-0.1');
-  assert.deepEqual(hashes(a), GOLDEN_L0);
+  assert.equal(a.version, GOLDEN.version);
+  assert.deepEqual(hashes(a), GOLDEN.l0.hashes);
 });
 
-const GOLDEN_L0 = {
-  elevation: '4dba2976', material: '37106f2d', uplift: '61763e85', precip: 'b46f0d05',
-  temperature: '22ad8421', regolith: 'f5956342', drainageArea: 'c73b4d90',
-};
 
 test('level 0: sea level is 0, materials are consistent with the crust, rivers run downhill to the sea', () => {
   const t = generatePlanet(3, SMALL_L0);
