@@ -221,9 +221,15 @@ function minorCrossings(ctx, C, sC, z, existing) {
  * the crossings ({node, area, inflow: true if the river flows into this tile, z, links}).
  */
 export function tileBorder(ctx, addr) {
-  const n = ctx.n;
   const out = {};
-  for (const side of SIDES) {
+  for (const side of SIDES) out[side] = sideBorder(ctx, addr, side);
+  return out;
+}
+
+/** One side of a tile's border, in the tile's own node order (see tileBorder). */
+export function sideBorder(ctx, addr, side) {
+  const n = ctx.n;
+  {
     const rec = edgeRecord(ctx, addr, side);
     // orientation: does this tile's node 0 of the side sit at the record's node 0?
     const [ci, cj] = sideNode(side, 0, n);
@@ -237,9 +243,8 @@ export function tileBorder(ctx, addr) {
       node: reversed ? n - x.node : x.node, area: x.area, z: x.z, links: x.links, minor: !!x.minor,
       inflow: mine ? x.inflowToCanonical : !x.inflowToCanonical,
     }));
-    out[side] = { key: rec.key, z, crossings };
+    return { key: rec.key, z, crossings };
   }
-  return out;
 }
 
 function dist2(a, b) { return (a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2 + (a[2] - b[2]) ** 2; }

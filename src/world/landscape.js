@@ -29,7 +29,7 @@ import { nodePosition, tileRect, parentOf, tileKey, vectorToFace, WORLD_LAYOUT }
 import { worldKey, deriveKey, uniform } from './hash.js';
 import { fbm3k } from './noise.js';
 import { RasterSolver } from './fastscape.js';
-import { seamContext, tileBorder, sideNode, SIDES } from './seams.js';
+import { seamContext, tileBorder, sideBorder, sideNode, SIDES } from './seams.js';
 import { correctBlockMeans } from './region.js';
 import { drainageStatistics, extractRiverGraph } from './rivers.js';
 
@@ -108,7 +108,7 @@ function cubic1(a, t) {
 export function landscapeSampler(parent, worldSeed, options = {}) {
   const o = { ...LANDSCAPE_DEFAULTS, ...options, relief: { ...LANDSCAPE_DEFAULTS.relief, ...(options.relief || {}) } };
   const m = parent.nodes, F = parent.fields, R = options.radius ?? 6.371e6;
-  const noiseKey = deriveKey(worldKey(worldSeed), 2, 0x6e6f6973, o.noiseSalt || 0);
+  const noiseKey = deriveKey(worldKey(worldSeed), (parent.addr.level || 1) + 1, 0x6e6f6973, o.noiseSalt || 0);
   const dx1 = parent.dx;
   const noiseAt = (v) => fbm3k(noiseKey, v[0] * R, v[1] * R, v[2] * R, o.relief.wavelength, o.relief.octaves, o.relief.gain);
   /** Elevation from a smooth value e, the parent's relief across one of its cells (m), and the noise at v. */
@@ -166,7 +166,7 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
   };
   const n = layout.tileCells;
   const ctx = seamContext({
-    level: 2, worldSeed, layout, radius: parentSeams.radius, linkSpacing: parent.dx, links,
+    level: P1.level + 1, worldSeed, layout, radius: parentSeams.radius, linkSpacing: parent.dx, links,
     // elevation / base are only asked for points inside the parent (seams on the
     // parent's border come from the overrides below)
     elevation: (v) => { throw new Error(`level-2 seam sampled at a parent border point ${v}`); },
@@ -178,7 +178,7 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
       if (on) {
         // the parent's own seam: only its shared record and this level's noise (never
         // either parent's interior, so tiles under both parents compute the same)
-        const pb = tileBorder(parentSeams, parentOf(C, layout))[on.side];
+        const pb = sideBorder(parentSeams, parentOf(C, layout), on.side);
         const xs = pb.crossings.filter((x) => x.node >= on.k0 && x.node <= on.k0 + per);
         for (let t = 0; t <= n; t++) {
           z[t] = borderValue(pb.z, on.k0 + (t * per) / n, pos[t]);
@@ -197,7 +197,7 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
       const [x1, y1] = toParent(tile, n, ci, cj, layout);
       // a corner on its parent's border takes the border record's value there
       const onB = x1 === 0 ? ['W', y1] : x1 === n1 ? ['E', y1] : y1 === 0 ? ['S', x1] : y1 === n1 ? ['N', x1] : null;
-      if (onB) return borderValue(tileBorder(parentSeams, parentOf(tile, layout))[onB[0]].z, onB[1], pos);
+      if (onB) return borderValue(sideBorder(parentSeams, parentOf(tile, layout), onB[0]).z, onB[1], pos);
       if (tileKey(parentOf(tile, layout)) !== tileKey(P1)) throw new Error(`level-2 corner under another parent: ${tileKey(tile)} ${corner} at parent node ${x1},${y1}; this parent ${tileKey(P1)}`);
       return smp.sample(x1, y1, pos).z;
     },
@@ -226,6 +226,28 @@ export function landscapeSeams(parent, parentSeams, worldSeed, options = {}, lay
 function faceCoords(face, v) {
   const f = vectorToFace(v[0], v[1], v[2]);
   return [f.a, f.b];
+}
+
+/** Lower the nodes along a polyline to a profile falling evenly to its last node's elevation (only lowers). */
+function carveAlong(z, flags, nx, path, zStart) {
+  const nodes = [], seen = new Set();
+  for (let s = 0; s < path.length - 1; s++) {
+    const [x0, y0] = path[s], [x1, y1] = path[s + 1];
+    const steps = Math.max(1, Math.ceil(2 * Math.hypot(x1 - x0, y1 - y0)));
+    for (let k = 0; k <= steps; k++) {
+      const c = Math.round(y0 + ((y1 - y0) * k) / steps) * nx + Math.round(x0 + ((x1 - x0) * k) / steps);
+      if (!seen.has(c)) { seen.add(c); nodes.push(c); }
+    }
+  }
+  if (nodes.length < 2) return;
+  const zEnd = z[nodes[nodes.length - 1]];
+  const top = Math.max(zStart, zEnd + 1e-3 * nodes.length);
+  for (let k = 0; k < nodes.length; k++) {
+    const c = nodes[k];
+    if (flags[c] & 2) continue;
+    const zz = Math.fround(top + ((zEnd - top) * k) / (nodes.length - 1));
+    if (zz < z[c]) z[c] = zz;
+  }
 }
 
 /** Stratum at a node: 1 if the exposed rock is the hard bed, else 0. */
@@ -312,10 +334,39 @@ export function landscapeInput(parent, ctx, addr, events, options = {}, layout =
   }
   const inflow = new Float32Array(N);
   const inward = { W: [1, 0], E: [-1, 0], S: [0, 1], N: [0, -1] };
+  const exits = [];
   for (const side of SIDES) for (const x of border[side].crossings) {
     const [bi, bj] = sideNode(side, x.node, n);
     if (x.inflow) inflow[(bj + inward[side][1]) * nx + bi + inward[side][0]] += x.area;
-    else flags[bj * nx + bi] = 3;
+    else { flags[bj * nx + bi] = 3; exits.push([bi, bj]); }
+  }
+  // pinned rivers (design): each inflowing river is pre-carved along the parent's
+  // drainage path from where it enters to where that path leaves the tile, ending at
+  // the outflow crossing nearest to that point
+  {
+    const b = layout.branching, per = layout.tileCells / b;
+    const offI = addr.i - b * Math.floor(addr.i / b), offJ = addr.j - b * Math.floor(addr.j / b);
+    const toMe = (pc) => { const pi = pc % m, pj = (pc - pi) / m; return [((pi - offI * per) * n) / per, ((pj - offJ * per) * n) / per]; };
+    const rec = parent.drainage.receiver;
+    for (const side of SIDES) for (const x of border[side].crossings) {
+      if (!x.inflow) continue;
+      const [bi, bj] = sideNode(side, x.node, n);
+      const ii = bi + inward[side][0], jj = bj + inward[side][1];
+      const [x1, y1] = toParent(addr, n, ii, jj, layout);
+      let pc = Math.min(m - 1, Math.max(0, Math.round(y1))) * m + Math.min(m - 1, Math.max(0, Math.round(x1)));
+      const path = [[ii, jj]];
+      for (let guard = 0; guard < 4 * per && pc >= 0; guard++) {
+        const [xi, yi] = toMe(pc);
+        if (xi < 0 || yi < 0 || xi > n || yi > n) break;
+        if (xi > 0 && yi > 0 && xi < n && yi < n) path.push([xi, yi]);
+        pc = rec[pc];
+      }
+      const last = path[path.length - 1];
+      let best = null, bd = Infinity;
+      for (const ex of exits) { const d = (ex[0] - last[0]) ** 2 + (ex[1] - last[1]) ** 2; if (d < bd) { bd = d; best = ex; } }
+      if (best && bd <= (2 * n / per) ** 2) path.push(best);
+      carveAlong(z, flags, nx, path, z[jj * nx + ii]);
+    }
   }
   // was this place glaciated recently enough to still show it?
   const glaciation = events.find((e) => e.kind === 'glaciation' && e.time < (o.glacialMemory ?? 2e5));
@@ -472,7 +523,7 @@ function finishLandscape(input, z64, record) {
   const temperature = Float32Array.from(elevation, (zz, c) => input.tempSL[c] - LAPSE * Math.max(0, zz));
   return {
     addr: input.addr, n: input.n, nodes: nx, dx, border: input.border,
-    fields: { elevation, material: input.material, drainageArea: area, temperature, hardRock: record.hard },
+    fields: { elevation, material: input.material, drainageArea: area, temperature, hardRock: record.hard, precip: Float32Array.from(input.P, (p) => 1000 * p) },
     record, rivers, stats: { ...stats, consistency }, drainage: d,
   };
 }
