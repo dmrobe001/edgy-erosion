@@ -351,10 +351,11 @@ export function restrictToBlocks(field, block, mask) {
  * keep[c] set (the sea) are not moved. With `sampledOnly`, blocks with fewer than
  * minCells free cells, or less than half of them free, are left alone (a narrow window
  * sees only slivers of them, and a window with pinned borders can move only a few of
- * their cells: correcting those is ill-conditioned). Returns the largest remaining |residual| (m) over
+ * their cells: correcting those is ill-conditioned). `weight` (0-1 per cell) scales the
+ * correction, e.g. to taper it off towards cells that are held. Returns the largest remaining |residual| (m) over
  * blocks with at least minCells cells.
  */
-export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50, sampledOnly = false) {
+export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50, sampledOnly = false, weight = null) {
   const { block, locIds, locW, base } = input;
   const L = input.locK || 3;
   const N = field.length;
@@ -368,7 +369,7 @@ export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50
   const free = new Float64Array(B);
   for (let c = 0; c < N; c++) { target[blk[c]] += base[c]; count[blk[c]]++; if (!(keep && keep[c])) free[blk[c]]++; }
   // with sampledOnly, a block is corrected (and counted) only if enough of it is free to move
-  const sampled = (k) => free[k] >= minCells && free[k] >= 0.5 * count[k];
+  const sampled = (k) => free[k] >= minCells && free[k] >= 0.3 * count[k];
   for (let k = 0; k < B; k++) target[k] = target[k] / count[k] + (input.bias?.get(ids[k]) || 0);
   let worst = 0;
   for (let pass = 0; pass <= passes; pass++) {
@@ -385,7 +386,7 @@ export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50
       if (keep && keep[c]) continue;
       let d = 0;
       for (let t = 0; t < L; t++) { const q = loc[L * c + t]; if (q >= 0) d += locW[L * c + t] * resid[q]; }
-      field[c] += d;
+      field[c] += weight ? weight[c] * d : d;
     }
   }
   return worst;

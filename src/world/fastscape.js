@@ -171,6 +171,8 @@ export class RasterSolver {
         heap.push(j, level[j]);
       }
     }
+    // cells no flood reached (shut in by walls) are pits: they keep no stale receiver
+    if (count < n) for (let i = 0; i < n; i++) if (!done[i]) { receiver[i] = i; recDist[i] = 0; }
     this.orderCount = count;
     return this;
   }

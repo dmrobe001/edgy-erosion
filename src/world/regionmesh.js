@@ -22,7 +22,7 @@
 // All windows are views of one global point set (pointmesh.js); a node has the same
 // id, position, initial elevation and rock in every window that holds it.
 
-import { WORLD_LAYOUT, tileKey, tileRect, neighborOf, cornerTiles, nodePosition } from './cubesphere.js';
+import { WORLD_LAYOUT, tileKey, tileRect, neighborOf, cornerTiles, nodePosition, tileAt } from './cubesphere.js';
 import { windowPoints, triangulateWindow, extendedFace, locateInWindow, cellsPerFace } from './pointmesh.js';
 import { GraphSolver, FLAG_OUTLET, FLAG_FIXED, CLASSES, GRAPH_DEFAULTS } from './graphsolver.js';
 import { regionSampler, restrictToBlocks, correctBlockMeans, prolongBlocks, REGION_DEFAULTS } from './region.js';
@@ -37,6 +37,14 @@ export const MESH_REGION_DEFAULTS = {
   strip: undefined, // cells a strip reaches either side of its edge (56)
   corner: undefined, // half-width of a corner patch (56)
   core: undefined,  // half-width of a corner patch's pinned core (20)
+  taper: undefined, // cells over which corrections fade out towards pinned nodes (24)
+  // erodibility is steered per planet cell (block) so block means match the parent's, as
+  // in region.js, but once per block, in a calibration window centred on it (this many
+  // block spacings across each way): windows steering separately would settle on
+  // different erodibility where they overlap, and rims grow where they meet
+  calibration: 0.8,
+  calibrationHeight: 4, // the calibration's controller: kHeight and nudgeTime times these
+  calibrationTime: 3,
   margin: 8,        // cells of extra window for triangulation (connectivity settles within ~5)
   G: GRAPH_DEFAULTS.G,
   // share of eroded rock in each grain class (fine, sand, gravel) by material class:
@@ -56,6 +64,7 @@ export function meshRegionContext(planet, options = {}, layout = WORLD_LAYOUT) {
   o.strip ??= Math.max(10, Math.round((56 * nc) / 256));
   o.corner ??= o.strip;
   o.core ??= Math.max(o.band + 1, Math.round((20 * nc) / 256));
+  o.taper ??= Math.max(4, Math.round((24 * nc) / 256));
   const smp = regionSampler(planet, o);
   const P = planet.mesh.pos, F = planet.fields, rec = planet.flow.receiver;
   const links = [];
@@ -65,7 +74,7 @@ export function meshRegionContext(planet, options = {}, layout = WORLD_LAYOUT) {
     const sed = F.sedimentFlux ? F.sedimentFlux[i] : 0;
     links.push({ from: [P[3 * i], P[3 * i + 1], P[3 * i + 2]], to: [P[3 * r], P[3 * r + 1], P[3 * r + 2]], area: F.drainageArea[i], sed: o.grains[F.material[i]].map((g) => g * sed) });
   }
-  return { planet, o, layout, smp, links, corners: new Map(), strips: new Map(), N: cellsPerFace(1, layout), radius: planet.mesh.radius };
+  return { planet, o, layout, smp, links, corners: new Map(), strips: new Map(), calib: new Map(), N: cellsPerFace(1, layout), radius: planet.mesh.radius };
 }
 
 // --- geometry in a frame tile's extended face coordinates ---------------------------
@@ -202,43 +211,111 @@ export function cpuGraphSolver(win) {
  * Erode a window, steering block means to the parent's (proportional-integral control
  * of erodibility, as in region.js), then correct what is left.
  */
-async function solveWindow(ctx, win, makeSolver, { gentle = false } = {}) {
+async function solveWindow(ctx, win, makeSolver, { shared = false, mask = null, steer = null } = {}) {
   const o = ctx.o;
   const dt = o.duration / o.iterations, tau = o.nudgeTime * o.duration;
   const n = win.n;
+  const keep = new Uint8Array(n);
+  for (let i = 0; i < n; i++) if (win.flags[i] & FLAG_FIXED) keep[i] = 1;
+  // adjustments (of erodibility while eroding, of elevation after) fade out towards held
+  // nodes over `taper` cells: overlapping windows then share the same erodibility where
+  // they meet, and no step is left where a free surface meets a pinned band
+  const weight = taperWeights(win.g, keep, o.taper);
+  // erodibility from the blocks' calibrations (a calibration window steers its own)
+  if (steer === null) {
+    const blocks = [...new Set(win.locIds)].sort((a, b) => a - b);
+    const lnK = new Map();
+    for (const b of blocks) lnK.set(b, await calibrate(ctx, b, makeSolver));
+    const fk = prolongBlocks(lnK, win, new Float32Array(n));
+    for (let i = 0; i < n; i++) win.K[i] *= Math.exp(fk[i]);
+  }
   const solver = await makeSolver(win);
   const land = new Uint8Array(n);
   for (let i = 0; i < n; i++) if (!(win.flags[i] & FLAG_OUTLET)) land[i] = 1;
   const target = restrictToBlocks(win.base, win.block, land);
   const K = Float32Array.from(win.K), integral = new Map(), lnMax = Math.log(o.kRange);
+  let lastLnK = 0, lnSum = 0, lnCount = 0;
   const params = { dt, m: o.m, D: o.D, eps: o.eps, G: o.G };
   for (let done = 0; done < o.iterations;) {
-    const count = Math.min(o.nudgeEvery, o.iterations - done);
+    const count = steer !== null ? Math.min(o.nudgeEvery, o.iterations - done) : o.iterations - done;
     await solver.run(count, params);
     done += count;
     if (done >= o.iterations) break;
     const z = await solver.readZ();
     const now = restrictToBlocks(z, win.block, land);
-    const lnK = new Map();
-    for (const [b, e] of now) {
-      const err = (e.sum / e.count - target.get(b).sum / target.get(b).count - (win.bias.get(b) || 0)) / o.kHeight;
-      const I = Math.max(-lnMax, Math.min(lnMax, (integral.get(b) || 0) + (err * count * dt) / tau));
-      integral.set(b, I);
-      lnK.set(b, Math.max(-lnMax, Math.min(lnMax, err + I)));
-    }
-    const fk = prolongBlocks(lnK, win, new Float32Array(n));
-    for (let i = 0; i < n; i++) K[i] = win.K[i] * Math.exp(fk[i]);
+    // one block, one number: the erodibility factor of the whole window
+    const b = steer, e = now.get(b), tg = target.get(b);
+    if (!e) break;
+    // a whole window answers a change of erodibility faster than a block among many
+    // (region.js), so the gains are lower; the factor kept is the mean over the second
+    // half of the run, not its last (still swinging) value
+    const err = (e.sum / e.count - tg.sum / tg.count - (win.bias.get(b) || 0)) / (o.calibrationHeight * o.kHeight);
+    const I = Math.max(-lnMax, Math.min(lnMax, (integral.get(b) || 0) + (err * count * dt) / (o.calibrationTime * tau)));
+    integral.set(b, I);
+    lastLnK = Math.max(-lnMax, Math.min(lnMax, err + I));
+    if (done >= o.iterations / 2) { lnSum += lastLnK; lnCount++; }
+    for (let i = 0; i < n; i++) K[i] = win.K[i] * Math.exp(lastLnK);
     await solver.setK(K);
   }
   const raw = await solver.readResult();
   solver.destroy?.();
+  if (steer !== null) return { lnK: lnCount ? lnSum / lnCount : lastLnK };
   const z = Float32Array.from(raw.z);
-  const keep = new Uint8Array(n);
-  for (let i = 0; i < n; i++) if (win.flags[i] & FLAG_FIXED) { keep[i] = 1; z[i] = win.z[i]; }
-  // strips and corners see slivers of many blocks: correct only the well-sampled ones, a few times
-  const consistency = gentle ? correctBlockMeans(z, win, keep, 4, 400, true) : correctBlockMeans(z, win, keep, o.finalPasses ?? 40, 400, true);
+  for (let i = 0; i < n; i++) if (keep[i]) z[i] = win.z[i];
+  // strips and corners are left as eroded (a correction there would differ from the
+  // tiles' where they meet); a tile corrects its free nodes, tapered towards its bands.
+  // Its block means are those over the tile itself (free nodes and the inner half of
+  // its bands), so the correction runs on that part of the window alone
+  let consistency = 0;
+  if (!shared) {
+    const sub = [];
+    for (let i = 0; i < n; i++) if (!mask || mask[i]) sub.push(i);
+    const pick = (a, k = 1) => { const out = new a.constructor(sub.length * k); sub.forEach((i, q) => { for (let t = 0; t < k; t++) out[q * k + t] = a[i * k + t]; }); return out; };
+    const zs = pick(z), ws = pick(weight), ks = pick(keep);
+    const subIn = { block: pick(win.block), locIds: pick(win.locIds, 3), locW: pick(win.locW, 3), base: pick(win.base), bias: win.bias, locK: 3 };
+    win.rawConsistency = correctBlockMeans(zs, subIn, ks, 0, 400, true, ws);
+    consistency = correctBlockMeans(zs, subIn, ks, o.finalPasses ?? 40, 400, true, ws);
+    sub.forEach((i, q) => { z[i] = zs[q]; });
+  }
   for (let i = 0; i < n; i++) if ((win.flags[i] & FLAG_OUTLET) && !(win.flags[i] & FLAG_FIXED) && z[i] > -0.5) z[i] = -0.5;
-  return { ...win, z, rec: Int32Array.from(raw.rec), recDist: Float32Array.from(raw.recDist), A: Float32Array.from(raw.A), Qs: Float32Array.from(raw.Qs), dep: raw.dep ? Float32Array.from(raw.dep) : null, consistency, iterations: raw.iterations };
+  return { ...win, rawConsistency: win.rawConsistency, z, rec: Int32Array.from(raw.rec), recDist: Float32Array.from(raw.recDist), A: Float32Array.from(raw.A), Qs: Float32Array.from(raw.Qs), dep: raw.dep ? Float32Array.from(raw.dep) : null, consistency, iterations: raw.iterations };
+}
+
+/** min(1, hops / taper) from the nearest held node, by breadth-first search on the graph. */
+function taperWeights(g, keep, taper) {
+  const n = g.n, hops = new Int32Array(n).fill(-1), queue = new Int32Array(n);
+  let head = 0, tail = 0;
+  for (let i = 0; i < n; i++) if (keep[i]) { hops[i] = 0; queue[tail++] = i; }
+  while (head < tail) {
+    const i = queue[head++];
+    if (hops[i] >= taper) continue;
+    for (let e = g.off[i]; e < g.off[i + 1]; e++) { const j = g.nbr[e]; if (hops[j] < 0) { hops[j] = hops[i] + 1; queue[tail++] = j; } }
+  }
+  return Float32Array.from(hops, (h) => (h < 0 ? 1 : Math.min(1, h / taper)));
+}
+
+/**
+ * The erodibility factor (log) of planet cell b: steered so the block's mean matches
+ * the parent's, in a window centred on the cell with an open ring at the parent's
+ * elevation (computed once per block).
+ */
+function calibrate(ctx, b, makeSolver) {
+  if (ctx.calib.has(b)) return ctx.calib.get(b);
+  const job = (async () => {
+    const P = ctx.planet.mesh.pos, c = [P[3 * b], P[3 * b + 1], P[3 * b + 2]];
+    if (ctx.smp.sample(c).e < -200) return 0; // open sea: nothing to erode
+    const frame = tileAt(1, c[0], c[1], c[2], ctx.layout);
+    const [ac, bc] = extendedFace(frame.face, c);
+    const h = cellSize(ctx), cellM = (h * Math.PI / 2) * ctx.radius;
+    const R = Math.max(8, Math.round((ctx.o.calibration * ctx.planet.mesh.spacing) / cellM)), mg = ctx.o.margin;
+    const rect = { a0: ac - (R + mg) * h, a1: ac + (R + mg) * h, b0: bc - (R + mg) * h, b1: bc + (R + mg) * h };
+    const win = buildWindow(ctx, frame, rect, (fa, fb) => (Math.abs(fa - ac) > R * h || Math.abs(fb - bc) > R * h ? 'open' : 'free'));
+    parentInflows(ctx, win);
+    const { lnK } = await solveWindow(ctx, win, makeSolver, { steer: b });
+    return lnK;
+  })();
+  ctx.calib.set(b, job);
+  return job;
 }
 
 // --- corners, strips, tiles -------------------------------------------------------
@@ -253,7 +330,7 @@ export async function cornerPatch(ctx, tile, name, makeSolver = cpuGraphSolver) 
     const rect = { a0: ac - (R + margin) * h, a1: ac + (R + margin) * h, b0: bc - (R + margin) * h, b1: bc + (R + margin) * h };
     const win = buildWindow(ctx, cc.tile, rect, (fa, fb) => (Math.abs(fa - ac) > R * h || Math.abs(fb - bc) > R * h ? 'open' : 'free'));
     parentInflows(ctx, win);
-    const sol = await solveWindow(ctx, win, makeSolver, { gentle: true });
+    const sol = await solveWindow(ctx, win, makeSolver, { shared: true });
     sol.key = cc.key;
     sol.coreIds = [];
     for (let i = 0; i < sol.n; i++) if (Math.abs(sol.fab[2 * i] - ac) <= core * h && Math.abs(sol.fab[2 * i + 1] - bc) <= core * h) sol.coreIds.push(sol.ids[i]);
@@ -284,7 +361,7 @@ export async function edgeStrip(ctx, tile, side, makeSolver = cpuGraphSolver) {
     const win = buildWindow(ctx, C, rect, (fa, fb) => (Math.abs(across(fa, fb)) > Ws * h || along(fa, fb) < lo - core * h || along(fa, fb) > hi + core * h ? 'open' : 'free'));
     for (const c of corners) pinFrom(win, c, c.coreIds);
     parentInflows(ctx, win);
-    const sol = await solveWindow(ctx, win, makeSolver, { gentle: true });
+    const sol = await solveWindow(ctx, win, makeSolver, { shared: true });
     sol.key = ce.key;
     sol.canonical = C; sol.side = sC;
     const coreSet = new Set(corners.flatMap((c) => c.coreIds));
@@ -324,7 +401,11 @@ export async function meshRegionTile(ctx, addr, makeSolver = cpuGraphSolver) {
   const win = buildWindow(ctx, addr, rect, (fa, fb) => (fa < r.a0 - bandOut || fa > r.a0 + r.size + bandOut || fb < r.b0 - bandOut || fb > r.b0 + r.size + bandOut ? 'open' : 'free'));
   for (const c of corners) pinFrom(win, c, c.coreIds);
   for (const s of SIDES) pinFrom(win, strips[s], strips[s].bandIds);
-  const sol = await solveWindow(ctx, win, makeSolver);
+  const inTile = Uint8Array.from({ length: win.n }, (_, i) => {
+    const fa = win.fab[2 * i], fb = win.fab[2 * i + 1];
+    return fa >= r.a0 && fa <= r.a0 + r.size && fb >= r.b0 && fb <= r.b0 + r.size ? 1 : 0;
+  });
+  const sol = await solveWindow(ctx, win, makeSolver, { mask: inTile });
   const out = finishMeshTile(ctx, addr, sol, strips, corners);
   out.borders = {};
   for (const s of SIDES) out.borders[s] = await meshSideBorder(ctx, addr, s, makeSolver);
@@ -458,9 +539,9 @@ function finishMeshTile(ctx, addr, sol, strips, corners) {
     addr, n, nodes: m, dx: meanSpacing(sol), mesh: true,
     fields: { elevation, uplift, precip, material, drainageArea: area, temperature, sediment: sed },
     drainage: { receiver, area, nx: m, dx: meanSpacing(sol) },
-    stats: { ...stats, consistency },
+    stats: { ...stats, consistency, beforeCorrection: sol.rawConsistency },
     rivers,
-    solution: { n: sol.n, ids: sol.ids, z: sol.z, rec: sol.rec, A: sol.A, pinned: sol.pinned, inTile },
+    solution: { n: sol.n, ids: sol.ids, z: sol.z, rec: sol.rec, A: sol.A, pinned: sol.pinned, inTile, g: sol.g, base: sol.base, flags: sol.flags },
     strips: Object.fromEntries(SIDES.map((s) => [s, strips[s].key])),
   };
 }

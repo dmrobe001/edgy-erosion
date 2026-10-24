@@ -359,6 +359,12 @@ export function landscapeInput(parent, ctx, addr, events, options = {}, layout =
     }
     else { flags[bj * nx + bi] = 3; exits.push([bi, bj]); }
   }
+  // a tile no river leaves and no sea touches drains through its lowest border node
+  if (!exits.length && !flags.some((f, c) => (f & 1) && !(f & 2))) {
+    let low = -1;
+    for (const side of SIDES) for (let t = 1; t < n; t++) { const [bi, bj] = sideNode(side, t, n); const c = bj * nx + bi; if (low < 0 || z[c] < z[low]) low = c; }
+    flags[low] = 3; exits.push([low % nx, Math.floor(low / nx)]);
+  }
   // pinned rivers (design): each inflowing river is pre-carved along the parent's
   // drainage path from where it enters to where that path leaves the tile, ending at
   // the outflow crossing nearest to that point
