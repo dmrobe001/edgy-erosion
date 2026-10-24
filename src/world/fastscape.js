@@ -66,14 +66,14 @@ export class RasterSolver {
    * @param {Uint8Array} outlet 1 where water leaves
    * @param {Uint8Array} [fixed]
    */
-  route(z, outlet, fixed) {
-    if (this.routeDescent(z, outlet, fixed)) { this.flooded = false; return this; }
+  route(z, outlet, fixed, rho) {
+    if (this.routeDescent(z, outlet, fixed, rho)) { this.flooded = false; return this; }
     this.flooded = true;
-    return this.routeFlood(z, outlet, fixed);
+    return this.routeFlood(z, outlet, fixed, rho);
   }
 
   /** Steepest-descent receivers; returns false if some cell has no path to an outlet. */
-  routeDescent(z, outlet, fixed) {
+  routeDescent(z, outlet, fixed, rho) {
     const { nx, ny, receiver, recDist, order, nbOff, nbDist } = this;
     const n = this.size;
     const count = this._count || (this._count = new Int32Array(n + 1));
@@ -95,7 +95,8 @@ export class RasterSolver {
           }
           const j = i + nbOff[k];
           if (fixed && fixed[j] && !outlet[j]) continue;
-          const sl = (z[i] - z[j]) / nbDist[k];
+          // with rho (Rho8), diagonal slopes are weighed by rho[i] instead of sqrt 2
+          const sl = (z[i] - z[j]) / (rho && k >= 4 ? this.dx * rho[i] : nbDist[k]);
           if (sl > best) { best = sl; receiver[i] = j; recDist[i] = nbDist[k]; }
         }
         if (receiver[i] === i) return false; // a pit
@@ -122,7 +123,7 @@ export class RasterSolver {
    * @param {Float64Array} z
    * @param {Uint8Array} outlet 1 where water leaves
    */
-  routeFlood(z, outlet, fixed) {
+  routeFlood(z, outlet, fixed, rho) {
     const { nx, ny, receiver, recDist, order, level, visited, heap, nbOff, nbDist } = this;
     const n = this.size;
     visited.fill(0);
@@ -152,7 +153,7 @@ export class RasterSolver {
           if (a < 0 || a >= nx || b < 0 || b >= ny) continue;
           const j = i + nbOff[k];
           if (!done[j] || j === i || (fixed && fixed[j] && !outlet[j])) continue;
-          const s = (z[i] - z[j]) / nbDist[k];
+          const s = (z[i] - z[j]) / (rho && k >= 4 ? this.dx * rho[i] : nbDist[k]);
           if (s > best) { best = s; br = j; bd = nbDist[k]; }
         }
         receiver[i] = br; recDist[i] = bd;

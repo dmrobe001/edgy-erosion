@@ -30,6 +30,7 @@ struct Params { nx: u32, ny: u32, dx: f32, dt: f32, m: f32, eps: f32, kd: f32, b
 @group(0) @binding(10) var<storage, read> K: array<f32>;
 @group(0) @binding(11) var<storage, read> R: array<f32>;
 @group(0) @binding(12) var<storage, read> flags: array<u32>;
+@group(0) @binding(13) var<storage, read> rho: array<f32>;
 
 const OFF = array<vec2<i32>, 8>(${off});
 const OPP = array<i32, 8>(${opp});
@@ -80,7 +81,9 @@ fn receivers(@builtin(global_invocation_id) g: vec3<u32>) {
       if (!inside(a, b)) { continue; }
       let q = idx(a, b);
       if (blocked(q)) { continue; }
-      let s = (w[c] - w[q]) / dist(k);
+      var d = p.dx;
+      if (k >= 4) { d = p.dx * rho[c]; }
+      let s = (w[c] - w[q]) / d;
       if (s > best) { best = s; r = k; }
     }
   }
@@ -140,7 +143,7 @@ fn restart(@builtin(global_invocation_id) g: vec3<u32>) {
 const USES = {
   uplift: [0, 1, 2, 9, 12],
   fill: [0, 1, 2, 3, 12],
-  receivers: [0, 2, 4, 12],
+  receivers: [0, 2, 4, 12, 13],
   area: [0, 4, 5, 6, 11],
   erodeInit: [0, 2, 4, 7, 9, 12],
   erode: [0, 1, 2, 4, 5, 7, 8, 10, 12],
@@ -176,12 +179,13 @@ export function gpuSolver(device, input) {
     z: buf(input.z), wA: buf(wInit), wB: buf(), rec: buf(new Int32Array(n).fill(-1), Int32Array),
     aA: buf(new Float32Array(n)), aB: buf(), zA: buf(), zB: buf(),
     U: buf(input.U), K: buf(input.K), R: buf(input.runoff), flags: buf(input.flags, Uint32Array),
+    rho: buf(input.rho || new Float32Array(n).fill(Math.SQRT2)),
   };
   const params = device.createBuffer({ size: 32, usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST });
   const module = device.createShaderModule({ code: shaderSource() });
   const pipes = {};
   for (const name of Object.keys(USES)) pipes[name] = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: name } });
-  const slots = (o) => ({ 0: params, 1: B.z, 2: o.w, 3: o.w2, 4: B.rec, 5: o.A, 6: o.A2, 7: o.zr, 8: o.zr2, 9: B.U, 10: B.K, 11: B.R, 12: B.flags });
+  const slots = (o) => ({ 0: params, 1: B.z, 2: o.w, 3: o.w2, 4: B.rec, 5: o.A, 6: o.A2, 7: o.zr, 8: o.zr2, 9: B.U, 10: B.K, 11: B.R, 12: B.flags, 13: B.rho });
   const base = { w: B.wA, w2: B.wB, A: B.aA, A2: B.aB, zr: B.zA, zr2: B.zB };
   const AB = slots(base);
   // the flipped group swaps only the pair a ping-pong kernel writes

@@ -10,7 +10,7 @@ import { Planet, MATERIAL_NAMES } from '../planet.js';
 import { MinHeap } from '../flow.js';
 import { worldKey, deriveKey } from './hash.js';
 
-export const GENERATOR_VERSION = 'hg-0.1';
+export const GENERATOR_VERSION = 'hg-0.2';
 
 /**
  * Level-0 settings. The defaults run in about 9 s in Node or a Chromium worker on one
@@ -24,6 +24,7 @@ export const L0_DEFAULTS = {
   upliftWindow: 1e7,             // yr: uplift is averaged over the last part of the history
   riverArea: 2e11,               // m^2: drainage area at which a level-0 river is recorded
   lapseRate: 0.0065,             // K per m
+  glaciation: { time: 2e4, duration: 1e5, cooling: 6 }, // the last glacial maximum (see packPlanet)
   planet: {
     surfaceProcesses: false,
     crust: { maxFlowSubsteps: 8, flowThreshold: 55000, maxThickness: 70000 },
@@ -85,6 +86,7 @@ function packPlanet(planet, { o, key, worldSeed, upliftSum, windowSteps }) {
     temperature[i] = seaLevelTemperature(mesh.lat[i]) - o.lapseRate * Math.max(0, elevation[i]);
   }
   const material = planet.material();
+  removePinholes(mesh, elevation, material, temperature, o.lapseRate);
   const { area, receiver, order } = drainage(mesh, elevation);
   for (let i = 0; i < n; i++) {
     // [conjecture] a placeholder until a weathering model runs at level 1: deeper where
@@ -95,13 +97,18 @@ function packPlanet(planet, { o, key, worldSeed, upliftSum, windowSteps }) {
     regolith[i] = 10 * warm * wet * Math.exp(-elevation[i] / 2000);
   }
   const T = planet.time;
-  const events = planet.eventLog().map((e) => ({
+  // [adapted] the last glacial maximum, as a climate event every world shares: about
+  // 20 kyr ago, 6 K colder than now for about 100 kyr. Levels below decide where it was
+  // cold enough for ice (design: glacial carving only where the log has a glaciation
+  // within the relaxation time of valley forms).
+  const climate = [{ kind: 'glaciation', time: o.glaciation.time, duration: o.glaciation.duration, region: { type: 'global' }, params: { cooling: o.glaciation.cooling } }];
+  const events = climate.concat(planet.eventLog().map((e) => ({
     kind: e.kind,
     time: T - e.end,             // years before present that it ended (0: still active)
     duration: e.end - e.start,
     region: { type: 'cap', center: e.center, radius: e.radius },
     params: { plateA: e.plates[0], plateB: e.plates[1], cells: e.cells },
-  }));
+  })));
   return {
     version: GENERATOR_VERSION,
     worldSeed: String(worldSeed),
@@ -118,6 +125,45 @@ function packPlanet(planet, { o, key, worldSeed, upliftSum, windowSteps }) {
     materialNames: MATERIAL_NAMES,
     stats: { ...planet.stats(), duration: T, cells: n, spacing: mesh.spacing },
   };
+}
+
+/**
+ * The plate model leaves about 1% of cells as pinholes of ocean floor inside continents
+ * (where its nearest-neighbour look-up consumed a plate cell in a collision zone; see
+ * docs/PLAN.md). Here, when the planet is packed, a sea cell with at most two sea
+ * neighbours (and at least four land ones) takes the mean elevation and the commonest
+ * material of its land neighbours; three passes, so pairs and triples close too.
+ */
+function removePinholes(mesh, elevation, material, temperature, lapse) {
+  let total = 0;
+  for (let pass = 0; pass < 3; pass++) {
+    const k = removePinholesOnce(mesh, elevation, material, temperature, lapse);
+    total += k;
+    if (!k) break;
+  }
+  return total;
+}
+
+function removePinholesOnce(mesh, elevation, material, temperature, lapse) {
+  const n = mesh.size, nb = mesh.neighbors;
+  const fix = [];
+  for (let i = 0; i < n; i++) {
+    if (elevation[i] > 0) continue;
+    let sea = 0, land = 0, sum = 0;
+    const count = new Int32Array(8);
+    for (let k = 0; k < mesh.valence[i]; k++) {
+      const j = nb[6 * i + k];
+      if (j < 0) continue;
+      if (elevation[j] > 0) { land++; sum += elevation[j]; count[material[j]]++; } else sea++;
+    }
+    if (sea <= 2 && land >= 4) fix.push([i, sum / land, count.indexOf(Math.max(...count))]);
+  }
+  for (const [i, z, m] of fix) {
+    temperature[i] += lapse * (Math.max(0, elevation[i]) - z);
+    elevation[i] = z;
+    material[i] = m;
+  }
+  return fix.length;
 }
 
 /**

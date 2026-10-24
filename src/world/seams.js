@@ -47,6 +47,10 @@ export function sideNode(side, t, n) {
  * @param {{from:number[], to:number[], area:number, id:number}[]} o.links the parent's drainage links (unit vectors)
  * @param {number} o.linkSpacing typical length of a parent link (m)
  * @param {number} o.radius planet radius (m)
+ * @param {(C:object, sC:string, pos:number[][]) => ({z:Float32Array, crossings:object[]}|null)} [o.edgeOverride]
+ *   for edges that must come from somewhere other than the parent's interior (an edge
+ *   lying on the parent's own seam takes that seam's record); null to use the default
+ * @param {(tile:object, corner:string, pos:number[]) => (number|null)} [o.cornerOverride] likewise for corners
  */
 export function seamContext(o) {
   return { layout: WORLD_LAYOUT, cache: new Map(), ...o, n: (o.layout || WORLD_LAYOUT).tileCells };
@@ -66,9 +70,21 @@ function cornerRecord(ctx, addr, corner) {
     const d = (p[0] - me[0]) ** 2 + (p[1] - me[1]) ** 2 + (p[2] - me[2]) ** 2;
     if (d < best) { best = d; pos = p; }
   }
-  const rec = { key, pos, z: ctx.elevation(pos) };
+  const over = ctx.cornerOverride ? ctx.cornerOverride(c0, nameAt(c0, pos, ctx), pos) : null;
+  const rec = { key, pos, z: over ?? ctx.elevation(pos) };
   ctx.cache.set(key, rec);
   return rec;
+}
+
+function nameAt(tile, pos, ctx) {
+  const n = ctx.n;
+  let best = null, bd = Infinity;
+  for (const nm of Object.keys(CORNER_NODE)) {
+    const p = nodePosition(tile, n, CORNER_NODE[nm][0] * n, CORNER_NODE[nm][1] * n, undefined, ctx.layout);
+    const d = dist2(p, pos);
+    if (d < bd) { bd = d; best = nm; }
+  }
+  return best;
 }
 
 function sideToward(tile, other, layout) {
@@ -97,8 +113,19 @@ export function edgeRecord(ctx, addr, side) {
     pos.push(p);
     z[t] = ctx.elevation(p);
   }
+  const over = ctx.edgeOverride ? ctx.edgeOverride(C, sC, pos) : null;
+  if (over) {
+    // keep the shared corners exact
+    over.z[0] = cs.z; over.z[n] = ce.z;
+    const rec = { key, canonical: tileKey(C), other: tileKey(D), side: sC, pos, z: over.z, crossings: over.crossings };
+    ctx.cache.set(key, rec);
+    return rec;
+  }
   const crossings = findCrossings(ctx, C, sC, key);
+  if (ctx.minorSpacing > 0) crossings.push(...minorCrossings(ctx, C, sC, z, crossings));
+  crossings.sort((x, y) => x.node - y.node);
   for (const x of crossings) {
+    if (x.minor) continue; // a minor crossing sits at a low point of the profile already
     // the notch: the river's level, below the parent's smooth surface
     const notch = ctx.base(pos[x.node]) - ctx.notchDepth(pos[x.node]);
     x.z = Math.fround(Math.min(notch, ...Array.from(z.subarray(Math.max(1, x.node - 2), Math.min(n, x.node + 3)))));
@@ -130,8 +157,10 @@ function findCrossings(ctx, C, sC, edgeKeyStr) {
     const p = toGnomonic(C.face, ...L.from), q = toGnomonic(C.face, ...L.to);
     if (!p || !q) continue;
     const pa = horizontal ? p[1] : p[0], qa = horizontal ? q[1] : q[0]; // across the edge
-    if ((pa - g0) * (qa - g0) >= 0) continue;
-    const lam = (g0 - pa) / (qa - pa);
+    // an end point exactly on the line counts as being on its far (+) side, so a river
+    // passing through a node that lies on the edge is seen crossing exactly once
+    if ((pa >= g0) === (qa >= g0)) continue;
+    const lam = qa === pa ? 0 : (g0 - pa) / (qa - pa);
     const along = horizontal ? p[0] + lam * (q[0] - p[0]) : p[1] + lam * (q[1] - p[1]);
     if (along <= lo || along >= hi) continue;
     // node along the edge, in C's increasing direction, jittered within the link's span
@@ -139,7 +168,7 @@ function findCrossings(ctx, C, sC, edgeKeyStr) {
     const span = Math.max(0, Math.min(0.25, (0.5 * ctx.linkSpacing) / edgeLen));
     const jitter = (uniform(key, L.id) - 0.5) * span;
     const node = Math.max(3, Math.min(n - 3, Math.round((t + jitter) * n)));
-    const intoC = (qa - g0) * outward < 0; // flows from beyond the edge into C
+    const intoC = outward > 0 ? qa < g0 : qa >= g0; // flows from beyond the edge into C
     found.push({ node, area: L.area, inflowToCanonical: intoC, links: [L.id] });
   }
   // merge crossings closer than 4 nodes (the larger river's place wins); areas of
@@ -152,6 +181,39 @@ function findCrossings(ctx, C, sC, edgeKeyStr) {
     if (near.inflowToCanonical === x.inflowToCanonical) { near.area += x.area; near.links.push(...x.links); }
   }
   return kept.sort((x, y) => x.node - y.node);
+}
+
+/**
+ * Minor crossings: streams too small for the parent's drainage tree, which would
+ * otherwise turn every tile edge into a straight divide. At low points of the edge
+ * profile (lowest within minorSpacing / 2 nodes either way, and minorSpacing from any
+ * other crossing) a stream crosses, flowing from the side where the parent's surface
+ * stands higher; it drains a strip about minorSpacing wide and as long as it is wide.
+ */
+function minorCrossings(ctx, C, sC, z, existing) {
+  const n = ctx.n, w = Math.max(2, Math.floor(ctx.minorSpacing / 2));
+  const out = [];
+  const taken = existing.map((x) => x.node);
+  const inward = { W: [1, 0], E: [-1, 0], S: [0, 1], N: [0, -1] }[sC];
+  const step = Math.max(2, Math.round(ctx.minorSpacing / 4));
+  const r = tileRect(C, ctx.layout);
+  const dx = (r.size * Math.PI / 2) * ctx.radius / n;
+  for (let t = w; t <= n - w; t++) {
+    let low = true;
+    for (let k = t - w; k <= t + w && low; k++) if (k !== t && z[k] < z[t]) low = false;
+    if (!low || taken.some((u) => Math.abs(u - t) < ctx.minorSpacing)) continue;
+    const [ci, cj] = sideNode(sC, t, n);
+    const inside = ctx.base(nodePosition(C, n, ci + step * inward[0], cj + step * inward[1], undefined, ctx.layout));
+    const outside = ctx.base(nodePosition(C, n, ci - step * inward[0], cj - step * inward[1], undefined, ctx.layout));
+    if (inside === outside) continue;
+    // a small stream crosses near the parent's surface, not at the bottom of a noise
+    // trough (which would drop base level along the whole edge)
+    const p = nodePosition(C, n, ci, cj, undefined, ctx.layout);
+    z[t] = Math.fround(Math.max(z[t], ctx.base(p) - 0.5 * ctx.notchDepth(p)));
+    out.push({ node: t, area: (ctx.minorSpacing * dx) ** 2, inflowToCanonical: outside > inside, links: [], minor: true, z: z[t] });
+    taken.push(t);
+  }
+  return out;
 }
 
 /**
@@ -172,7 +234,7 @@ export function tileBorder(ctx, addr) {
     for (let t = 0; t <= n; t++) z[t] = rec.z[reversed ? n - t : t];
     const mine = tileKey(addr) === rec.canonical;
     const crossings = rec.crossings.map((x) => ({
-      node: reversed ? n - x.node : x.node, area: x.area, z: x.z, links: x.links,
+      node: reversed ? n - x.node : x.node, area: x.area, z: x.z, links: x.links, minor: !!x.minor,
       inflow: mine ? x.inflowToCanonical : !x.inflowToCanonical,
     }));
     out[side] = { key: rec.key, z, crossings };

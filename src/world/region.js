@@ -14,11 +14,13 @@
 
 import { nodePosition, WORLD_LAYOUT } from './cubesphere.js';
 import { seamContext, tileBorder, sideNode, SIDES, locateInTile } from './seams.js';
-import { worldKey, deriveKey } from './hash.js';
+import { worldKey, deriveKey, uniform } from './hash.js';
 import { fbm3k } from './noise.js';
 import { JacobiSolver, FLAG_OUTLET, FLAG_FIXED } from './jacobi.js';
 import { drainageStatistics, extractRiverGraph } from './rivers.js';
 import { RasterSolver } from './fastscape.js';
+
+const LAPSE = 0.0065; // K per m, as at level 0
 
 export const REGION_DEFAULTS = {
   halo: 16,                     // cells computed around the tile and discarded
@@ -36,29 +38,71 @@ export const REGION_DEFAULTS = {
   nudgeTime: 0.1,               // integral timescale of that control, as a fraction of the duration
   kHeight: 100,                 // m of block-mean error that changes erodibility by a factor e
   kRange: 1000,                 // erodibility may be scaled by 1/kRange ... kRange
+  minorSpacing: 0,              // nodes between minor stream crossings of tile edges (0: none; see docs/PLAN.md)
 };
 
 /**
  * What the planet says at a unit vector, for level 1: smooth fields interpolated
  * barycentrically, and the initial elevation with subgrid noise.
  */
-export function regionSampler(planet, options = {}) {
+export function regionSampler(planet, options = {}, { warmStart = true } = {}) {
   const o = { ...REGION_DEFAULTS, ...options, relief: { ...REGION_DEFAULTS.relief, ...(options.relief || {}) } };
   const mesh = planet.mesh, R = mesh.radius, F = planet.fields;
   const noiseKey = deriveKey(worldKey(planet.worldSeed), 1, 0x6e6f6973); // one field for the whole level
   let hint = -1;
   const amplitude = (e) => o.relief.base + o.relief.perMetre * Math.max(0, e);
+  // smooth interpolation: a Gaussian-weighted mean over the nearest cell's two rings of
+  // neighbours (sigma 0.5 cell spacings). Linear interpolation on the triangles would
+  // leave straight creases along every triangle edge, 160 km long.
+  const sig2 = 2 * (0.5 * mesh.spacing / R) ** 2;
+  const rings = new Map();
+  const ringsOf = (cell) => {
+    let r = rings.get(cell);
+    if (r) return r;
+    const set = new Set([cell]);
+    for (let pass = 0; pass < 2; pass++) for (const c of [...set]) for (let k = 0; k < mesh.valence[c]; k++) { const j = mesh.neighbors[6 * c + k]; if (j >= 0) set.add(j); }
+    r = Int32Array.from([...set].sort((a, b) => a - b));
+    rings.set(cell, r);
+    return r;
+  };
+  const Pm = mesh.pos;
+  // first-order correction of the smoothing, per planet cell (cached per planet): the
+  // cell's bias (its value minus the plain smooth field's mean over it) is interpolated
+  // with the same kernel and added, which restores most of what smoothing takes off
+  // peaks and adds to basins
+  if (!biasCache.has(planet)) biasCache.set(planet, new Map());
+  const biases = biasCache.get(planet);
+  const cellBias = (j) => {
+    let b = biases.get(j);
+    if (b === undefined) { b = F.elevation[j] - quadrature(j, (p) => plain(p)); biases.set(j, b); }
+    return b;
+  };
+  function plain(v) {
+    const loc = mesh.locate(v[0], v[1], v[2], -1);
+    let e = 0, wsum = 0;
+    for (const id of ringsOf(loc.cell)) {
+      const wgt = Math.exp(-((Pm[3 * id] - v[0]) ** 2 + (Pm[3 * id + 1] - v[1]) ** 2 + (Pm[3 * id + 2] - v[2]) ** 2) / sig2);
+      wsum += wgt; e += wgt * F.elevation[id];
+    }
+    return e / wsum;
+  }
   function sample(v) {
-    const loc = mesh.locate(v[0], v[1], v[2], hint);
-    hint = loc.cell;
-    let e = 0, u = 0, p = 0, k = 0;
-    for (let t = 0; t < 3; t++) {
-      const id = loc.ids[t], wgt = loc.weights[t];
-      e += wgt * F.elevation[id];
+    // warm-starting the mesh walk from the last point is only for speed; records shared
+    // between tiles start cold, so nothing depends on which tile asked first
+    const loc = mesh.locate(v[0], v[1], v[2], warmStart ? hint : -1);
+    if (warmStart) hint = loc.cell;
+    let e = 0, u = 0, p = 0, k = 0, tsl = 0, wsum = 0;
+    for (const id of ringsOf(loc.cell)) {
+      const dxv = Pm[3 * id] - v[0], dyv = Pm[3 * id + 1] - v[1], dzv = Pm[3 * id + 2] - v[2];
+      const wgt = Math.exp(-(dxv * dxv + dyv * dyv + dzv * dzv) / sig2);
+      wsum += wgt;
+      e += wgt * (F.elevation[id] + cellBias(id));
       u += wgt * F.uplift[id];
       p += wgt * F.precip[id];
       k += wgt * o.materialK[F.material[id]];
+      tsl += wgt * (F.temperature[id] + LAPSE * Math.max(0, F.elevation[id])); // at sea level
     }
+    e /= wsum; u /= wsum; p /= wsum; k /= wsum; tsl /= wsum;
     // subgrid relief: rougher where the planet's surface stands higher. It is damped,
     // not removed, near sea level: enough to give the coast bays and headlands, while
     // the planet's coastline stays where it was on average
@@ -66,18 +110,38 @@ export function regionSampler(planet, options = {}) {
     const noise = fbm3k(noiseKey, v[0] * R, v[1] * R, v[2] * R, o.relief.wavelength, o.relief.octaves, o.relief.gain);
     const coastFade = Math.min(1, 0.5 + Math.abs(e) / (2 * amp));
     const z = Math.fround(e + amp * noise * coastFade);
-    return { loc, e, u, p, k, z, amp };
+    return { loc, e, u, p, k, z, amp, tsl };
   }
-  return { sample, amplitude, options: o };
+  /**
+   * How far the smooth field's mean over planet cell b falls from the cell's own value
+   * (13-point quadrature: centre, and points 0.4 and 0.8 of the way to each edge
+   * midpoint, weighted by the area they stand for). Smoothing flattens peaks and fills
+   * basins; this bias is added to each block's target, so a child that matches its
+   * targets gives back the parent exactly where it covers a whole cell.
+   */
+  function quadrature(b, f) {
+    const c = [Pm[3 * b], Pm[3 * b + 1], Pm[3 * b + 2]];
+    const along = (a, d, t) => { const x = a[0] + t * (d[0] - a[0]), y = a[1] + t * (d[1] - a[1]), z = a[2] + t * (d[2] - a[2]); const L = Math.hypot(x, y, z); return [x / L, y / L, z / L]; };
+    let q = 0.04 * f(c), ring = 0;
+    const mids = [];
+    for (let k = 0; k < mesh.valence[b]; k++) { const j = mesh.neighbors[6 * b + k]; if (j >= 0) mids.push(along(c, [Pm[3 * j], Pm[3 * j + 1], Pm[3 * j + 2]], 0.5)); }
+    for (const mp of mids) ring += 0.32 * f(along(c, mp, 0.4)) + 0.64 * f(along(c, mp, 0.8));
+    return q + ring / mids.length;
+  }
+  function blockBias(b) {
+    return F.elevation[b] - quadrature(b, (p) => sample(p).e);
+  }
+  return { sample, amplitude, blockBias, options: o };
 }
 
 const seamCache = new WeakMap();
+const biasCache = new WeakMap();
 
 /** The seam context of level-1 tiles under a planet (records are cached per planet: they are pure). */
 export function regionSeams(planet, options = {}, layout = WORLD_LAYOUT, { fresh = false } = {}) {
   const k = JSON.stringify([options, layout]);
   if (!fresh && seamCache.get(planet)?.has(k)) return seamCache.get(planet).get(k);
-  const smp = regionSampler(planet, options);
+  const smp = regionSampler(planet, options, { warmStart: false });
   const P = planet.mesh.pos, rec = planet.flow.receiver, area = planet.fields.drainageArea;
   const links = [];
   for (let i = 0; i < rec.length; i++) {
@@ -87,6 +151,7 @@ export function regionSeams(planet, options = {}, layout = WORLD_LAYOUT, { fresh
   }
   const ctx = seamContext({
     level: 1, worldSeed: planet.worldSeed, layout, radius: planet.mesh.radius, linkSpacing: planet.mesh.spacing, links,
+    minorSpacing: smp.options.minorSpacing,
     elevation: (v) => smp.sample(v).z,
     base: (v) => smp.sample(v).e,
     notchDepth: (v) => 0.5 * smp.amplitude(smp.sample(v).e),
@@ -129,6 +194,7 @@ export function regionInput(planet, addr, options = {}, layout = WORLD_LAYOUT, s
   // the parent's view of each node: its planet cell (block), barycentric interpolation
   // weights, and the interpolated smooth elevation (what the parent says, before noise)
   const block = new Int32Array(N), locIds = new Int32Array(3 * N), locW = new Float32Array(3 * N), base = new Float32Array(N);
+  const tempSL = new Float32Array(N);
   const v = [0, 0, 0];
   for (let cj = 0; cj < ny; cj++) {
     for (let ci = 0; ci < nx; ci++) {
@@ -140,6 +206,7 @@ export function regionInput(planet, addr, options = {}, layout = WORLD_LAYOUT, s
       block[c] = sm.loc.cell;
       for (let t = 0; t < 3; t++) { locIds[3 * c + t] = sm.loc.ids[t]; locW[3 * c + t] = sm.loc.weights[t]; }
       base[c] = sm.e;
+      tempSL[c] = sm.tsl;
       z[c] = sm.z;
       U[c] = sm.u;
       P[c] = Math.max(0.05, sm.p / 1000);
@@ -176,6 +243,7 @@ export function regionInput(planet, addr, options = {}, layout = WORLD_LAYOUT, s
       const [bi, bj] = sideNode(side, x.node, n);
       const ii = bi + inward[side][0], jj = bj + inward[side][1];
       inflow[idx(ii, jj)] += x.area;
+      if (x.minor) continue; // a minor stream finds its own way
       // the parent's path from here: follow its drainage links while inside the tile
       const path = [[ii, jj]];
       let cell = rec[x.links[0]], link = x.links[0], end = -1;
@@ -192,9 +260,47 @@ export function regionInput(planet, addr, options = {}, layout = WORLD_LAYOUT, s
       carve(z, flags, nx, path, x.z, dx);
     }
   }
+  // sea is only sea if it reaches the open sea: below-sea-level nodes connected to a sea
+  // node of the border (or to the halo's edge), or a body larger than 2% of the tile.
+  // Anything else is a closed depression (it fills as a lake), not a sink in the land.
+  {
+    const label = new Int32Array(N).fill(-1);
+    const stack = [];
+    for (let c0 = 0; c0 < N; c0++) {
+      if (label[c0] >= 0 || !(z[c0] <= 0)) continue;
+      const members = [];
+      let open = false;
+      label[c0] = c0; stack.push(c0);
+      while (stack.length) {
+        const c = stack.pop();
+        members.push(c);
+        const ci = c % nx, cj = (c - ci) / nx;
+        if (flags[c] & FLAG_FIXED) open = true;
+        for (const [di, dj] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+          const a2 = ci + di, b2 = cj + dj;
+          if (a2 < 0 || b2 < 0 || a2 >= nx || b2 >= ny) continue;
+          const q = b2 * nx + a2;
+          if (label[q] < 0 && z[q] <= 0) { label[q] = c0; stack.push(q); }
+        }
+      }
+      const sea = open || members.length > 0.02 * N;
+      for (const c of members) {
+        if (flags[c] & FLAG_FIXED) continue;
+        if (sea) flags[c] |= FLAG_OUTLET; else flags[c] &= ~FLAG_OUTLET;
+      }
+    }
+  }
+  // Rho8 (Fairfield & Leymarie 1991, Water Resour. Res. 27): a random weight per node
+  // on diagonal slopes when choosing receivers, which removes the straight parallel
+  // channels that plain steepest descent draws at 0 and 45 degrees
+  const rho = new Float32Array(N);
+  for (let c = 0; c < N; c++) rho[c] = Math.fround(2 - uniform(key, c, 0, 0x72686f38));
+  // each block's target bias (see blockBias): targets are the smooth field's means plus this
+  const bias = new Map();
+  for (const bk of new Set(block)) bias.set(bk, smp.blockBias(bk));
   // the solvers' runoff weight per node: its own rain plus any river flowing in
   const runoff = Float32Array.from(P, (p, c) => p + inflow[c] / (dx * dx));
-  return { addr, key, n, halo: h, nx, ny, dx, z, U, K, P, inflow, runoff, flags, material, pos, block, locIds, locW, base, border, options: o };
+  return { addr, key, n, halo: h, nx, ny, dx, z, U, K, P, inflow, runoff, rho, tempSL, locK: 3, bias, flags, material, pos, block, locIds, locW, base, border, options: o };
 }
 
 /**
@@ -247,13 +353,14 @@ export function restrictToBlocks(field, block, mask) {
  */
 export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50) {
   const { block, locIds, locW, base } = input;
+  const L = input.locK || 3;
   const target = restrictToBlocks(base, block);
   for (let pass = 0; pass <= passes; pass++) {
     const now = restrictToBlocks(field, block);
     const resid = new Map();
     let worst = 0;
     for (const [b, e] of now) {
-      const r = target.get(b).sum / e.count - e.sum / e.count;
+      const r = target.get(b).sum / e.count + (input.bias?.get(b) || 0) - e.sum / e.count;
       resid.set(b, r);
       if (e.count >= minCells) worst = Math.max(worst, Math.abs(r));
     }
@@ -261,7 +368,7 @@ export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50
     for (let c = 0; c < field.length; c++) {
       if (keep && keep[c]) continue;
       let d = 0;
-      for (let t = 0; t < 3; t++) d += locW[3 * c + t] * (resid.get(locIds[3 * c + t]) || 0);
+      for (let t = 0; t < L; t++) d += locW[L * c + t] * (resid.get(locIds[L * c + t]) || 0);
       field[c] += d;
     }
   }
@@ -269,11 +376,12 @@ export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50
 }
 
 /** Barycentric prolongation of per-block values to every cell. */
-function prolongBlocks(values, input, out = new Float32Array(input.nx * input.ny)) {
+export function prolongBlocks(values, input, out = new Float32Array(input.nx * input.ny)) {
   const { locIds, locW } = input;
+  const L = input.locK || 3;
   for (let c = 0; c < out.length; c++) {
     let d = 0;
-    for (let t = 0; t < 3; t++) d += locW[3 * c + t] * (values.get(locIds[3 * c + t]) || 0);
+    for (let t = 0; t < L; t++) d += locW[L * c + t] * (values.get(locIds[L * c + t]) || 0);
     out[c] = d;
   }
   return out;
@@ -317,7 +425,7 @@ export async function runRegion(input, solver) {
     const lnK = new Map();
     for (const [b, e] of now) {
       // err > 0: the child stands too high, so its rock should erode faster
-      const err = (e.sum / e.count - target.get(b).sum / target.get(b).count) / o.kHeight;
+      const err = (e.sum / e.count - target.get(b).sum / target.get(b).count - (input.bias?.get(b) || 0)) / o.kHeight;
       const I = Math.max(-lnMax, Math.min(lnMax, (integral.get(b) || 0) + (err * count * dt) / tau));
       integral.set(b, I);
       lnK.set(b, Math.max(-lnMax, Math.min(lnMax, err + I)));
@@ -364,14 +472,14 @@ export function finishRegion(input, raw) {
   const keep = new Uint8Array(N);
   for (let c = 0; c < N; c++) if (input.flags[c] & (FLAG_OUTLET | FLAG_FIXED)) keep[c] = 1;
   for (let c = 0; c < N; c++) if (input.flags[c] & FLAG_FIXED) elevation[c] = input.z[c];
-  const consistency = correctBlockMeans(elevation, input, keep, input.options.finalPasses ?? 12);
+  const consistency = correctBlockMeans(elevation, input, keep, input.options.finalPasses ?? 40);
   // the drainage of the final surface, routed exactly on the CPU (priority flood where
   // needed): the extracted network does not depend on the solver's last-iteration
   // transients or on GPU rounding, and every node drains
   const rs = new RasterSolver(nx, ny, dx);
   const outlet = Uint8Array.from(input.flags, (f) => (f & FLAG_OUTLET ? 1 : 0));
   const fixed = Uint8Array.from(input.flags, (f) => (f & FLAG_FIXED ? 1 : 0));
-  rs.route(Float64Array.from(elevation), outlet, fixed);
+  rs.route(Float64Array.from(elevation), outlet, fixed, input.rho);
   const area = Float32Array.from(rs.accumulate(Float64Array.from(input.P), Float64Array.from(input.inflow)));
   const receiver = new Int32Array(N), dist = new Float32Array(N);
   for (let c = 0; c < N; c++) {
@@ -416,6 +524,7 @@ export function finishRegion(input, raw) {
       precip: crop(Float32Array.from(input.P, (p) => 1000 * p)),
       material: crop(input.material, Uint8Array),
       drainageArea: crop(area),
+      temperature: crop(Float32Array.from(elevation, (zz, c) => input.tempSL[c] - LAPSE * Math.max(0, zz))),
     },
     rivers,
     stats: { ...stats, consistency },

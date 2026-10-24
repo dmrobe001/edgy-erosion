@@ -52,9 +52,10 @@ export class JacobiSolver {
    * @param {number} nx
    * @param {number} ny
    * @param {number} dx cell size (m)
-   * @param {object} fields {z, U, K, P (runoff weight), flags} typed arrays of nx*ny
+   * @param {object} fields {z, U, K, P (runoff weight), flags, rho?} typed arrays of nx*ny;
+   *   rho (in [1, 2]) replaces sqrt 2 in diagonal slopes when choosing receivers (Rho8)
    */
-  constructor(nx, ny, dx, { z, U, K, P, flags }) {
+  constructor(nx, ny, dx, { z, U, K, P, flags, rho }) {
     const n = nx * ny;
     this.nx = nx; this.ny = ny; this.dx = dx; this.size = n;
     this.z = Float32Array.from(z);
@@ -62,6 +63,7 @@ export class JacobiSolver {
     this.K = Float32Array.from(K);
     this.P = Float32Array.from(P);
     this.flags = Uint32Array.from(flags);
+    this.rho = rho ? Float32Array.from(rho) : new Float32Array(n).fill(Math.SQRT2);
     this.w = new Float32Array(n);
     for (let i = 0; i < n; i++) this.w[i] = this.flags[i] & (FLAG_OUTLET | FLAG_FIXED) ? this.z[i] : BIG;
     this.w2 = new Float32Array(n);
@@ -98,8 +100,7 @@ export class JacobiSolver {
   }
 
   _receivers(w) {
-    const { nx, ny, dx, flags, rec } = this;
-    const diag = f(dx * Math.SQRT2);
+    const { nx, ny, dx, flags, rec, rho } = this;
     for (let j = 0; j < ny; j++) {
       for (let i = 0; i < nx; i++) {
         const c = j * nx + i;
@@ -111,7 +112,7 @@ export class JacobiSolver {
           if (a < 0 || a >= nx || b < 0 || b >= ny) continue;
           const q = b * nx + a;
           if (this._blocked(q)) continue;
-          const s = f(f(w[c] - w[q]) / (k < 4 ? dx : diag));
+          const s = f(f(w[c] - w[q]) / (k < 4 ? dx : f(dx * rho[c])));
           if (s > best) { best = s; rec[c] = k; }
         }
       }
