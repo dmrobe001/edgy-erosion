@@ -111,6 +111,8 @@ function packPlanet(planet, { o, key, worldSeed, upliftSum, windowSteps }) {
     seaLevel: 0,
     fields: { elevation, material, uplift, precip, temperature, regolith, drainageArea: area },
     plates: { owner: Int32Array.from(planet.owner), boundary: Uint8Array.from(planet.boundary) },
+    // each land cell's downstream neighbour on the drainage tree (-1: sea, or no outflow)
+    flow: { receiver },
     rivers: riverGraph(mesh, elevation, area, receiver, order, o.riverArea, precip),
     events,
     materialNames: MATERIAL_NAMES,

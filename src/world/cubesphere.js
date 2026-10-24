@@ -103,6 +103,28 @@ export function cellCenter(addr, n, ci, cj, out, layout = WORLD_LAYOUT) {
   return faceToVector(addr.face, r.a0 + ((ci + 0.5) / n) * r.size, r.b0 + ((cj + 0.5) / n) * r.size, out);
 }
 
+/**
+ * Unit vector at node (ci, cj) of a tile divided into n x n cells: nodes run 0..n, so the
+ * tile's border nodes lie exactly on its edges (and are shared with its neighbours).
+ */
+export function nodePosition(addr, n, ci, cj, out, layout = WORLD_LAYOUT) {
+  const r = tileRect(addr, layout);
+  return faceToVector(addr.face, r.a0 + (ci / n) * r.size, r.b0 + (cj / n) * r.size, out);
+}
+
+/** The equal-angle-to-gnomonic map along one face axis: u = tan(pi/4 (2a - 1)). */
+export function gnomonic(a) {
+  return Math.tan((Math.PI / 4) * (2 * a - 1));
+}
+
+/** Gnomonic coordinates (u, v) of a direction on a face's plane, or null if it faces away. */
+export function toGnomonic(face, x, y, z) {
+  const F = FACES[face];
+  const d = F.n[0] * x + F.n[1] * y + F.n[2] * z;
+  if (!(d > 1e-9)) return null;
+  return [(F.s[0] * x + F.s[1] * y + F.s[2] * z) / d, (F.t[0] * x + F.t[1] * y + F.t[2] * z) / d];
+}
+
 /** The parent tile (level 1 tiles have the planet, level 0, as parent). */
 export function parentOf(addr, layout = WORLD_LAYOUT) {
   if (addr.level <= 1) return { level: 0, face: -1, i: 0, j: 0 };
