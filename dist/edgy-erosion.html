@@ -3480,9 +3480,27 @@ function smoothstep(t) {
 
 const YR_PER_MYR = 1e6;
 
+/**
+ * Crust material classes, which seed lithology at finer levels. A column's class is
+ * decided from what it is made of (its arc and accreted shares) and its setting.
+ */
+const MATERIAL = {
+  oceanic: 0,         // basaltic ocean floor
+  craton: 1,          // the original continental crust, never reworked
+  terrane: 2,         // crust scraped off or collided onto a plate (accreted terrane)
+  arc: 3,             // volcanic arc crust grown above a subduction zone
+  basin: 4,           // continental crust that is mostly sediment, or drowned: sedimentary basin
+};
+const MATERIAL_NAMES = Object.keys(MATERIAL);
+
 const PLANET_DEFAULTS = {
   seed: 1,
-  subdivisions: 40,              // icosahedron edge cuts: 10 f^2 + 2 cells (40 -> 16 002, ~180 km apart on Earth)
+  subdivisions: 40,
+  surfaceProcesses: true,        // false: no river routing; land is worn down by `denudation` instead
+  denudation: {
+    timescale: 1.5e8,            // yr: with surfaceProcesses false, land higher than `floor` above sea level
+    floor: 400,                  // m      loses height at (z - sea level - floor) / timescale
+  },              // icosahedron edge cuts: 10 f^2 + 2 cells (40 -> 16 002, ~180 km apart on Earth)
   radius: 6.371e6,               // m
   time: { dt: 5e5 },             // years per step
   plates: {
@@ -3518,6 +3536,13 @@ const PLANET_DEFAULTS = {
     flowThreshold: 45000,        // m: crust thicker than this spreads sideways
     flowDiffusivity: 5e4,        // m^2/yr: how fast it spreads at the threshold...
     flowScale: 10000,            // m: ...rising as (1 + (excess / flowScale)^2) for thicker crust
+    maxFlowSubsteps: 400,        // cap on explicit flow substeps; when it binds, the fastest flow is capped instead
+    maxThickness: 0,             // m: crust thicker than this sheds the excess outward, like arc crust; 0 = no limit
+  },
+  events: {
+    log: true,                   // record collisions and continental rifting as dated events
+    minCells: 2,                 // boundary cells of a kind, per plate pair and step, for an event to register
+    gap: 1e7,                    // yr: an event quiet for longer than this has ended; shorter pauses join up
   },
   climate: {
     zonal: true,                 // wet tropics, dry subtropics, wet mid-latitudes, dry poles
@@ -3622,6 +3647,11 @@ class Planet {
     this.bCont = new Float64Array(P * n);
     this.bBirth = new Float64Array(P * n);
     this.bSoil = new Float64Array(P * n);
+    // share of each column's crust that is volcanic arc, and that was scraped off or
+    // collided onto it (accreted terrane); the rest of its continental part is original craton
+    this.bArc = new Float64Array(P * n);
+    this.bAcc = new Float64Array(P * n);
+    this.bSed = new Float64Array(P * n); // share that is sediment worn off land (denudation mode)
     this.bodyOf = new Int32Array(P * n);
     for (let q = 0; q < P; q++) for (let i = 0; i < n; i++) this.bodyOf[q * n + i] = i;
     this.stamp = 0;
@@ -3631,6 +3661,9 @@ class Planet {
     this.thickness = new Float64Array(n);
     this.continental = new Float64Array(n);
     this.age = new Float64Array(n);
+    this.arcShare = new Float64Array(n);
+    this.accretedShare = new Float64Array(n);
+    this.sedimentShare = new Float64Array(n);
     /** 0 interior, 1 convergent, 2 divergent, 3 transform (largest-rate neighbour) */
     this.boundary = new Uint8Array(n);
     /** isostatic + tectonic elevation before surface processes, this step (m) */
@@ -3641,6 +3674,11 @@ class Planet {
     this.dzdt = new Float64Array(n);
     /** crust (m^3, continental) scraped off or grown as arcs this step, not yet placed */
     this.pending = new Float64Array(n);
+    /** the arc part of `pending` (m^3) */
+    this.pendingArc = new Float64Array(n);
+    /** dated tectonic events: {kind, start, end, center [x, y, z], radius (rad), plates [a, b], cells} */
+    this.events = [];
+    this._openEvents = new Map();
     /** plate pair -> the plate that overrides at their convergent boundary */
     this.polarity = new Map();
     this.budget = { created: 0, arc: 0, subducted: 0, accreted: 0, surface: 0 };
@@ -3731,6 +3769,8 @@ class Planet {
     this._crustalFlow(dt);
     this._buildView();
     this._classifyBoundaries();
+    this._noteRifts();
+    this._closeStepEvents(this.time, this.time + dt);
     this._isostasy();
     this.seaLevel = this._seaLevelForVolume(this.waterVolume);
     this._applyToSurface();
@@ -3738,7 +3778,8 @@ class Planet {
     // surface processes
     const sim = this.sim;
     const zT = this.zTectonic;
-    sim.step(dt);
+    if (p.surfaceProcesses) sim.step(dt);
+    else this._denude(dt);
     // write erosion and deposition back to the plates
     const A = mesh.area;
     let surf = 0;
@@ -3812,7 +3853,8 @@ class Planet {
       soil[i] = this.bSoil[q * n + this.bodyOf[q * n + i]];
       birth[i] = this.bBirth[q * n + this.bodyOf[q * n + i]];
     }
-    for (const a of [this.bOwned, this.bConsumed, this.bThick, this.bCont, this.bBirth, this.bSoil, this.bZ]) a.fill(0);
+    const arc = Float64Array.from(this.arcShare), acc = Float64Array.from(this.accretedShare), sed = Float64Array.from(this.sedimentShare);
+    for (const a of [this.bOwned, this.bConsumed, this.bThick, this.bCont, this.bBirth, this.bSoil, this.bZ, this.bArc, this.bAcc, this.bSed]) a.fill(0);
     this.rot.fill(0);
     for (let q = 0; q < P; q++) { this.rot[9 * q] = this.rot[9 * q + 4] = this.rot[9 * q + 8] = 1; }
     for (let q = 0; q < P; q++) for (let i = 0; i < n; i++) this.bodyOf[q * n + i] = i;
@@ -3827,6 +3869,9 @@ class Planet {
       this.bBirth[b] = birth[i];
       this.bSoil[b] = soil[i];
       this.bZ[b] = zNow[i];
+      this.bArc[b] = arc[i];
+      this.bAcc[b] = acc[i];
+      this.bSed[b] = sed[i];
     }
     omega.forEach((w, q) => { this.omega[3 * q] = w[0]; this.omega[3 * q + 1] = w[1]; this.omega[3 * q + 2] = w[2]; });
     this.polarity.clear();
@@ -4054,11 +4099,34 @@ class Planet {
       Rq.set(M);
     }
     // 2. look back along each plate's rotation: which plate cell is now at world cell i?
+    //    A substep moves no point more than half a cell, so only the plates that owned i
+    //    or one of its neighbours can have arrived there: those are the plates looked up
+    //    (`near`, up to 7 per cell); bodyOf is kept current for them only.
     const stamp = ++this.stamp;
-    for (let q = 0; q < P; q++) {
-      if (!alive[q]) continue;
-      const Rq = rot.subarray(9 * q, 9 * q + 9);
-      for (let i = 0; i < n; i++) {
+    this.prevOwner.set(this.owner);
+    const nbr = mesh.neighbors;
+    const near = this._near || (this._near = new Int32Array(7 * n));
+    const nearCount = this._nearCount || (this._nearCount = new Uint8Array(n));
+    for (let i = 0; i < n; i++) {
+      let m = 0;
+      const q0 = this.owner[i];
+      near[7 * i] = q0; m = 1;
+      for (let k = 0; k < 6; k++) {
+        const j = nbr[6 * i + k];
+        if (j < 0) continue;
+        const q = this.owner[j];
+        let seen = false;
+        for (let c = 0; c < m; c++) if (near[7 * i + c] === q) { seen = true; break; }
+        if (seen) continue;
+        near[7 * i + m++] = q;
+        // warm start from the neighbour, whose look-up for q is current
+        bodyOf[q * n + i] = bodyOf[q * n + j];
+      }
+      nearCount[i] = m;
+      for (let c = 0; c < m; c++) {
+        const q = near[7 * i + c];
+        if (!alive[q]) continue;
+        const Rq = rot.subarray(9 * q, 9 * q + 9);
         const x = P3[3 * i], y = P3[3 * i + 1], z = P3[3 * i + 2];
         // body = R^T world
         const bx = Rq[0] * x + Rq[3] * y + Rq[6] * z;
@@ -4075,10 +4143,9 @@ class Planet {
     const cr = this.params.crust;
     const last = this.last;
     const collide = new Map();
-    this.prevOwner.set(this.owner);
     for (let i = 0; i < n; i++) {
       let m = 0;
-      for (let q = 0; q < P; q++) if (alive[q] && bOwned[q * n + bodyOf[q * n + i]]) cand[m++] = q;
+      for (let c = 0; c < nearCount[i]; c++) { const q = near[7 * i + c]; if (alive[q] && bOwned[q * n + bodyOf[q * n + i]]) cand[m++] = q; }
       if (m === 1) { this.owner[i] = cand[0]; continue; }
       if (m === 0) {
         // spreading: new oceanic crust joins the plate that was here
@@ -4087,7 +4154,7 @@ class Planet {
         const s = bodyOf[q * n + i];
         const b = q * n + s;
         bOwned[b] = 1; this.bConsumed[b] = 0;
-        this.bThick[b] = cr.oceanicThickness; this.bCont[b] = 0; this.bBirth[b] = this._birthTime(q, s, i, tNow); this.bSoil[b] = 0;
+        this.bThick[b] = cr.oceanicThickness; this.bCont[b] = 0; this.bBirth[b] = this._birthTime(q, s, i, tNow); this.bSoil[b] = 0; this.bArc[b] = this.bAcc[b] = this.bSed[b] = 0;
         last.created += cr.oceanicThickness * A[s];
         this.budget.created += cr.oceanicThickness * A[s];
         this.owner[i] = q;
@@ -4112,6 +4179,7 @@ class Planet {
         if (continent) {
           const key = Math.min(w, q) * P + Math.max(w, q);
           collide.set(key, (collide.get(key) || 0) + 1);
+          this._noteEvent('collision', w, q, i);
         }
       }
       this.owner[i] = w;
@@ -4123,7 +4191,8 @@ class Planet {
       const q0 = this.owner[i];
       if (bOwned[q0 * n + bodyOf[q0 * n + i]]) continue;
       let q1 = -1, e1 = -Infinity;
-      for (let q = 0; q < P; q++) {
+      for (let c = 0; c < nearCount[i]; c++) {
+        const q = near[7 * i + c];
         if (!alive[q]) continue;
         const b = q * n + bodyOf[q * n + i];
         if (!bOwned[b]) continue;
@@ -4134,7 +4203,7 @@ class Planet {
       const b = q0 * n + bodyOf[q0 * n + i];
       const s = bodyOf[q0 * n + i];
       bOwned[b] = 1; this.bConsumed[b] = 0;
-      this.bThick[b] = cr.oceanicThickness; this.bCont[b] = 0; this.bBirth[b] = this._birthTime(q0, s, i, tNow); this.bSoil[b] = 0;
+      this.bThick[b] = cr.oceanicThickness; this.bCont[b] = 0; this.bBirth[b] = this._birthTime(q0, s, i, tNow); this.bSoil[b] = 0; this.bArc[b] = this.bAcc[b] = this.bSed[b] = 0;
       last.created += cr.oceanicThickness * A[s];
       this.budget.created += cr.oceanicThickness * A[s];
     }
@@ -4145,16 +4214,17 @@ class Planet {
       for (let s = 0; s < n; s++) {
         const b = q * n + s;
         if (bOwned[b] || this.bConsumed[b]) continue;
-        let own = 0, th = 0, co = 0, bi = 0, so = 0;
+        let own = 0, th = 0, co = 0, bi = 0, so = 0, ar = 0, ac = 0, se = 0;
         const val = mesh.valence[s];
         for (let k = 0; k < val; k++) {
           const t = mesh.neighbors[6 * s + k];
           const bt = q * n + t;
-          if (bOwned[bt]) { own++; th += this.bThick[bt]; co += this.bCont[bt]; bi += this.bBirth[bt]; so += this.bSoil[bt]; }
+          if (bOwned[bt]) { own++; th += this.bThick[bt]; co += this.bCont[bt]; bi += this.bBirth[bt]; so += this.bSoil[bt]; ar += this.bArc[bt]; ac += this.bAcc[bt]; se += this.bSed[bt]; }
         }
         if (own < val - 1) continue;
         bOwned[b] = 1;
         this.bThick[b] = th / own; this.bCont[b] = co / own; this.bBirth[b] = bi / own; this.bSoil[b] = so / own;
+        this.bArc[b] = ar / own; this.bAcc[b] = ac / own; this.bSed[b] = se / own;
         last.created += this.bThick[b] * A[s];
         this.budget.created += this.bThick[b] * A[s];
       }
@@ -4237,6 +4307,7 @@ class Planet {
     const vo = vol - vc;
     const arc = this.params.crust.arcFraction * vo;
     this.pending[i] += vc + arc;
+    this.pendingArc[i] += arc;
     this.bOwned[b] = 0;
     this.bConsumed[b] = 1;
     this.bStamp[b] = stamp;
@@ -4265,6 +4336,9 @@ class Planet {
       this.thickness[i] = this.bThick[b];
       this.continental[i] = this.bCont[b];
       this.age[i] = Math.max(0, this.time - this.bBirth[b]);
+      this.arcShare[i] = this.bArc[b];
+      this.accretedShare[i] = this.bAcc[b];
+      this.sedimentShare[i] = this.bSed[b];
     }
   }
 
@@ -4277,7 +4351,7 @@ class Planet {
     const mesh = this.mesh;
     const n = mesh.size;
     const { neighbors: nb, dist, face, area } = mesh;
-    const vol = this.pending;
+    const vol = this.pending, volArc = this.pendingArc;
     let any = false;
     for (let i = 0; i < n; i++) if (vol[i] > 0) { any = true; break; }
     if (!any) return;
@@ -4291,31 +4365,50 @@ class Planet {
     const w = this.params.crust.arcWidth;
     const passes = Math.min(200, Math.ceil((w * w * worst) / 0.9));
     const kdt = 0.45 / worst;
-    const u = new Float64Array(n);
+    // only cells within 3 widths of a source take part (beyond, the spread is negligible);
+    // edges leading out of that set carry nothing, so volume is still conserved exactly
+    const rings = Math.ceil((3 * w) / mesh.spacing) + 1;
+    const inSet = new Uint8Array(n);
+    let set = [];
+    for (let i = 0; i < n; i++) if (vol[i] > 0) { inSet[i] = 1; set.push(i); }
+    for (let r = 0, front = set.slice(); r < rings; r++) {
+      const next = [];
+      for (const i of front) for (let k = 0; k < 6; k++) { const j = nb[6 * i + k]; if (j >= 0 && !inSet[j] && this.owner[j] === this.owner[i]) { inSet[j] = 1; next.push(j); } }
+      set = set.concat(next);
+      front = next;
+    }
+    set.sort((a, b) => a - b);
+    const u = new Float64Array(n), ua = new Float64Array(n);
     for (let it = 0; it < passes; it++) {
-      for (let i = 0; i < n; i++) u[i] = vol[i] / area[i];
-      for (let i = 0; i < n; i++) {
+      for (const i of set) { u[i] = vol[i] / area[i]; ua[i] = volArc[i] / area[i]; }
+      for (const i of set) {
         for (let k = 0; k < 6; k++) {
           const e = 6 * i + k;
           const j = nb[e];
-          if (j <= i || this.owner[j] !== this.owner[i]) continue;
-          const f = (kdt * face[e] * (u[i] - u[j])) / dist[e];
-          vol[i] -= f;
-          vol[j] += f;
+          if (j <= i || !inSet[j] || this.owner[j] !== this.owner[i]) continue;
+          const g = (kdt * face[e]) / dist[e];
+          const f = g * (u[i] - u[j]), fa = g * (ua[i] - ua[j]);
+          vol[i] -= f; vol[j] += f;
+          volArc[i] -= fa; volArc[j] += fa;
         }
       }
     }
-    for (let i = 0; i < n; i++) {
+    for (const i of set) {
       if (!(vol[i] > 0)) continue;
       const q = this.owner[i];
       const s = this.bodyOf[q * n + i];
       const b = q * n + s;
       const add = vol[i] / area[s];
+      const addArc = Math.min(add, Math.max(0, volArc[i] / area[s]));
       const h0 = this.bThick[b];
       this.bThick[b] = h0 + add;
       this.bCont[b] = (this.bCont[b] * h0 + add) / (h0 + add);
+      this.bArc[b] = (this.bArc[b] * h0 + addArc) / (h0 + add);
+      this.bAcc[b] = (this.bAcc[b] * h0 + add - addArc) / (h0 + add);
+      this.bSed[b] = (this.bSed[b] * h0) / (h0 + add);
     }
     vol.fill(0);
+    volArc.fill(0);
   }
 
   /** Crust thicker than flowThreshold spreads to neighbours on the same plate. */
@@ -4338,8 +4431,11 @@ class Planet {
     const e0 = cr.flowScale;
     let emax = 0;
     for (let i = 0; i < n; i++) emax = Math.max(emax, th[i] - h0);
-    const fmax = 1 + (Math.max(0, emax) / e0) ** 2;
-    const subs = Math.min(400, Math.max(1, Math.ceil((dt * D * fmax * worst) / 0.5)));
+    let fmax = 1 + (Math.max(0, emax) / e0) ** 2;
+    const cap = Math.max(1, cr.maxFlowSubsteps);
+    // when the substep cap binds, cap the flow law's speed-up so each substep stays stable
+    if ((dt * D * fmax * worst) / 0.5 > cap) fmax = Math.max(1, (0.5 * cap) / (dt * D * worst));
+    const subs = Math.min(cap, Math.max(1, Math.ceil((dt * D * fmax * worst) / 0.5)));
     const hstep = dt / subs;
     const out = new Float64Array(n);
     const flux = new Float64Array(6 * n);
@@ -4355,7 +4451,7 @@ class Planet {
           const ej = th[j] - h0;
           if (ei <= 0 && ej <= 0) continue;
           const em = Math.max(ei, ej);
-          const q = ((D * (1 + (em / e0) ** 2) * (Math.max(ei, 0) - Math.max(ej, 0))) / dist[e]) * face[e] * hstep; // volume i -> j
+          const q = ((D * Math.min(fmax, 1 + (em / e0) ** 2) * (Math.max(ei, 0) - Math.max(ej, 0))) / dist[e]) * face[e] * hstep; // volume i -> j
           flux[e] = q;
           out[q > 0 ? i : j] += Math.abs(q);
         }
@@ -4376,6 +4472,17 @@ class Planet {
         }
       }
     }
+    // crust beyond maxThickness is shed: it joins the crust waiting to be spread outward
+    const hmax = cr.maxThickness;
+    let shed = false;
+    if (hmax > 0) {
+      for (let i = 0; i < n; i++) {
+        if (th[i] <= hmax) continue;
+        this.pending[i] += (th[i] - hmax) * area[i];
+        th[i] = hmax;
+        shed = true;
+      }
+    }
     // write the change back to the plate frames
     for (let i = 0; i < n; i++) {
       const d = th[i] - this.thickness[i];
@@ -4384,6 +4491,151 @@ class Planet {
       const s = this.bodyOf[q * n + i];
       this.bThick[q * n + s] += (d * area[i]) / area[s];
     }
+    if (shed) this._spreadAdditions();
+  }
+
+  /**
+   * Cheap stand-in for erosion at the planet scale (used when surfaceProcesses is off):
+   * mean denudation rate proportional to height above a floor a few hundred metres above
+   * sea level (Ahnert 1970, Am. J. Sci. 268, found it proportional to relief, and the
+   * relief of old low continents is small; the floor keeps them from all being planed
+   * down to the sea). Isostatic rebound returns part of every metre
+   * removed, so the crust loses dz / (1 - rho_c / rho_m) to lower the surface by dz. The
+   * sediment is laid down in the nearest sea cell (by steps across the mesh) as
+   * continental crust: margins build out into shelves and sedimentary basins, and the
+   * crust budget still closes.
+   */
+  _denude(dt) {
+    const { timescale: tau, floor } = this.params.denudation;
+    if (!(tau > 0)) return;
+    const cr = this.params.crust;
+    const sim = this.sim;
+    const n = this.mesh.size;
+    const f = 1 - Math.exp(-dt / tau);
+    const A = this.mesh.area, nb = this.mesh.neighbors;
+    // nearest sea cell of every cell: breadth-first from the sea
+    const target = this._seaTarget || (this._seaTarget = new Int32Array(n));
+    target.fill(-1);
+    const queue = new Int32Array(n);
+    let head = 0, tail = 0;
+    for (let i = 0; i < n; i++) if (this.zTectonic[i] < this.seaLevel) { target[i] = i; queue[tail++] = i; }
+    while (head < tail) {
+      const i = queue[head++];
+      for (let k = 0; k < 6; k++) { const j = nb[6 * i + k]; if (j >= 0 && target[j] < 0) { target[j] = target[i]; queue[tail++] = j; } }
+    }
+    const sed = this._sed || (this._sed = new Float64Array(n));
+    sed.fill(0);
+    for (let i = 0; i < n; i++) {
+      const above = this.zTectonic[i] - this.seaLevel - floor;
+      if (!(above > 0) || target[i] < 0) continue;
+      const rho = this.continental[i] * cr.continentalDensity + (1 - this.continental[i]) * cr.oceanicDensity;
+      const dh = Math.min(this.thickness[i] - 1000, (f * above) / (1 - rho / cr.mantleDensity));
+      if (!(dh > 0)) continue;
+      sim.rock[i] -= dh; sim.z[i] -= dh; // the write-back takes the thickness change from sim.z
+      sed[target[i]] += dh * A[i];
+    }
+    let laid = 0;
+    for (let i = 0; i < n; i++) {
+      if (!(sed[i] > 0)) continue;
+      const q = this.owner[i];
+      const s = this.bodyOf[q * n + i];
+      const b = q * n + s;
+      const add = sed[i] / A[s];
+      const h0 = this.bThick[b];
+      this.bThick[b] = h0 + add;
+      this.bCont[b] = (this.bCont[b] * h0 + add) / (h0 + add);
+      this.bSed[b] = (this.bSed[b] * h0 + add) / (h0 + add);
+      this.bArc[b] = (this.bArc[b] * h0) / (h0 + add);
+      this.bAcc[b] = (this.bAcc[b] * h0) / (h0 + add);
+      laid += sed[i];
+    }
+    this.budget.surface += laid;
+  }
+
+  /** Record that world cell i took part in an event of `kind` between plates a and b this step. */
+  _noteEvent(kind, a, b, i) {
+    if (!this.params.events.log) return;
+    const key = `${kind}:${Math.min(a, b)}:${Math.max(a, b)}`;
+    if (!this._stepCells) this._stepCells = new Map();
+    let list = this._stepCells.get(key);
+    if (!list) this._stepCells.set(key, (list = []));
+    list.push(i);
+  }
+
+  /** Continental rifting: a divergent boundary with continental crust on both sides. */
+  _noteRifts() {
+    if (!this.params.events.log) return;
+    const nb = this.mesh.neighbors;
+    for (let i = 0; i < this.mesh.size; i++) {
+      if (this.boundary[i] !== 2 || this.continental[i] < 0.5) continue;
+      for (let k = 0; k < 6; k++) {
+        const j = nb[6 * i + k];
+        if (j >= 0 && this.owner[j] !== this.owner[i] && this.continental[j] >= 0.5) { this._noteEvent('rifting', this.owner[i], this.owner[j], i); break; }
+      }
+    }
+  }
+
+  /**
+   * Turn this step's event cells into dated events. An event that continues from the
+   * previous step is extended (its region grows to cover both); one that did not occur
+   * this step is closed.
+   */
+  _closeStepEvents(t0, t1) {
+    if (!this.params.events.log) return;
+    const P3 = this.mesh.pos;
+    const step = this._stepCells || new Map();
+    const min = this.params.events.minCells;
+    const gap = this.params.events.gap;
+    for (const [key, ev] of this._openEvents) if (t1 - ev.end > gap && !(step.has(key) && step.get(key).length >= min)) { this.events.push(ev); this._openEvents.delete(key); }
+    for (const [key, cells] of step) {
+      if (cells.length < min) continue;
+      let ev = this._openEvents.get(key);
+      const [kind, a, b] = key.split(':');
+      if (!ev) {
+        ev = { kind, start: t0, end: t1, plates: [+a, +b], cells: 0, sum: [0, 0, 0], members: new Set() };
+        this._openEvents.set(key, ev);
+      }
+      ev.end = t1;
+      for (const i of cells) {
+        if (ev.members.has(i)) continue;
+        ev.members.add(i);
+        ev.sum[0] += P3[3 * i]; ev.sum[1] += P3[3 * i + 1]; ev.sum[2] += P3[3 * i + 2];
+      }
+      ev.cells = ev.members.size;
+    }
+    this._stepCells = new Map();
+  }
+
+  /**
+   * All events so far, open ones included, with their regions as spherical caps:
+   * {kind, start, end (model years), center (unit vector), radius (rad), plates, cells}.
+   */
+  eventLog() {
+    const P3 = this.mesh.pos;
+    const out = [];
+    for (const ev of [...this.events, ...this._openEvents.values()]) {
+      const L = Math.hypot(...ev.sum) || 1;
+      const c = ev.sum.map((v) => v / L);
+      let r = 0;
+      for (const i of ev.members) r = Math.max(r, Math.acos(Math.min(1, c[0] * P3[3 * i] + c[1] * P3[3 * i + 1] + c[2] * P3[3 * i + 2])));
+      out.push({ kind: ev.kind, start: ev.start, end: ev.end, center: c, radius: r + (0.5 * this.mesh.spacing) / this.params.radius, plates: ev.plates, cells: ev.cells });
+    }
+    return out.sort((x, y) => x.start - y.start || (x.kind < y.kind ? -1 : x.kind > y.kind ? 1 : 0) || x.plates[0] - y.plates[0] || x.plates[1] - y.plates[1]);
+  }
+
+  /** Material class of every world cell (see MATERIAL). */
+  material(out = new Uint8Array(this.mesh.size)) {
+    const cr = this.params.crust;
+    for (let i = 0; i < this.mesh.size; i++) {
+      const c = this.continental[i];
+      if (c < 0.5) { out[i] = MATERIAL.oceanic; continue; }
+      const arc = this.arcShare[i], acc = this.accretedShare[i];
+      if (arc > 0.3 && arc >= acc) out[i] = MATERIAL.arc;
+      else if (acc > 0.3) out[i] = MATERIAL.terrane;
+      else if (this.sedimentShare[i] > 0.3 || this.zTectonic[i] < this.seaLevel) out[i] = MATERIAL.basin;
+      else out[i] = MATERIAL.craton;
+    }
+    return out;
   }
 
   _classifyBoundaries() {
@@ -4476,7 +4728,8 @@ class Planet {
     }
     sim.params.boundary.seaLevel = this.seaLevel; // the planet owns sea level
     sim.seaLevel = this.seaLevel;
-    sim._updateDerivedState();
+    if (this.params.surfaceProcesses) sim._updateDerivedState();
+    else for (let i = 0; i < n; i++) sim.z[i] = sim.rock[i] + sim.soil[i]; // nothing else is read without surface processes
   }
 }
 

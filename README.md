@@ -21,6 +21,23 @@ same rivers and creep wear the continents down. The physics is
 documented, with citations and an honest list of simplifications, in
 **[docs/MODEL.md](docs/MODEL.md)**.
 
+## Direction: a hierarchical terrain generator
+
+The project is being rebuilt around a new design, **[docs/DESIGN.md](docs/DESIGN.md)**:
+a planet built once from plate tectonics, then refined on demand, level by level, down
+to metre-scale sites. Every level must agree with the coarser one above it, and the
+result is a pure function of the world seed and the tile address. Progress, decisions
+and measured budgets are in **[docs/PLAN.md](docs/PLAN.md)**; the new code lives in
+`src/world/`:
+
+```js
+import { generatePlanet } from './src/world/l0.js';
+const planet = generatePlanet('my world'); // ~10 s: fields, river graph, dated events
+```
+
+Everything below describes the first version, which stays in the tree and is tagged
+`v1-hex-erosion`.
+
 ## Quick start
 
 You need [Node.js](https://nodejs.org) 18 or newer. Nothing to install beyond that.
