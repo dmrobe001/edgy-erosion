@@ -354,25 +354,34 @@ export function restrictToBlocks(field, block, mask) {
 export function correctBlockMeans(field, input, keep, passes = 12, minCells = 50) {
   const { block, locIds, locW, base } = input;
   const L = input.locK || 3;
-  const target = restrictToBlocks(base, block);
+  const N = field.length;
+  // blocks as dense indices (Map look-ups in the inner loop cost more than the arithmetic)
+  const ids = [...new Set(block)];
+  const dense = new Map(ids.map((b, k) => [b, k]));
+  const B = ids.length;
+  const blk = Int32Array.from(block, (b) => dense.get(b));
+  const loc = Int32Array.from(locIds, (b) => (dense.has(b) ? dense.get(b) : -1));
+  const target = new Float64Array(B), count = new Float64Array(B), sum = new Float64Array(B), resid = new Float64Array(B);
+  for (let c = 0; c < N; c++) { target[blk[c]] += base[c]; count[blk[c]]++; }
+  for (let k = 0; k < B; k++) target[k] = target[k] / count[k] + (input.bias?.get(ids[k]) || 0);
+  let worst = 0;
   for (let pass = 0; pass <= passes; pass++) {
-    const now = restrictToBlocks(field, block);
-    const resid = new Map();
-    let worst = 0;
-    for (const [b, e] of now) {
-      const r = target.get(b).sum / e.count + (input.bias?.get(b) || 0) - e.sum / e.count;
-      resid.set(b, r);
-      if (e.count >= minCells) worst = Math.max(worst, Math.abs(r));
+    sum.fill(0);
+    for (let c = 0; c < N; c++) sum[blk[c]] += field[c];
+    worst = 0;
+    for (let k = 0; k < B; k++) {
+      resid[k] = target[k] - sum[k] / count[k];
+      if (count[k] >= minCells) worst = Math.max(worst, Math.abs(resid[k]));
     }
-    if (pass === passes) return worst;
-    for (let c = 0; c < field.length; c++) {
+    if (pass === passes) break;
+    for (let c = 0; c < N; c++) {
       if (keep && keep[c]) continue;
       let d = 0;
-      for (let t = 0; t < L; t++) d += locW[L * c + t] * (resid.get(locIds[L * c + t]) || 0);
+      for (let t = 0; t < L; t++) { const q = loc[L * c + t]; if (q >= 0) d += locW[L * c + t] * resid[q]; }
       field[c] += d;
     }
   }
-  return 0;
+  return worst;
 }
 
 /** Barycentric prolongation of per-block values to every cell. */

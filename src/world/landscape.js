@@ -343,6 +343,8 @@ export function runLandscape(input) {
   const glacialSteps = gl ? Math.round(o.steps * Math.min(1, gl.duration / o.duration)) : 0;
   const before = new Float64Array(N);
   const rec = rs.receiver;
+  const held = Uint8Array.from(flags, (f) => (f ? 1 : 0));
+  const Qs = new Float64Array(N), reach = new Float32Array(N);
   for (let step = 0; step < o.steps; step++) {
     // exposed rock
     for (let c = 0; c < N; c++) {
@@ -367,28 +369,44 @@ export function runLandscape(input) {
         const c = rs.order[k], r = rec[c];
         if (ice[c] && r !== c && A[c] > 1e6) ice[r] = 1; // glacier tongues reach below the snowline
       }
-      const widened = Uint8Array.from(ice);
-      for (let c = 0; c < N; c++) {
-        if (!ice[c]) continue;
-        const reach = Math.min(8, Math.round(o.glacier.widen * Math.sqrt(A[c] / 1e6)));
-        const ci = c % nx, cj = (c - ci) / nx;
-        for (let dj = -reach; dj <= reach; dj++) for (let di = -reach; di <= reach; di++) {
-          const a2 = ci + di, b2 = cj + dj;
-          if (a2 >= 0 && b2 >= 0 && a2 < nx && b2 < ny && di * di + dj * dj <= reach * reach) widened[b2 * nx + a2] = 1;
+      // the ice spreads sideways by a reach that grows with ice discharge: a max-minus-
+      // distance transform in two raster sweeps (chamfer weights 1 and sqrt 2), O(n)
+      for (let c = 0; c < N; c++) reach[c] = ice[c] ? Math.min(8, o.glacier.widen * Math.sqrt(A[c] / 1e6)) : -1;
+      const s2 = Math.SQRT2;
+      for (let cj = 0; cj < ny; cj++) for (let ci = 0; ci < nx; ci++) {
+        const c = cj * nx + ci;
+        let r = reach[c];
+        if (ci > 0) r = Math.max(r, reach[c - 1] - 1);
+        if (cj > 0) {
+          r = Math.max(r, reach[c - nx] - 1);
+          if (ci > 0) r = Math.max(r, reach[c - nx - 1] - s2);
+          if (ci < nx - 1) r = Math.max(r, reach[c - nx + 1] - s2);
         }
+        reach[c] = r;
       }
-      ice.set(widened);
+      for (let cj = ny - 1; cj >= 0; cj--) for (let ci = nx - 1; ci >= 0; ci--) {
+        const c = cj * nx + ci;
+        let r = reach[c];
+        if (ci < nx - 1) r = Math.max(r, reach[c + 1] - 1);
+        if (cj < ny - 1) {
+          r = Math.max(r, reach[c + nx] - 1);
+          if (ci < nx - 1) r = Math.max(r, reach[c + nx + 1] - s2);
+          if (ci > 0) r = Math.max(r, reach[c + nx - 1] - s2);
+        }
+        reach[c] = r;
+      }
+      for (let c = 0; c < N; c++) if (reach[c] >= 0) ice[c] = 1;
       for (let c = 0; c < N; c++) if (ice[c]) K[c] = Math.max(K[c], o.glacier.K);
     }
-    rs.erode(z, { dt, K, m: o.m, n: 1, U, fixed: Uint8Array.from(flags, (f) => (f ? 1 : 0)) });
+    rs.erode(z, { dt, K, m: o.m, n: 1, U, fixed: held });
     if (icy) {
       // ice reaches across the trough: erosion spreads sideways within the ice
       const ice = record.ice;
       for (let c = 0; c < N; c++) D[c] = ice[c] ? o.D * 400 : o.D;
     } else D.fill(o.D);
-    rs.diffuse(z, { dt, D, fixed: Uint8Array.from(flags, (f) => (f ? 1 : 0)) });
+    rs.diffuse(z, { dt, D, fixed: held });
     // fans: sediment down the tree, deposited where capacity falls short
-    const Qs = new Float64Array(N);
+    Qs.fill(0);
     for (let k = rs.orderCount - 1; k >= 0; k--) {
       const c = rs.order[k], r = rec[c];
       if (flags[c]) continue;
@@ -401,40 +419,40 @@ export function runLandscape(input) {
       }
       if (r !== c) Qs[r] += Qs[c];
     }
-    // landslides: topple slopes beyond the rock's critical slope
+    // landslides: topple slopes beyond the rock's critical slope. The first sweep visits
+    // every node; later ones only the nodes a failure touched (a worklist)
+    let work = null;
     for (let sw = 0; sw < o.landslideSweeps; sw++) {
-      let moved = 0;
-      for (let cj = 1; cj < ny - 1; cj++) for (let ci = 1; ci < nx - 1; ci++) {
-        const c = cj * nx + ci;
-        if (flags[c]) continue;
+      const next = [];
+      const visit = (c) => {
+        const ci = c % nx, cj = (c - ci) / nx;
+        if (flags[c] || ci === 0 || cj === 0 || ci === nx - 1 || cj === ny - 1) return;
         let best = 0, bj = -1, bd = dx;
-        for (const [di, dj2, d] of NB8(dx)) {
-          const q = c + di + dj2 * nx;
-          const s = (z[c] - z[q]) / d;
-          if (s > best) { best = s; bj = q; bd = d; }
+        for (let k = 0; k < 8; k++) {
+          const q = c + OFFS[k] + OFFS[k + 8] * nx;
+          const d = k < 4 ? dx : dx * Math.SQRT2;
+          const sl = (z[c] - z[q]) / d;
+          if (sl > best) { best = sl; bj = q; bd = d; }
         }
-        if (bj < 0 || best <= Sc[c]) continue;
+        if (bj < 0 || best <= Sc[c]) return;
         const ex = 0.5 * (z[c] - z[bj] - Sc[c] * bd);
         z[c] -= ex;
         record.landslide[c] += ex;
         if (!(flags[bj] & 1)) { z[bj] += ex; record.deposit[bj] += ex; }
-        moved++;
-      }
-      if (!moved) break;
+        next.push(c, bj);
+        for (let k = 0; k < 8; k++) next.push(c + OFFS[k] + OFFS[k + 8] * nx);
+      };
+      if (!work) for (let c = 0; c < N; c++) visit(c);
+      else for (const c of work) visit(c);
+      if (!next.length) break;
+      work = [...new Set(next)].sort((p, q) => p - q);
     }
   }
   return finishLandscape(input, z, record);
 }
 
-const nb8Cache = new Map();
-function NB8(dx) {
-  if (!nb8Cache.has(dx)) {
-    const d = dx * Math.SQRT2;
-    nb8Cache.set(dx, [[1, 0, dx], [-1, 0, dx], [0, 1, dx], [0, -1, dx], [1, 1, d], [-1, 1, d], [1, -1, d], [-1, -1, d]]);
-  }
-  return nb8Cache.get(dx);
-}
-
+// the 8 neighbour offsets: OFFS[k] in x, OFFS[k + 8] in y (cardinal first)
+const OFFS = [1, -1, 0, 0, 1, -1, 1, -1, 0, 0, 1, -1, 1, 1, -1, -1];
 function finishLandscape(input, z64, record) {
   const { nx, ny, dx, flags } = input;
   const N = nx * ny;
