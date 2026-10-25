@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>L0 plate tectonics sandbox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#E6EAEC; --panel:#F3F5F6; --ink:#1B2631; --muted:#5C6975; --line:#C6CED4;
+  --accent:#1F6F78; --accent-ink:#FFFFFF; --ochre:#B8891A; --conv:#D2452F; --div:#1BA6B5; --trans:#D9B526; --space:#0E1823;
+  color-scheme: light; box-sizing:border-box;
+  padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    --bg:#111A21; --panel:#18232C; --ink:#DCE4E8; --muted:#8A99A5; --line:#2C3A45;
+    --accent:#4FB3BD; --accent-ink:#0E1A20; --ochre:#E0B54A; --conv:#F06A50; --div:#5FD3E0; --trans:#EFD15A; --space:#0A1118;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"]{
+  --bg:#111A21; --panel:#18232C; --ink:#DCE4E8; --muted:#8A99A5; --line:#2C3A45;
+  --accent:#4FB3BD; --accent-ink:#0E1A20; --ochre:#E0B54A; --conv:#F06A50; --div:#5FD3E0; --trans:#EFD15A; --space:#0A1118;
+  color-scheme: dark;
+}
+*,*::before,*::after{box-sizing:inherit}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:"Barlow",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;font-size:15px;line-height:1.45}
+.num{font-family:"Barlow Semi Condensed","Barlow",system-ui,sans-serif;font-variant-numeric:tabular-nums}
+main{max-width:1100px;margin:0 auto;padding:12px 14px 28px}
+header{display:flex;align-items:baseline;justify-content:space-between;gap:12px;flex-wrap:wrap;margin:4px 0 10px}
+h1{font-size:22px;font-weight:600;margin:0;letter-spacing:-0.01em}
+.clock{font-size:28px;font-weight:600;line-height:1}
+.clock small{font-size:14px;color:var(--muted);font-weight:500;margin-left:4px}
+.stage{background:var(--space);border-radius:6px;display:flex;justify-content:center;align-items:center;overflow:hidden}
+.mapwrap{position:relative;width:100%;touch-action:none;cursor:grab}
+.mapwrap.globe{width:min(100%,68vh);aspect-ratio:1/1}
+.mapwrap.flat{aspect-ratio:2/1;cursor:crosshair;touch-action:manipulation}
+.mapwrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.inspect{position:absolute;left:8px;bottom:8px;max-width:calc(100% - 16px);background:rgba(10,20,28,.82);color:#E8EEF1;font-size:13px;padding:5px 8px;border-radius:4px;pointer-events:none;display:none}
+.hint{font-size:13px;color:var(--muted);margin:6px 0 0}
+.legend{display:flex;align-items:center;gap:6px 12px;margin:8px 0 2px;font-size:13px;color:var(--muted);flex-wrap:wrap;min-height:22px}
+.bar{height:10px;flex:1 1 160px;max-width:320px;border-radius:2px}
+.swatch{display:inline-block;width:12px;height:12px;border-radius:2px;vertical-align:-2px;margin-right:4px}
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:2px 14px;margin:10px 0 12px;font-size:13px;color:var(--muted)}
+.stats b{display:block;color:var(--ink);font-size:18px;font-weight:600}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:12px}
+.row{display:flex;flex-wrap:wrap;gap:10px 16px;align-items:center}
+.row + .row{margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+button,select,input[type=text]{font:inherit;color:var(--ink);background:var(--bg);border:1px solid var(--line);border-radius:4px;padding:6px 11px;min-height:36px}
+button{cursor:pointer;font-weight:500}
+button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent);min-width:84px}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:4px;overflow:hidden}
+.seg button{border:0;border-radius:0;background:transparent;min-height:34px}
+.seg button + button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--ink);color:var(--bg)}
+label{display:inline-flex;align-items:center;gap:6px;font-size:14px}
+input[type=range]{accent-color:var(--accent);width:120px}
+input[type=text]{width:120px}
+.field-label{color:var(--muted);font-size:13px}
+.cols{display:grid;grid-template-columns:1fr;gap:14px;margin-top:14px}
+@media(min-width:820px){.cols{grid-template-columns:1.1fr 1fr}}
+h2{font-size:16px;font-weight:600;margin:0 0 8px}
+.log{list-style:none;margin:0;padding:0;max-height:320px;overflow-y:auto;border-left:3px solid var(--line)}
+.log li{padding:5px 0 5px 10px;font-size:14px;border-bottom:1px solid var(--line);position:relative}
+.log li::before{content:"";position:absolute;left:-7px;top:11px;width:11px;height:11px;border-radius:50%;background:var(--panel);border:2px solid var(--muted)}
+.log li.rift::before{border-color:var(--div)} .log li.suture::before,.log li.collide::before{border-color:var(--conv)}
+.log li.collide::before{background:var(--panel)} .log li.suture::before{background:var(--conv)}
+.log li.lost::before{border-color:var(--muted);background:var(--muted)} .log li.island::before{border-color:var(--ochre)}
+.log .t{color:var(--muted);margin-right:6px}
+.log .w{color:var(--muted);margin-left:6px;white-space:nowrap}
+.empty{color:var(--muted);font-size:14px;padding:6px 10px}
+.notes{font-size:14px}
+.colpanel{margin:10px 0 0}
+.colhead{display:flex;flex-wrap:wrap;gap:4px 14px;font-size:14px;margin-bottom:8px}
+.colhead b{font-weight:600}
+.strat{display:flex;flex-direction:column;gap:2px;max-width:520px}
+.unit{display:flex;align-items:center;gap:10px;font-size:13.5px}
+.unit .blk{width:54px;flex:none;border-radius:2px;border:1px solid rgba(0,0,0,.18)}
+.unit .lbl{line-height:1.25}
+.unit .lbl span{color:var(--muted)}
+.eps{margin:10px 0 0;padding:0;list-style:none;font-size:13.5px}
+.eps li{padding:3px 0;border-top:1px solid var(--line)}
+.muted{color:var(--muted)}
+.handoff p{margin:0 0 10px;font-size:14px;max-width:72ch}
+.handoff .row{margin-top:0}
+.summary{font-size:14px;margin-top:10px}
+.summary div{margin:2px 0}
+.notes p{margin:0 0 8px;max-width:72ch}
+.notes .tag{font-weight:600}
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>L0 plate tectonics sandbox</h1>
+    <div class="clock num" id="clock">0<small>million years</small></div>
+  </header>
+
+  <div class="stage"><div class="mapwrap globe" id="mapwrap">
+    <canvas id="map" aria-label="Simulated planet"></canvas>
+    <div class="inspect num" id="inspect"></div>
+  </div></div>
+  <p class="hint" id="hint">Drag to turn the globe. Tap a spot to inspect it.</p>
+  <div class="legend" id="legend"></div>
+  <section class="panel colpanel" id="colpanel" aria-live="polite">
+    <div class="muted" id="colEmpty">Tap the map to see the rock column and fault history at that spot.</div>
+    <div id="colBody" hidden></div>
+  </section>
+
+  <div class="stats">
+    <div>Plates<b class="num" id="sPlates">–</b></div>
+    <div>Land above sea<b class="num" id="sLand">–</b></div>
+    <div>Continental crust<b class="num" id="sCont">–</b></div>
+    <div>Mean seafloor age<b class="num" id="sAge">–</b></div>
+    <div>Units per continental column<b class="num" id="sUnits">–</b></div>
+    <div>Net rotation<b class="num" id="sNet">–</b></div>
+    <div>Compute per step<b class="num" id="sMs">–</b></div>
+    <div>Simulated rate<b class="num" id="sRate">–</b></div>
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <button class="primary" id="play">Run</button>
+      <button id="stepBtn">Step</button>
+      <label><span class="field-label">Steps per frame</span><input type="range" id="speed" min="1" max="20" value="3"><span class="num" id="speedVal">3</span></label>
+      <div class="seg" role="group" aria-label="Projection" id="proj">
+        <button data-p="globe" aria-pressed="true">Globe</button>
+        <button data-p="flat" aria-pressed="false">Map</button>
+      </div>
+      <label><input type="checkbox" id="spin" checked> Spin</label>
+    </div>
+    <div class="row">
+      <div class="seg" role="group" aria-label="Map view" id="views">
+        <button data-v="elev" aria-pressed="true">Elevation</button>
+        <button data-v="rock" aria-pressed="false">Rock type</button>
+        <button data-v="faults" aria-pressed="false">Fault history</button>
+        <button data-v="l1" aria-pressed="false">L1 preview</button>
+        <button data-v="plates" aria-pressed="false">Plates</button>
+        <button data-v="age" aria-pressed="false">Seafloor age</button>
+        <button data-v="thick" aria-pressed="false">Crust thickness</button>
+      </div>
+      <label><input type="checkbox" id="arrows" checked> Velocity arrows</label>
+      <label><input type="checkbox" id="hots" checked> Hotspots</label>
+      <label><input type="checkbox" id="nnr" checked> Remove net rotation</label>
+    </div>
+    <div class="row">
+      <label><span class="field-label">Seed</span><input type="text" id="seed" value="genesis" spellcheck="false"></label>
+      <button id="randSeed">New seed</button>
+      <label><span class="field-label">Initial plates</span><input type="range" id="nPlates" min="4" max="20" value="10"><span class="num" id="nPlatesVal">10</span></label>
+      <label><span class="field-label">Continental crust</span><input type="range" id="contT" min="25" max="60" step="5" value="50"><span class="num" id="contTVal">50%</span></label>
+      <label><span class="field-label">Start</span>
+        <select id="mode"><option value="scatter">Scattered continents</option><option value="super">Supercontinent</option></select></label>
+      <label><span class="field-label">Resolution</span>
+        <select id="grid"><option value="64">Coarse, ~160 km cells</option><option value="96" selected>Medium, ~105 km cells</option><option value="128">Fine, ~78 km cells</option></select></label>
+      <button id="reset">Rebuild world</button>
+    </div>
+  </div>
+
+  <div class="cols">
+    <section class="panel handoff">
+      <h2>L1 handoff</h2>
+      <p>Freeze the world and package what the next level needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue, and current plate motions.</p>
+      <div class="row">
+        <button class="primary" id="extract">Extract handoff</button>
+        <button id="download" hidden>Download JSON</button>
+        <label id="tracesLbl" hidden><input type="checkbox" id="traces" checked> Fault traces</label>
+      </div>
+      <div class="summary" id="summary"></div>
+    </section>
+    <section class="panel">
+      <h2>Event log</h2>
+      <ul class="log" id="log"></ul>
+    </section>
+    <section class="panel notes">
+      <h2>What’s modeled, and what’s faked</h2>
+      <p><span class="tag">Grid.</span> A cube-sphere: six faces of n × n cells projected onto an Earth-sized sphere, with constant-time lookup of the cell under any direction. Cell sizes vary by about ±25% across a face.</p>
+      <p><span class="tag">Plates.</span> Each plate stores its crust in its own body frame and rotates rigidly about an Euler pole, with angular velocity drifting randomly. Each plate’s speed relaxes toward its own preferred value (a free 3D random walk would creep outward until it hit the 8 cm/yr cap). Every step, each fixed cell asks which plates now cover it.</p>
+      <p><span class="tag">Net rotation.</span> Independent random plate motions add up to a shared spin of the whole lithosphere over the mantle, which grows over time, like the flying ice cube in molecular dynamics. By default, every step computes that shared spin (each cell’s velocity weighted by its area, minus the part along its own position) and subtracts it from every plate. Relative motions, and so all boundaries and faults, are unchanged; only hotspot tracks and continents’ latitudes are affected. Earth’s lithosphere does drift slowly relative to hotspots, roughly 0.1–0.4° per million years by different estimates, so unticking the box is not wrong, just unconstrained.</p>
+      <p><span class="tag">Boundaries.</span> Where two plates overlap, denser crust is consumed: oceanic under continental, older oceanic under younger. Subduction thickens the overriding plate 1–3 cells inland and marks a trench. Continent–continent collision keeps all of the consumed crust: head-on, it underthrusts and thickens the winner a few cells inland; sideways, it piles up at the boundary. Continental slices pushed onto seafloor accrete as continent. Sustained collision welds plates. Uncovered cells get new seafloor of age zero, which is how ridges form.</p>
+      <p><span class="tag">Rock columns.</span> Every crust parcel carries a stack of up to eight units, bottom to top, each with a rock type, formation time and thickness. Deposition pushes units: arc volcanics, hotspot or flood basalt, collisional metamorphics, marine shelf sediments, and clastic sediments shed by erosion. Erosion shaves the top and pops units, exposing older rock. Thickening at depth goes into the basement unit. Each unit remembers the plate it formed on. Same-type units from the same plate formed within 150 million years merge, and the two deepest fold together when the stack is full. Eroded sediment is spread over every lower neighbour in proportion to its drop. The Rock type map shows the rock with the most thickness in the top kilometre, not the topmost veneer.</p>
+      <p><span class="tag">Faults.</span> At every plate-boundary cell, the relative motion is split into an across-boundary part (convergence or extension) and an along-boundary part. Those slips accumulate in the parcel’s fault record, along with the boundary’s strike, stored in the plate’s own frame so dead faults ride along with the crust. A record keeps the current and previous episode; a new one starts after 10 million years of quiet or of a different style. Continental collisions now thicken crust in proportion to the across-boundary share of motion, so oblique collisions build less relief.</p>
+      <p><span class="tag">Formations and domains.</span> At handoff, units in neighbouring continental columns are linked when their rock type and origin plate match and their ages agree (within 40 million years, or 10% of their age for old rock), walking both stacks bottom to top so order is preserved. Linked units become formations. Neighbours on the same plate whose stacks share at least 40% of their thickness by matched units form a domain; slivers under eight columns join a neighbouring domain.</p>
+      <p><span class="tag">L1 preview.</span> Elevation is smoothed over about three cells and interpolated bilinearly on the cube grid; the coast is its zero contour. Formation thicknesses are averaged over neighbours in the same domain (absent counts as zero, so isolated specks fade and edges pinch out) and interpolated per pixel without crossing domain boundaries. A ridged noise field stands in for L1 relief: valleys cut deeper into the formation stack and expose older units. The noise is a placeholder for a real L1 terrain model.</p>
+      <p><span class="tag">Handoff.</span> Extraction groups continental cells with at least 60 km of recorded slip and similar strike, then traces each group into polylines. Its kind is thrust, normal or strike-slip from the summed slip. Rock columns and faults are copied when crust is copied, and orphaned records are garbage-collected.</p>
+      <p><span class="tag">Elevation.</span> Derived, not stored: Airy isostasy for continents, square-root-of-age cooling for seafloor. Hotspots are fixed in the mantle frame, so moving plates drag curved island chains off them.</p>
+      <p><span class="tag">Surface and budget.</span> Continental crust diffuses and erodes; sediment builds shelves. A feedback term speeds margin growth when continental area is below the chosen target and makes drowned margins founder back to seafloor when it’s above. The Continental crust slider sets both the starting fraction and that target. Land above sea is roughly half of it in the long run, because erosion wears continents toward sea level; Earth has about 40% continental crust (including shelves) and 29% land. This thermostat is a deliberate fudge to keep the crust budget stable, not physics.</p>
+      <p><span class="tag">Stale cells.</span> Plate-grid cells that no fixed cell samples in a step miss that step’s surface processes. Each step, such a cell surrounded by sampled neighbours takes their crust type and mean thickness, so old seafloor can’t hide inside a continent that grew around it. When plates weld, the surviving plate’s grid pulls crust from the absorbed plate for every cell on the absorbed plate’s territory, rather than each absorbed cell pushing to its nearest target, which left holes.</p>
+      <p><span class="tag">Known artifacts.</span> Blocky streaks in seafloor age come from nearest-cell resampling as plates rotate. The same resampling makes ragged boundaries, so many continental margins carry some fault record, and extracted traces are fragmented into segments a few hundred kilometres long. Most remaining flicker in the Rock type map comes from that resampling: about one cell in five samples a different crust parcel each step. The handoff smooths it out, but L0 itself would need a finer plate grid or moving particles to remove it. The same seed and settings always reproduce the same world.</p>
+    </section>
+  </div>
+</main>
+<script>

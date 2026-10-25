@@ -3,16 +3,11 @@ on: [push, pull_request]
 jobs:
   test:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        node: [18, 20, 22]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: ${{ matrix.node }}
-      - run: npm test
-      - run: node bin/erode.js --preset fault-scarp --cols 48 --rows 48 --steps 20 --out out/ci
-      - run: node bin/erode.js --preset earthquake-scarp --cols 48 --rows 48 --steps 20 --out out/ci-quake
-      - run: node examples/detail.js out/ci-detail
-      - run: node scripts/build-single.js out/ci/single.html
+          node-version: 20
+      - name: plates.html is up to date with src/
+        run: cp plates.html /tmp/committed.html && sh build.sh && cmp plates.html /tmp/committed.html
+      - run: node tests/run_all.js
