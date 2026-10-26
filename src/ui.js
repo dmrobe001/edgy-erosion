@@ -23,6 +23,8 @@ let world,view="elev",proj="globe",running=false,msEma=0,rateEma=0,lastFrame=per
 let cellRGB=null,colorsDirty=true,lightW=null,handoff=null,downloadsP=null,selCell=-1,l1=null,l1Time=0,geo=null,geoDirty=true;
 const fineNoise=SIM.makeNoise3(918273);
 let yaw=0.6,pitch=0.35,camDirty=true,pixIdx=null,pixLimb=null,pixDir=null,imgData=null,pixW=0,pixH=0,Mw=null;
+// zoom on the globe (1 = whole disc) and on the map (1 = whole map, centred on mC in map units); run target (Myr)
+let gZoom=1,mZoom=1,mC=[0,0],goode=null,goodeSteps=-1,runStart=0,runTarget=0,selMask=null,selMaskKey="";
 
 function prepLight(cube){ // per-neighbour weights for hillshading under a fixed sun
   if(cube._lw)return cube._lw;const N=cube.N,p=cube.pos,nb=cube.nb,L=[-0.45,0.55,0.70];const cr=Math.PI/2/cube.n,lw=new Float32Array(4*N);
@@ -35,17 +37,12 @@ function computeColors(){
   if(!cellRGB||cellRGB.length!==N*3)cellRGB=new Uint8Array(N*3);
   const pc=view==="plates"?pl.map(p=>[hsl(p.hue,48,64),hsl(p.hue,42,36)]):null;
   const conv=hexToRgb(getVar("--conv")),divc=hexToRgb(getVar("--div")),tran=hexToRgb(getVar("--trans"));
-  const fkRGB=[[0,0,0],conv,divc,tran];
-  for(let i=0;i<N;i++){
+    for(let i=0;i<N;i++){
     let e=E[i];const land=e>0;let g=0;for(let k=0;k<4;k++)g+=(E[nb[4*i+k]]-e)*lw[4*i+k];
     let s=land?1-0.35*g:1-0.1*g;s=s<0.6?0.6:s>1.25?1.25:s;
     let r,gg,b;
     if(view==="elev"){if(!K[i]&&tr[i]>0.05)e-=2.2*Math.min(1,tr[i]);let k=Math.round((e+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];gg=LUT_E[k*3+1];b=LUT_E[k*3+2];}
     else if(view==="rock"){const c=ROCK_RGB[R[i]]||ROCK_RGB[1];const age=t-RA[i];const f=1-0.32*Math.min(1,age/1500);r=c[0]*f;gg=c[1]*f;b=c[2]*f;s=1+(s-1)*0.6;}
-    else if(view==="faults"){const base=land?120+Math.min(60,e*12):38+Math.max(-20,e*2);r=gg=b=base;s=1+(s-1)*0.5;
-      const fi=w.faultCellInfo(i);if(fi){const a=Math.min(1,Math.log10(1+fi.slip)/3.2)*(fi.active?1:0.55),c=fkRGB[fi.kind];r=r*(1-a)+c[0]*a;gg=gg*(1-a)+c[1]*a;b=b*(1-a)+c[2]*a;}}
-    else if(view==="age"){if(K[i]){const v=land?150:110;r=gg=b=v;}else{let k=Math.round((t-B[i])/200*255);if(k>255)k=255;if(k<0)k=0;r=LUT_A[k*3];gg=LUT_A[k*3+1];b=LUT_A[k*3+2];s=1+(s-1)*0.4;}}
-    else if(view==="thick"){let k=Math.round(T[i]/80*255);k=k<0?0:k>255?255:k;r=LUT_T[k*3];gg=LUT_T[k*3+1];b=LUT_T[k*3+2];s=1+(s-1)*0.5;}
     else{const p=O[i],c=pc[p][K[i]?0:1];r=c[0];gg=c[1];b=c[2];s=1+(s-1)*0.4;
       for(let k=0;k<4;k++){const j=nb[4*i+k],q=O[j];if(q===p)continue;
         const P=pl[p],Q=pl[q],dx=Q.W[0]-P.W[0],dy=Q.W[1]-P.W[1],dz=Q.W[2]-P.W[2],x=pos[3*i],y=pos[3*i+1],z=pos[3*i+2];
@@ -61,21 +58,49 @@ function camMatrix(){ // columns: world directions of camera right, up, toward-v
   const f=v=>{const y1=v[1]*cp+v[2]*sp,z1=-v[1]*sp+v[2]*cp;const wx=z1,wy=v[0],wz=y1;return[wx*cy-wy*sy,wx*sy+wy*cy,wz];};
   const a=f([1,0,0]),b=f([0,1,0]),c=f([0,0,1]);return[a,b,c];}
 
+// Interrupted Goode homolosine (equal area): sinusoidal within PHI1 of the equator, Mollweide beyond, shifted to meet.
+// Map units: x is longitude offset at the equator (radians, -pi..pi), y in the same units. The cuts are placed for this
+// planet: the map edge on the meridian crossing the least land, then one more cut in the north and two in the south,
+// each on the meridian crossing the least land in its hemisphere (counting land within 4 degrees), 50 degrees apart.
+const G_PHI1=0.7109889,G_DY=0.0528035,G_YMAX=Math.SQRT2-G_DY,G_ASP=2*Math.PI/(2*G_YMAX);
+function goodeLat(phi){const a=Math.abs(phi);if(a<=G_PHI1)return[phi,Math.cos(phi)];
+  let t=a,tg=Math.PI*Math.sin(a);for(let k=0;k<30;k++){const f=2*t+Math.sin(2*t)-tg,d=2+2*Math.cos(2*t);if(Math.abs(d)<1e-12)break;t-=f/d;if(Math.abs(f)<1e-12)break;}
+  t=Math.min(t,Math.PI/2);return[Math.sign(phi)*(Math.SQRT2*Math.sin(t)-G_DY),2*Math.SQRT2/Math.PI*Math.cos(t)];}
+function goodeLatInv(y){const a=Math.abs(y);if(a<=G_PHI1)return[y,Math.cos(y)];if(a>G_YMAX)return null;
+  const t=Math.asin(Math.min(1,(a+G_DY)/Math.SQRT2)),phi=Math.asin(Math.max(-1,Math.min(1,(2*t+Math.sin(2*t))/Math.PI)));return[Math.sign(y)*phi,2*Math.SQRT2/Math.PI*Math.cos(t)];}
+function goodeLayout(){const lk=world.cube.lookup,E=world.elev,nl=[new Float64Array(360),new Float64Array(360)];
+  for(let k=0;k<360;k++){const lon=(k+0.5-180)*Math.PI/180,c=Math.cos(lon),sn=Math.sin(lon);
+    for(let j=0;j<90;j++){const lat=(j+0.5)*Math.PI/180,cl=Math.cos(lat),sl=Math.sin(lat);if(E[lk(cl*c,cl*sn,sl)]>0)nl[0][k]++;if(E[lk(cl*c,cl*sn,-sl)]>0)nl[1][k]++;}}
+  const cost=nl.map(a=>Float64Array.from(a,(v,k)=>{let s=0;for(let d=-4;d<=4;d++)s+=a[(k+d+360)%360];return s;})),far=(k,cuts)=>cuts.every(c=>Math.min(Math.abs(k-c),360-Math.abs(k-c))>=50);
+  let edge=0;for(let k=1;k<360;k++)if(cost[0][k]+cost[1][k]<cost[0][edge]+cost[1][edge])edge=k;
+  const pick=(h,n)=>{const cuts=[edge];for(let q=0;q<n;q++){let b=-1;for(let k=0;k<360;k++)if(far(k,cuts)&&(b<0||cost[h][k]<cost[h][b]))b=k;if(b>=0)cuts.push(b);}return cuts.slice(1);};
+  const lc=(edge+0.5-180)*Math.PI/180+Math.PI,rel=k=>{let r=(k+0.5-180)*Math.PI/180-lc;while(r<=-Math.PI)r+=2*Math.PI;while(r>Math.PI)r-=2*Math.PI;return r;};
+  const lobes=cuts=>{const xs=[-Math.PI,...cuts.map(rel).sort((a,b)=>a-b),Math.PI],L=[];for(let q=0;q+1<xs.length;q++)L.push({a:xs[q],b:xs[q+1],m:(xs[q]+xs[q+1])/2});return L;};
+  goode={lc,edgeLonDeg:(edge+0.5-180),north:lobes(pick(0,1)),south:lobes(pick(1,2))};goodeSteps=world.steps;camDirty=true;}
+function goodeFwd(lat,lon){let r=lon-goode.lc;while(r<=-Math.PI)r+=2*Math.PI;while(r>Math.PI)r-=2*Math.PI;const L=lat>=0?goode.north:goode.south;
+  let q=0;while(q<L.length-1&&r>=L[q].b)q++;const [y,k]=goodeLat(lat);return[L[q].m+(r-L[q].m)*k,y,(lat>=0?0:10)+q];}
+function goodeInv(x,y,out){const li=goodeLatInv(y);if(!li||x<-Math.PI||x>Math.PI)return false;const L=y>=0?goode.north:goode.south;
+  let q=0;while(q<L.length-1&&x>=L[q].b)q++;const lb=L[q],r=lb.m+(x-lb.m)/li[1];if(r<lb.a||r>lb.b)return false;
+  const lon=goode.lc+r,cl=Math.cos(li[0]);out[0]=cl*Math.cos(lon);out[1]=cl*Math.sin(lon);out[2]=Math.sin(li[0]);return true;}
+// map units of a canvas pixel, and back
+const mapXY=(px,py)=>[mC[0]+((px+0.5)/pixW-0.5)*2*Math.PI/mZoom,mC[1]+(0.5-(py+0.5)/pixH)*2*G_YMAX/mZoom];
+function clampMap(){const hx=Math.PI*(1-1/mZoom),hy=G_YMAX*(1-1/mZoom);mC[0]=Math.max(-hx,Math.min(hx,mC[0]));mC[1]=Math.max(-hy,Math.min(hy,mC[1]));}
 function sizeCanvas(){
   const dpr=window.devicePixelRatio||1,cw=wrap.clientWidth;
-  let W,H;if(proj==="globe"){W=H=Math.min(520,Math.round(cw*dpr));}else{W=Math.min(1024,Math.round(cw*dpr));W-=W%2;H=W/2;}
+  if(proj==="flat"&&(!goode||(!running&&goodeSteps!==world.steps)))goodeLayout();
+  let W,H;if(proj==="globe"){W=H=Math.min(520,Math.round(cw*dpr));}else{W=Math.min(1024,Math.round(cw*dpr));W-=W%2;H=Math.round(W/G_ASP);}
   if(W!==pixW||H!==pixH||!pixIdx){pixW=W;pixH=H;canvas.width=W;canvas.height=H;imgData=canvas.getContext("2d").createImageData(W,H);pixIdx=new Int32Array(W*H);pixLimb=new Uint8Array(W*H);camDirty=true;}
 }
 function buildPixIdx(){
   const lk=world.cube.lookup,W=pixW,H=pixH;
   if(proj==="globe"){
     Mw=camMatrix();const [a,b,c]=Mw;
-    for(let py=0;py<H;py++){const sy=1-(py+0.5)/H*2;for(let px=0;px<W;px++){const sx=(px+0.5)/W*2-1,r2=sx*sx+sy*sy,q=py*W+px;
+    for(let py=0;py<H;py++){const sy=(1-(py+0.5)/H*2)/gZoom;for(let px=0;px<W;px++){const sx=((px+0.5)/W*2-1)/gZoom,r2=sx*sx+sy*sy,q=py*W+px;
       if(r2>1){pixIdx[q]=-1;continue;}const sz=Math.sqrt(1-r2);
       pixIdx[q]=lk(a[0]*sx+b[0]*sy+c[0]*sz,a[1]*sx+b[1]*sy+c[1]*sz,a[2]*sx+b[2]*sy+c[2]*sz);pixLimb[q]=Math.round(255*(0.5+0.5*Math.sqrt(sz)));}}
   } else {
-    for(let py=0;py<H;py++){const lat=Math.PI/2-(py+0.5)/H*Math.PI,cl=Math.cos(lat),sl=Math.sin(lat);
-      for(let px=0;px<W;px++){const lon=(px+0.5)/W*2*Math.PI-Math.PI;pixIdx[py*W+px]=lk(cl*Math.cos(lon),cl*Math.sin(lon),sl);pixLimb[py*W+px]=255;}}
+    const v=[0,0,0];for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=mapXY(px,py);
+      if(goodeInv(x,y,v)){pixIdx[q]=lk(v[0],v[1],v[2]);pixLimb[q]=255;}else pixIdx[q]=-1;}
   }
   camDirty=false;geoDirty=true;
 }
@@ -87,11 +112,10 @@ function buildGeo(){ // per pixel: four cells and bilinear weights on the cube g
     geo.c[4*q]=c;geo.c[4*q+1]=cB;geo.c[4*q+2]=cC;geo.c[4*q+3]=cD;geo.wx[q]=Math.abs(tx);geo.wy[q]=Math.abs(ty);
     const v=fineNoise(x,y,z,22,5),r=1-Math.abs(2*v-1);geo.n[q]=r*r;};
   if(proj==="globe"){const [a,b,c]=Mw;
-    for(let py=0;py<H;py++){const sy=1-(py+0.5)/H*2;for(let px=0;px<W;px++){const sx=(px+0.5)/W*2-1,r2=sx*sx+sy*sy,q=py*W+px;if(r2>1)continue;const sz=Math.sqrt(1-r2);
+    for(let py=0;py<H;py++){const sy=(1-(py+0.5)/H*2)/gZoom;for(let px=0;px<W;px++){const sx=((px+0.5)/W*2-1)/gZoom,r2=sx*sx+sy*sy,q=py*W+px;if(r2>1)continue;const sz=Math.sqrt(1-r2);
       put(q,a[0]*sx+b[0]*sy+c[0]*sz,a[1]*sx+b[1]*sy+c[1]*sz,a[2]*sx+b[2]*sy+c[2]*sz);}}
   } else {
-    for(let py=0;py<H;py++){const lat=Math.PI/2-(py+0.5)/H*Math.PI,cl=Math.cos(lat),sl=Math.sin(lat);
-      for(let px=0;px<W;px++){const lon=(px+0.5)/W*2*Math.PI-Math.PI;put(py*W+px,cl*Math.cos(lon),cl*Math.sin(lon),sl);}}
+    const v=[0,0,0];for(let py=0;py<H;py++)for(let px=0;px<W;px++){const [x,y]=mapXY(px,py);if(goodeInv(x,y,v))put(py*W+px,v[0],v[1],v[2]);}
   }
   geoDirty=false;
 }
@@ -123,8 +147,9 @@ function paintL1(){
 }
 function project(v){ // world unit vector -> canvas px, or null if hidden
   if(proj==="globe"){const [a,b,c]=Mw;const x=v[0]*a[0]+v[1]*a[1]+v[2]*a[2],y=v[0]*b[0]+v[1]*b[1]+v[2]*b[2],z=v[0]*c[0]+v[1]*c[1]+v[2]*c[2];
-    if(z<0.05)return null;return[(x+1)/2*pixW,(1-y)/2*pixH];}
-  const lat=Math.asin(Math.max(-1,Math.min(1,v[2]))),lon=Math.atan2(v[1],v[0]);return[(lon+Math.PI)/(2*Math.PI)*pixW,(Math.PI/2-lat)/Math.PI*pixH,lon];
+    if(z<0.05)return null;return[(x*gZoom+1)/2*pixW,(1-y*gZoom)/2*pixH];}
+  const lat=Math.asin(Math.max(-1,Math.min(1,v[2]))),lon=Math.atan2(v[1],v[0]),g=goodeFwd(lat,lon);
+  return[((g[0]-mC[0])*mZoom/(2*Math.PI)+0.5)*pixW,(0.5-(g[1]-mC[1])*mZoom/(2*G_YMAX))*pixH,g[2]];
 }
 function render(){
   sizeCanvas();if(camDirty)buildPixIdx();
@@ -133,19 +158,20 @@ function render(){
   else{if(colorsDirty)computeColors();
     for(let q=0;q<n;q++){const i=pixIdx[q],o=4*q;if(i<0){d[o+3]=0;continue;}const l=pixLimb[q];
       d[o]=cellRGB[3*i]*l>>8;d[o+1]=cellRGB[3*i+1]*l>>8;d[o+2]=cellRGB[3*i+2]*l>>8;d[o+3]=255;}}
-  const mask=l1GlobeMask();
+  const mask=selGlobeMask();
   if(mask){for(let q=0;q<n;q++){const i=pixIdx[q];if(i<0||!mask[i])continue;const o=4*q,a=mask[i]===2?0.38:0.18;
     d[o]=d[o]*(1-a)+255*a;d[o+1]=d[o+1]*(1-a)+214*a;d[o+2]=d[o+2]*(1-a)+90*a;}}
   const ctx=canvas.getContext("2d");ctx.clearRect(0,0,pixW,pixH);ctx.putImageData(imgData,0,0);
   const dpr=pixW/wrap.clientWidth;
-  if($("hots").checked){for(const h of world.hotspots){const p=project(h.v);if(!p)continue;const rad=Math.max(4,5*dpr);
+  const marks=$("marks").checked;
+  if(marks){for(const h of world.hotspots){const p=project(h.v);if(!p)continue;const rad=Math.max(4,5*dpr);
     ctx.lineWidth=Math.max(1.5,1.6*dpr);ctx.strokeStyle="rgba(0,0,0,.55)";ctx.beginPath();ctx.arc(p[0],p[1],rad+1,0,7);ctx.stroke();
     ctx.strokeStyle="#ffcf4a";ctx.beginPath();ctx.arc(p[0],p[1],rad,0,7);ctx.stroke();}}
-  if($("arrows").checked){
+  if(marks){
     for(const P of world.plates){if(!P.alive||P.area<world.N*0.006)continue;const c=P.c;
       const v=[P.W[1]*c[2]-P.W[2]*c[1],P.W[2]*c[0]-P.W[0]*c[2],P.W[0]*c[1]-P.W[1]*c[0]];const k=28;
       const e=[c[0]+v[0]*k,c[1]+v[1]*k,c[2]+v[2]*k];const el=Math.hypot(...e);e[0]/=el;e[1]/=el;e[2]/=el;
-      const a=project(c),b=project(e);if(!a||!b)continue;if(proj==="flat"&&Math.abs(a[2]-b[2])>Math.PI)continue;drawArrow(ctx,a[0],a[1],b[0],b[1],dpr);}
+      const a=project(c),b=project(e);if(!a||!b)continue;if(proj==="flat"&&a[2]!==b[2])continue;drawArrow(ctx,a[0],a[1],b[0],b[1],dpr);}
   }
   drawTraces(ctx,dpr);
 }
@@ -158,7 +184,7 @@ function drawTraces(ctx,dpr){
       ctx.strokeStyle=col;ctx.lineWidth=wd;ctx.lineCap="round";ctx.lineJoin="round";ctx.setLineDash(f.active||col.startsWith("rgba")?[]:[5*dpr,4*dpr]);
       ctx.beginPath();let pen=false;
       for(let k=0;k<pts.length;k++){const p=pts[k];if(!p){pen=false;continue;}
-        if(pen&&proj==="flat"&&Math.abs(p[2]-pts[k-1][2])>Math.PI)pen=false;
+        if(pen&&proj==="flat"&&p[2]!==pts[k-1][2])pen=false;
         if(pen)ctx.lineTo(p[0],p[1]);else{ctx.moveTo(p[0],p[1]);pen=true;}}
       ctx.stroke();}
   }
@@ -174,22 +200,16 @@ function drawArrow(ctx,x0,y0,x1,y1,dpr){
 }
 
 // ---------- ui ----------
-const EMPTY_LOG='<li class="empty" style="border:0">Events appear here as the world evolves: rifts, collisions, sutures, consumed plates, hotspot islands.</li>';
+const EMPTY_LOG='<li class="empty" style="border:0">No events yet.</li>';
 function build(){
-  world=new SIM.World({n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:$("nnr").checked,contTarget:+$("contT").value/100});
-  l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();
+  world=new SIM.World({n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100});
+  actions=[];l0LastInspect=l1LastInspect=null;l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;selMask=null;goode=null;runStart=runTarget=0;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();logAction({a:"build",settings:{seed:world.opts.seed,resolution:world.n,initialPlates:world.opts.nPlates,start:world.opts.mode,continentalTarget:world.contTarget}});
 }
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
   const t=world.t;$("clock").innerHTML=t>=1000?fmtT(t)+"<small>billion years</small>":fmtT(t)+"<small>million years</small>";
-  $("sPlates").textContent=world.plates.filter(p=>p.alive).length;
   $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";
-  $("sCont").textContent=(world.contFrac*100).toFixed(1)+"%";
-  $("sAge").textContent=Math.round(world.oceanAge)+" Myr";
-  $("sUnits").textContent=world.meanUnits.toFixed(1);
-  $("sNet").textContent=(world.netRot||0).toFixed(2)+"°/Myr";
   $("sMs").textContent=msEma?msEma.toFixed(1)+" ms":"–";
-  $("sRate").textContent=rateEma?Math.round(rateEma)+" Myr/s":"–";
   const ev=world.events,last=world._lastN||0;
   if(ev.length&&ev[ev.length-1].n>last){
     const ul=$("log");if(loggedCount===0)ul.innerHTML="";
@@ -200,26 +220,26 @@ function updateUi(){
 }
 function updateLegend(){
   const L=$("legend");
-  if(view==="elev")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span><span>Sea level is the blue–green break; dark lines are trenches.</span>`;
-  else if(view==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Darker means older.</span>`;
-  else if(view==="l1")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Smoothed L0 elevation and formations, cut by stand-in fine relief (noise, not a real L1 model). Updates every few seconds while running.</span>`;
-  else if(view==="faults")L.innerHTML=`<span><i class="swatch" style="background:var(--conv)"></i>Thrust</span><span><i class="swatch" style="background:var(--div)"></i>Normal</span><span><i class="swatch" style="background:var(--trans)"></i>Strike-slip</span><span>Stronger colour means more total slip; faded means inactive.</span>`;
-  else if(view==="age")L.innerHTML=`<span class="num">0</span><span class="bar" style="background:${gradCss(AGE_STOPS,0,200)}"></span><span class="num">200 Myr</span><span>Continents shown grey.</span>`;
-  else if(view==="thick")L.innerHTML=`<span class="num">0</span><span class="bar" style="background:${gradCss(THICK_STOPS,0,80)}"></span><span class="num">80 km</span>`;
-  else L.innerHTML=`<span><i class="swatch" style="background:var(--conv)"></i>Convergent</span><span><i class="swatch" style="background:var(--div)"></i>Divergent</span><span><i class="swatch" style="background:var(--trans)"></i>Transform</span><span>Light fill is continental crust.</span>`;
+  if(view==="elev")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span>`;
+  else if(view==="rock"||view==="l1")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("");
+  else L.innerHTML=`<span><i class="swatch" style="background:var(--conv)"></i>Convergent</span><span><i class="swatch" style="background:var(--div)"></i>Divergent</span><span><i class="swatch" style="background:var(--trans)"></i>Transform</span>`;
 }
 function frame(now){
   let need=false;
-  if(running){const n=+$("speed").value,t0=performance.now();for(let k=0;k<n;k++){world.step();snapTick();}
-    const ms=(performance.now()-t0)/n;msEma=msEma?msEma*0.9+ms*0.1:ms;
-    const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=n*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
-    colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();l1WorldMoved();}
+  if(running){const n=+$("speed").value,t0=performance.now();let k=0;for(;k<n&&world.t<runTarget-1e-9;k++){world.step();snapTick();}
+    if(k){const ms=(performance.now()-t0)/k;msEma=msEma?msEma*0.9+ms*0.1:ms;
+      const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=k*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
+      colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();l1WorldMoved();}
+    if(world.t>=runTarget-1e-9)stopRun();}
   if(l1Busy()){l1Tick();lastFrame=now;requestAnimationFrame(frame);return;}
-  if(proj==="globe"&&$("spin").checked&&!dragging){yaw+=0.0035;camDirty=true;need=true;}
   if(need)render();lastFrame=now;requestAnimationFrame(frame);
 }
-$("play").onclick=()=>{if(l1Busy())return;running=!running;$("play").textContent=running?"Pause":"Run";};
-$("stepBtn").onclick=()=>{if(l1Busy())return;l1WorldMoved();const t0=performance.now();world.step();snapTick();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
+// Run advances L0 by the Gyr slider from where it starts, then stops; Run again continues for that long
+function stopRun(){running=false;logAction({a:"stop"});$("play").textContent="Run";render();l1SelectionMoved();}
+$("play").onclick=()=>{if(l1Busy())return;if(running){stopRun();return;}
+  if(world.t>=runTarget-1e-9){runStart=world.t;runTarget=runStart+1000*+$("gyr").value;}logAction({a:"run",untilMyr:runTarget});running=true;$("play").textContent="Pause";};
+$("gyr").oninput=e=>{$("gyrVal").textContent=e.target.value;if(runTarget>runStart)runTarget=runStart+1000*+e.target.value;};
+$("stepBtn").onclick=()=>{if(l1Busy())return;if(running)stopRun();l1WorldMoved();const t0=performance.now();world.step();snapTick();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();l1SelectionMoved();logAction({a:"step"});};
 $("speed").oninput=e=>$("speedVal").textContent=e.target.value;
 $("nPlates").oninput=e=>$("nPlatesVal").textContent=e.target.value;
 $("contT").oninput=e=>$("contTVal").textContent=e.target.value+"%";
@@ -229,28 +249,39 @@ $("randSeed").onclick=()=>{const w=["basalt","craton","ophiolite","gneiss","teth
   $("seed").value=w[Math.floor(Math.random()*w.length)]+"-"+Math.floor(Math.random()*1000);build();};
 $("seed").addEventListener("keydown",e=>{if(e.key==="Enter")build();});
 ["mode","grid"].forEach(id=>$(id).onchange=build);
-["arrows","hots","traces"].forEach(id=>$(id).onchange=()=>render());
-$("nnr").onchange=()=>{world.opts.nnr=$("nnr").checked;if(world.opts.nnr){world.removeNetRotation();world.updateStats(true);updateUi();render();}};
+["marks","traces"].forEach(id=>$(id).onchange=()=>render());
 document.querySelectorAll("#views button").forEach(b=>b.onclick=()=>{view=b.dataset.v;
   document.querySelectorAll("#views button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));colorsDirty=true;updateLegend();render();});
 document.querySelectorAll("#proj button").forEach(b=>b.onclick=()=>{proj=b.dataset.p;
   document.querySelectorAll("#proj button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));
-  wrap.className="mapwrap "+proj;$("hint").textContent=proj==="globe"?"Drag to turn the globe. Tap a spot to inspect it.":"Tap a spot to inspect it.";
-  pixIdx=null;render();});
-let dragging=false,downX=0,downY=0,lastX=0,lastY=0,moved=false;
-wrap.addEventListener("pointerdown",e=>{downX=lastX=e.clientX;downY=lastY=e.clientY;moved=false;if(proj==="globe"){dragging=true;wrap.setPointerCapture(e.pointerId);}});
-wrap.addEventListener("pointermove",e=>{if(!dragging)return;const dx=e.clientX-lastX,dy=e.clientY-lastY;lastX=e.clientX;lastY=e.clientY;
-  if(Math.abs(e.clientX-downX)+Math.abs(e.clientY-downY)>5)moved=true;
-  const k=3/wrap.clientWidth;yaw-=dx*k;pitch=Math.max(-1.45,Math.min(1.45,pitch+dy*k));camDirty=true;render();});
-wrap.addEventListener("pointerup",e=>{dragging=false;if(!moved)inspect(e);});
-wrap.addEventListener("pointercancel",()=>{dragging=false;});
+  wrap.className="mapwrap "+proj;pixIdx=null;render();});
+// Pointer gestures for a map element: one-finger drag, two-finger pinch or the wheel to zoom (about a point), and a tap
+// (press and release without moving) to select
+function gestures(el,{drag,zoom,tap}){const pts=new Map();let moved=false,sx=0,sy=0,lastD=0;
+  const mid=()=>{const a=[...pts.values()];return[(a[0][0]+a[1][0])/2,(a[0][1]+a[1][1])/2];},dist=()=>{const a=[...pts.values()];return Math.hypot(a[0][0]-a[1][0],a[0][1]-a[1][1]);};
+  el.addEventListener("pointerdown",e=>{try{el.setPointerCapture(e.pointerId);}catch(_){}pts.set(e.pointerId,[e.clientX,e.clientY]);
+    if(pts.size===1){moved=false;sx=e.clientX;sy=e.clientY;}else{moved=true;lastD=dist();}});
+  el.addEventListener("pointermove",e=>{const p=pts.get(e.pointerId);if(!p)return;const dx=e.clientX-p[0],dy=e.clientY-p[1];pts.set(e.pointerId,[e.clientX,e.clientY]);
+    if(pts.size>=2){const d=dist();if(lastD>0&&d>0){const m=mid();zoom(d/lastD,m[0],m[1]);}lastD=d;return;}
+    if(Math.abs(e.clientX-sx)+Math.abs(e.clientY-sy)>5)moved=true;if(moved)drag(dx,dy);});
+  const up=e=>{const had=pts.delete(e.pointerId);if(had&&pts.size===0&&!moved&&e.type==="pointerup")tap(e);if(pts.size<2)lastD=0;};
+  el.addEventListener("pointerup",up);el.addEventListener("pointercancel",up);
+  el.addEventListener("wheel",e=>{e.preventDefault();zoom(Math.exp(-e.deltaY*(e.deltaMode===1?0.05:0.0015)),e.clientX,e.clientY);},{passive:false});}
+let dragging=false;
+gestures(wrap,{
+  drag:(dx,dy)=>{if(proj==="globe"){const k=3/(wrap.clientWidth*gZoom);yaw-=dx*k;pitch=Math.max(-1.45,Math.min(1.45,pitch+dy*k));}
+    else{const r=canvas.getBoundingClientRect();mC[0]-=dx/r.width*2*Math.PI/mZoom;mC[1]+=dy/r.height*2*G_YMAX/mZoom;clampMap();}camDirty=true;render();},
+  zoom:(f,cx,cy)=>{if(proj==="globe")gZoom=Math.max(1,Math.min(8,gZoom*f));
+    else{const r=canvas.getBoundingClientRect(),px=(cx-r.left)/r.width*pixW,py=(cy-r.top)/r.height*pixH,[x0,y0]=mapXY(px,py);mZoom=Math.max(1,Math.min(12,mZoom*f));
+      const [x1,y1]=mapXY(px,py);mC[0]+=x0-x1;mC[1]+=y0-y1;clampMap();}
+    camDirty=true;render();},
+  tap:e=>inspect(e)});
 function inspect(e){
   const r=canvas.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*pixW),py=Math.floor((e.clientY-r.top)/r.height*pixH);
   if(px<0||py<0||px>=pixW||py>=pixH)return;const i=pixIdx[py*pixW+px];if(i<0)return;
-  if(l1Picking){l1PickAt(i);return;}
-  selCell=i;showColumn();
+  selCell=i;selMask=null;showColumn();l1Select(i);logAction({a:"select",cell:i});
   const w=world,e2=w.elev[i],box=$("inspect");box.style.display="block";
-  box.textContent=`${cellLoc(i)}: ${e2>=0?"elevation":"depth"} ${Math.abs(e2).toFixed(1)} km. Column shown below the map.`;
+  box.textContent=`${cellLoc(i)}: ${e2>=0?"elevation":"depth"} ${Math.abs(e2).toFixed(1)} km`;l0LastInspect={cell:i,text:box.textContent};
   clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",3000);
 }
 function cellLoc(i){const p=world.cube.pos,lat=Math.asin(p[3*i+2])*180/Math.PI,lon=Math.atan2(p[3*i+1],p[3*i])*180/Math.PI;
@@ -259,8 +290,8 @@ function fmtAgo(a){a=Math.max(0,a);return a>=1000?(a/1000).toFixed(2)+" Gyr":Mat
 function fmtKm(v){const a=Math.abs(v);return a>=100?Math.round(a).toLocaleString("en-US"):a.toFixed(a>=10?0:1);}
 const COMPASS=["north","northeast","east","southeast","south","southwest","west","northwest"];
 function showColumn(){
-  const body=$("colBody"),empty=$("colEmpty");
-  if(selCell<0||!world){body.hidden=true;empty.hidden=false;return;}
+  const body=$("colBody"),panel=$("colpanel");
+  if(selCell<0||!world){panel.hidden=true;return;}
   const w=world,i=selCell,P=w.plates[w.owner[i]],e=w.elev[i],v=w.velocityAt(i);
   const units=w.pool.units(w.wCol[i]).reverse();
   const crust=w.wK[i]?"Continental crust":`Oceanic crust, ${fmtAgo(w.t-w.wB[i])} old`;
@@ -274,7 +305,7 @@ function showColumn(){
       html+=`<li><b>${k}</b>, ${ep.active?"active now":`from ${fmtAgo(w.t-ep.t0)} to ${fmtAgo(w.t-ep.t1)} ago`}: <span class="num">${fmtKm(ep.across)} km ${ep.across>=0?"of convergence":"of extension"}, ${fmtKm(ep.along)} km sideways</span></li>`;}
     html+=`</ul>`;}
   else html+=`<p class="muted" style="margin:10px 0 0;font-size:13.5px">No fault slip recorded in this crust.</p>`;
-  body.innerHTML=html;body.hidden=false;empty.hidden=true;
+  body.innerHTML=html;panel.hidden=false;
 }
 function staleHandoff(){handoff=null;$("download").hidden=true;$("tracesLbl").hidden=true;$("summary").innerHTML=`<div class="muted">The world has moved on since the last snapshot. Extract again to refresh the handoff.</div>`;}
 function renderSummary(){
@@ -289,17 +320,17 @@ function renderSummary(){
   if(downloadsP)downloadsP.then(d=>{$("download").hidden=!d;if(!d)$("dlNote").textContent="File downloads aren’t available in this view.";});
 }
 $("extract").onclick=()=>{if(running){running=false;$("play").textContent="Run";}
-  handoff=world.extractFaults();handoff.l1=world.buildL1();l1=handoff.l1;l1Time=performance.now();renderSummary();render();};
+  handoff=world.extractFaults();handoff.l1=world.buildL1();logAction({a:"extract"});l1=handoff.l1;l1Time=performance.now();renderSummary();render();};
 $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
   const data=JSON.stringify(world.exportHandoff(handoff));
   const name=`l0-handoff-${($("seed").value||"genesis").replace(/[^a-z0-9-]/gi,"_")}-${Math.round(handoff.t)}myr.json`;
   try{await d.save({filename:name,data});$("dlNote").textContent="Saved.";}
   catch(err){$("dlNote").textContent=err&&err.code==="declined"?"Download cancelled.":"The download didn’t go through.";}};
 downloadsP=(window.claude&&typeof window.claude.use==="function")?window.claude.use("downloads").catch(()=>null):Promise.resolve(null);
-window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(l1St&&l1St.sh)l1Render();});
+window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(l1St&&(l1St.sh||l1St.pv))l1Render();});
 // ---------- L1 landmass ----------
 // L0 keeps its whole state every 10 Myr (the last four), so a landmass picked at the present can be replayed
-let snaps=[],l1Picking=false,l1St=null,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
+let snaps=[],l1St=null,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
 const SNAP_EVERY=10,SNAP_KEEP=4;
 function snapTick(){if(!world)return;const last=snaps[snaps.length-1];
   if(!last||world.t-last.t>=SNAP_EVERY-1e-9){snaps.push({t:world.t,steps:world.steps,snap:world.snapshot()});while(snaps.length>SNAP_KEEP)snaps.shift();}}
@@ -310,35 +341,55 @@ const FIN_STOPS=[[-0.5,"#2c5aa0"],[-0.2,"#9db8de"],[0,"#f2f0ea"],[0.15,"#e9b08a"
 const DYN_STOPS=[[-1,"#2c5aa0"],[-0.4,"#9db8de"],[0,"#f2f0ea"],[0.3,"#e9b08a"],[0.6,"#b8322a"]];
 const LUT_DYN=buildLut(DYN_STOPS,256,-1,0.6),RAIN_STOPS=[[-1.3,"#96703c"],[-0.7,"#dcc88c"],[-0.3,"#b4dc96"],[0.1,"#3ca078"],[0.5,"#145a8c"]];
 const LUT_RAIN=buildLut(RAIN_STOPS,256,-1.3,0.5),LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
-function l1Reset(){l1Picking=false;l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
-  document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
-  $("l1Info").innerHTML=`<div class="muted">No landmass picked yet.</div>`;l1TileSel=-1;l1TileInfo();}
+function l1Reset(){l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;
+  $("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
+  $("l1Info").innerHTML="";l1TileSel=-1;l1TileInfo();}
 // the newest saved state at least a window before the present
 const l1Entry=win=>{for(let k=snaps.length-1;k>=0;k--)if(snaps[k].t<=world.t-win-1e-9)return snaps[k];return null;};
-// a pick (or a finished run) belongs to this moment of L0; once L0 moves on, the pick is cleared and the result kept
-function l1WorldMoved(){if(!l1St)return;
-  if(l1St.phase==="picked"){l1St=null;l1Mask=null;$("l1Run").disabled=true;$("l1Info").innerHTML=`<div class="muted">L0 moved on, so the pick was cleared. Pick again.</div>`;}
-  else if(l1St.phase==="done"&&!l1St.stale){l1St.stale=true;l1Mask=null;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">L0 has moved on since this run; the map still shows the landmass as it was.</div>`);}}
-function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world||!l1St||l1St.stale||l1Busy())return null;const m=new Uint8Array(world.N),{cells,land}=l1St.pick;
-  for(let h=0;h<cells.length;h++)m[cells[h]]=h<land?2:1;return l1Mask=m;}
-$("l1Pick").onclick=()=>{if(l1Busy())return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
-  $("l1Info").innerHTML=`<div>Tap a landmass on the map above.</div>`;$("hint").textContent="Tap land to pick its landmass for L1.";};
-function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("hint").textContent=proj==="globe"?"Drag to turn the globe. Tap a spot to inspect it.":"Tap a spot to inspect it.";
-  const pick=L1.landmassAt(world,i);if(!pick){$("l1Info").innerHTML=`<div class="muted">That spot is under the sea. Pick again and tap land.</div>`;return;}
-  l1St={phase:"picked",pick,cell:i};l1Mask=null;l1PickInfo();render();}
-function l1PickInfo(){if(!l1St||l1St.phase!=="picked")return;const {pick}=l1St,win=+$("l1Win").value,entry=l1Entry(win),a=pick.land*world.cellKm*world.cellKm;
-  $("l1Run").disabled=!entry;
-  $("l1Info").innerHTML=`<div><b>Landmass</b> of about ${(a/1e6).toFixed(1)} million km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}.</div>`+
-    (entry?`<div class="muted">The replay starts from L0’s state saved at ${fmtT(entry.t)} Myr and runs ${fmtT(world.t-entry.t)} Myr to the present; the sheet runs the last ${win}.</div>`
-      :`<div class="muted">L0 has no saved state ${win} Myr back yet (it keeps one every ${SNAP_EVERY} Myr while it runs here). Run L0 a little longer, or shorten the window.</div>`);}
-$("l1Win").oninput=e=>{$("l1WinVal").textContent=e.target.value+" Myr";l1PickInfo();};
+// A finished run belongs to its moment of L0: once L0 moves on it is marked stale and kept until the selection changes.
+function l1WorldMoved(){if(l1St&&l1St.phase==="done"&&!l1St.stale){l1St.stale=true;l1Status();}}
+// the selected point's landmass, highlighted on L0's map (land strongly, its submerged rim faintly)
+function selGlobeMask(){if(!world||selCell<0||l1Busy())return null;const key=selCell+":"+world.steps;if(selMaskKey===key)return selMask;selMaskKey=key;
+  const pick=L1.landmassAt(world,selCell);if(!pick)return selMask=null;const m=new Uint8Array(world.N);for(let h=0;h<pick.cells.length;h++)m[pick.cells[h]]=h<pick.land?2:1;return selMask=m;}
+// Selection drives the L1 panel: a landmass shows at once, as L0 has it now (refining replays from a window earlier).
+// A finished run stays while the selection is on its landmass.
+function l1Select(i,force){if(l1Busy()||!world)return;
+  const S=l1St;if(!force&&S&&S.phase==="done"&&!S.stale&&S.pick.cells.indexOf(i)>=0&&S.pick.cells.indexOf(i)<S.pick.land){l1Status();return;}
+  const pick=L1.landmassAt(world,i);
+  if(!pick){l1Reset();$("l1Info").innerHTML=`<div class="muted">The selected point is under the sea.</div>`;return;}
+  l1Reset();l1St={phase:"picked",pick,cell:i,pv:l1MakePreview(pick)};l1Zoom=1;l1Pan=[0,0];l1View="terrain";
+  $("l1stage").hidden=false;$("l1controls").hidden=false;l1SetViews();l1Legend();l1Status();l1Render();}
+// after L0 moves (a step, or a run stopping): an unrefined selection follows L0
+function l1SelectionMoved(){if(selCell>=0&&(!l1St||l1St.phase==="picked"))l1Select(selCell,true);else l1Status();}
+// The preview frame: azimuthal equidistant about the landmass's centroid now, north up, in L0's fixed frame
+function l1MakePreview(pick){const pos=world.cube.pos;let cx=0,cy=0,cz=0;for(let h=0;h<pick.land;h++){const c=pick.cells[h];cx+=pos[3*c];cy+=pos[3*c+1];cz+=pos[3*c+2];}
+  const L=Math.hypot(cx,cy,cz)||1,c=[cx/L,cy/L,cz/L];let nr=[-c[2]*c[0],-c[2]*c[1],1-c[2]*c[2]],ln=Math.hypot(...nr);if(ln<1e-9){nr=[1,0,0];ln=1;}nr=nr.map(v=>v/ln);
+  const ea=[nr[1]*c[2]-nr[2]*c[1],nr[2]*c[0]-nr[0]*c[2],nr[0]*c[1]-nr[1]*c[0]],proj=new L1.Projection(c,ea,nr),xy=[0,0],b=[0,0,0];
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;for(const k of pick.cells){b[0]=pos[3*k];b[1]=pos[3*k+1];b[2]=pos[3*k+2];proj.fwd(b,xy);x0=Math.min(x0,xy[0]);x1=Math.max(x1,xy[0]);y0=Math.min(y0,xy[1]);y1=Math.max(y1,xy[1]);}
+  const h=50,mg=400;x0=Math.floor((x0-mg)/h)*h;y0=Math.floor((y0-mg)/h)*h;
+  const m=new Uint8Array(world.N);for(let q=0;q<pick.cells.length;q++)m[pick.cells[q]]=q<pick.land?2:1;
+  return{proj,mask:m,x0,y0,nx:Math.ceil((x1+mg-x0)/h),ny:Math.ceil((y1+mg-y0)/h),o:{h}};}
+// L0's surface at a world direction (bilinear on the cube grid)
+function l0Elev(x,y,z){const w=world,out=[0,0,0],nb=w.cube.nb;w.cube.lookupFrac(x,y,z,out);
+  const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty),E=w.elev;
+  return(1-ax)*(1-ay)*E[c]+ax*(1-ay)*E[cB]+(1-ax)*ay*E[cC]+ax*ay*E[cD];}
+// status lines under the L1 button; the button refines the current selection when a saved state is old enough
+function l1Status(){const S=l1St,el=$("l1Info");if(!world||l1Busy())return;const win=+$("l1Win").value,entry=l1Entry(win);
+  const pick=S&&S.pick;$("l1Run").disabled=!(pick&&entry&&selCell>=0);if(!pick)return;const a=pick.land*world.cellKm*world.cellKm;
+  let html=`<div><b>Landmass</b>: ${(a/1e6).toFixed(1)} M km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}.</div>`;
+  if(S.phase==="picked")html+=`<div class="muted">${entry?`Showing L0 now; refining replays from ${fmtT(entry.t)} Myr.`:`No saved L0 state ${win} Myr back yet: run L0 longer or shorten the window.`}</div>`;
+  else if(S.phase==="done")html+=`<div class="muted">Refined over ${fmtT(S.plan.window)} Myr from L0 at ${fmtT(S.entry.t)} Myr${S.stale?"; L0 has moved on since":""}.</div>`;
+  el.innerHTML=html;}
+$("l1Win").oninput=e=>{$("l1WinVal").textContent=e.target.value+" Myr";l1Status();};
 $("l1Ell").oninput=e=>$("l1EllVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";
-$("l1Run").onclick=()=>{if(!l1St||l1St.phase!=="picked")return;const win=+$("l1Win").value,entry=l1Entry(win);if(!entry)return;
-  if(running){running=false;$("play").textContent="Run";}$("l1Run").disabled=true;$("l1Pick").disabled=true;
-  const o={h:+$("l1H").value,Ar:+$("l1Ar").value,ellKm:+$("l1Ell").value};
-  try{l1St.rp=new L1.Replay(world,entry,win,l1St.pick);}catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not start: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
-  Object.assign(l1St,{phase:"replay",entry,win,o,t0Wall:performance.now()});l1Mask=null;
-  $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Prog">Replaying L0 to trace the landmass’s crust…</div>`);};
+$("l1Run").onclick=()=>{if(l1Busy()||selCell<0)return;const win=+$("l1Win").value,entry=l1Entry(win);if(!entry)return;
+  const pick=l1St&&l1St.phase==="picked"?l1St.pick:L1.landmassAt(world,selCell);if(!pick)return;
+  if(running)stopRun();$("l1Run").disabled=true;
+  const o={h:+$("l1H").value,Ar:+$("l1Ar").value,ellKm:+$("l1Ell").value};let rp;
+  try{rp=new L1.Replay(world,entry,win,pick);}catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not start: ${err.message}</div>`);return;}
+  l1TileSel=-1;l1TileInfo();$("l1stats").innerHTML="";$("l1budget").innerHTML="";
+  l1St={phase:"replay",pick,cell:selCell,rp,entry,win,o,t0Wall:performance.now()};logAction({a:"refine",cell:selCell,entrySteps:entry.steps,windowMyr:win,sheet:o});l1Mask=null;$("exportBtn").disabled=true;
+  $("l1Info").innerHTML=`<div class="muted" id="l1Prog">Replaying L0 to trace the landmass’s crust…</div>`;};
 function l1Prog(t){const el=$("l1Prog");if(el)el.textContent=t;}
 // one slice of work per animation frame: replay, replay again to the window's start, the sheet a step at a time, the basins
 function l1Tick(){const S=l1St,w=world;colorsDirty=true;
@@ -346,7 +397,7 @@ function l1Tick(){const S=l1St,w=world;colorsDirty=true;
     if(!done)return;S.plan=S.rp.finish();S.rp=null;w.restore(S.entry.snap);w.trackParcels();S.phase="forward";return;}
   if(S.phase==="forward"){const t1=performance.now();while(w.steps<S.plan.t0Steps&&performance.now()-t1<120)w.step();l1Prog(`Pass 2: L0 back at ${fmtT(w.t)} Myr, heading for the window’s start…`);
     if(w.steps<S.plan.t0Steps)return;
-    try{S.sh=new L1.Sheet(w,S.plan,S.o);}catch(err){l1Prog(`Could not build the sheet: ${err.message}`);w.untrackParcels();l1St=null;$("l1Pick").disabled=false;return;}
+    try{S.sh=new L1.Sheet(w,S.plan,S.o);}catch(err){l1Prog(`Could not build the sheet: ${err.message}`);w.untrackParcels();l1St=null;$("exportBtn").disabled=false;return;}
     S.phase="run";l1Zoom=1;l1Pan=[0,0];l1Pix=null;l1View="terrain";l1SetViews();$("l1stage").hidden=false;$("l1controls").hidden=false;
     $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Sheet: ${S.sh.nx}×${S.sh.ny} cells of ${S.o.h} km, ${S.sh.nm.toLocaleString("en-US")} markers carrying ${S.plan.nObj.toLocaleString("en-US")} L0 parcels.</div>`);
     l1Legend();l1Render();l1Stats();return;}
@@ -357,16 +408,16 @@ function l1Tick(){const S=l1St,w=world;colorsDirty=true;
     // the frame draws the message first; the pass itself runs on the next one
     if(!S.basinsDue){S.basinsDue=true;return;}
     const t0=performance.now();S.bs=L1.basins(S.sh);S.bsMs=performance.now()-t0;S.ho=L1.handoff(S.sh,S.bs);S.hoMs=performance.now()-t0-S.bsMs;w.untrackParcels();l1TileSel=-1;l1TileInfo();
-    S.phase="done";const el=$("l1Prog");if(el)el.remove();$("l1Pick").disabled=false;l1Mask=null;l1View="basins";l1SetViews();l1Pix=null;l1Legend();l1Render();l1Stats();updateUi();}}
-function l1SetViews(){const has=!!(l1St&&l1St.bs);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v==="basins"||x.dataset.v==="rain")x.disabled=!has;if(x.dataset.v==="tiles")x.disabled=!(l1St&&l1St.ho);x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
+    S.phase="done";$("exportBtn").disabled=false;l1Mask=null;l1View="basins";l1SetViews();l1Pix=null;l1Legend();l1Render();l1Stats();l1Status();updateUi();}}
+function l1SetViews(){const has=!!(l1St&&l1St.bs),sheet=!!(l1St&&l1St.sh);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v!=="terrain")x.disabled=!sheet;if(x.dataset.v==="basins"||x.dataset.v==="rain")x.disabled=!has;if(x.dataset.v==="tiles")x.disabled=!(l1St&&l1St.ho);x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
 // canvas geometry: the sheet's grid, zoomed and panned; per pixel its map-plane point
-function l1Size(){const sh=l1St.sh,wrap=$("l1wrap"),X0=sh.x0,X1=sh.x0+sh.nx*sh.o.h,Y0=sh.y0,Y1=sh.y0+sh.ny*sh.o.h,asp=Math.min(1.3,Math.max(0.45,(Y1-Y0)/(X1-X0)));
+function l1Size(){const sh=l1St.sh||l1St.pv,wrap=$("l1wrap"),X0=sh.x0,X1=sh.x0+sh.nx*sh.o.h,Y0=sh.y0,Y1=sh.y0+sh.ny*sh.o.h,asp=Math.min(1.3,Math.max(0.45,(Y1-Y0)/(X1-X0)));
   wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp);
   if(W!==l1PW||H!==l1PH||!l1Img){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
-  const s=Math.max((X1-X0)/W,(Y1-Y0)/H)/l1Zoom,cx=(X0+X1)/2+l1Pan[0],cy=(Y0+Y1)/2+l1Pan[1];l1Geo={s,cx,cy};}
+  const s0=Math.max((X1-X0)/W,(Y1-Y0)/H),bx=(X0+X1)/2,by=(Y0+Y1)/2;l1Geo={s:s0/l1Zoom,s0,bx,by,cx:bx+l1Pan[0],cy:by+l1Pan[1]};}
 const l1XY=(px,py)=>[l1Geo.cx+(px+0.5-l1PW/2)*l1Geo.s,l1Geo.cy-(py+0.5-l1PH/2)*l1Geo.s];
 // per pixel: the field values to draw (recomputed when the sheet moves or the view changes)
-function l1Fields(){const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,n=W*H,h=sh.o.h,{nx,ny}=sh;
+function l1Fields(){if(!l1St.sh)return l1PreviewFields();const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,n=W*H,h=sh.o.h,{nx,ny}=sh;
   const P=l1Pix={cell:new Int32Array(n),fine:new Int32Array(n),e:new Float32Array(n),back:new Float32Array(n)},tmp=[0,0,0];
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=l1XY(px,py),i=Math.floor((x-sh.x0)/h),j=Math.floor((y-sh.y0)/h);
     const c=i>=0&&j>=0&&i<nx&&j<ny?j*nx+i:-1;P.cell[q]=c>=0&&sh.act[c]?c:-1;P.fine[q]=-1;P.back[q]=NaN;
@@ -377,7 +428,12 @@ function l1Fields(){const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,n=W*H,h=sh.o.h,{n
       for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=nx||jj>=ny)continue;const cc=jj*nx+ii;if(!sh.act[cc])continue;s+=ww*sh.e[cc];ws+=ww;}
       P.e[q]=ws>0?s/ws:sh.e[P.cell[q]];}
     else{P.e[q]=NaN;P.back[q]=sh.l0ElevAt(x,y,tmp);}}}
-function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
+// before refining: L0's present surface in the preview frame, the landmass (and its submerged rim) as crust, the rest as backdrop
+function l1PreviewFields(){const pv=l1St.pv,W=l1PW,H=l1PH,n=W*H,b=[0,0,0],lk=world.cube.lookup;
+  const P=l1Pix={cell:new Int32Array(n).fill(-1),fine:new Int32Array(n).fill(-1),e:new Float32Array(n),back:new Float32Array(n)};
+  for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=l1XY(px,py);pv.proj.inv(x,y,b);const v=l0Elev(b[0],b[1],b[2]);
+    if(pv.mask[lk(b[0],b[1],b[2])]){P.e[q]=v;P.back[q]=NaN;}else{P.e[q]=NaN;P.back[q]=v;}}}
+function l1Render(){if(!l1St||!(l1St.sh||l1St.pv))return;l1Size();if(!l1Pix)l1Fields();
   const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,E=P.e,ex=10/l1Geo.s,rivers=$("l1Rivers").checked;
   const rock=l1View==="rock"?sh.surfaceRock():null,sf=l1View==="finite"?sh.strainField():null,fAmin=2e4;
   const bcol=new Map(),bsize=bs?l1BasinSizes():null;
@@ -430,16 +486,16 @@ function l1Bearing(a){let az=(90-a*180/Math.PI)%180;if(az<0)az+=180;return az<=9
 // basins worth a colour of their own: at least 10,000 km² (100 cells of 10 km)
 const l1BasinMin=()=>Math.round(1e4/(l1St.bs.h*l1St.bs.h));
 function l1BasinSizes(){const bs=l1St.bs;if(bs._size)return bs._size;const m=new Map();for(let f=0;f<bs.land.length;f++)if(bs.land[f]){const id=bs.basin[f];m.set(id,(m.get(id)||0)+1);}return bs._size=m;}
-function l1Legend(){const L=$("l1legend");
-  if(l1View==="terrain")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span><span>Shaded relief. Outside the landmass’s crust: L0’s own surface, dimmed (land greyed).</span>`;
-  else if(l1View==="thick")L.innerHTML=`<span class="num">−15</span><span class="bar" style="background:${gradCss(THICK_DIV,-15,30)}"></span><span class="num">+30 km</span><span>Crust thickened (red) or thinned (blue) since the window began: shortening, spreading, volcanism and erosion together.</span>`;
-  else if(l1View==="finite")L.innerHTML=`<span class="num">50% ext.</span><span class="bar" style="background:${gradCss(FIN_STOPS,-0.5,0.6)}"></span><span class="num">60% short.</span><span>Total horizontal shortening of the crust since the window began (red), and extension (blue) where it has not shortened. Ticks lie along the shortening direction where it exceeds 10%.</span>`;
-  else if(l1View==="strain")L.innerHTML=`<span class="num">0.001</span><span class="bar" style="background:${gradCss(STRAIN_STOPS,-3,0.5)}"></span><span class="num">3 /Myr</span><span>How fast the sheet deforms now (log scale). 0.1 per Myr is 10% shortening or stretching every million years.</span>`;
-  else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Topmost unit of the markers in each cell, by volume.</span>`;
-  else if(l1View==="dyn")L.innerHTML=`<span class="num">−1 km</span><span class="bar" style="background:${gradCss(DYN_STOPS,-1,0.6)}"></span><span class="num">+0.6 km</span><span>Dynamic topography: slabs sinking into the mantle beneath recent subduction pull the surface down; return flow lifts it elsewhere. Included in the elevation.</span>`;
-  else if(l1View==="rain")L.innerHTML=`<span class="num">50 mm</span><span class="bar" style="background:${gradCss(RAIN_STOPS,-1.3,0.5)}"></span><span class="num">3 m/yr</span><span>Yearly rain from a crude climate: latitude belts, zonal winds, moisture raining out inland and over relief (wet windward slopes, rain shadows).</span>`;
-  else if(l1View==="tiles")L.innerHTML=`<span><i class="swatch" style="background:#2d2622"></i>firm divide</span><span><i class="swatch" style="background:#d8d4cc"></i>contingent divide</span><span>The tiles L1 hands to L2: each drainage basin of at least 10,000 km², and smaller basins grouped with their neighbours into tiles of about that size. Water leaves a tile only at its outlets. A divide is firm where its relief exceeds what the stand-in fine relief could make: re-seeding that relief, 77% of firm divides stay within 30 km, against about half of the others, which L2 may move. Tap a tile for its summary and download.</span>`;
-  else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast; basins that drain inland, to a lake with no outlet or where their river runs dry, are in muted earth tones, and desert whose water never reaches a river is sand-coloured. Smaller coastal basins are grey. Lakes: blue if they overflow, pale blue if they have no outlet, white for dry lake floors; tan dots where rivers run dry in the desert. These are the tiles for L2.</span>`;}
+function l1Legend(){const L=$("l1legend"),bar=(st,lo,hi,a,b)=>`<span class="num">${a}</span><span class="bar" style="background:${gradCss(st,lo,hi)}"></span><span class="num">${b}</span>`;
+  if(l1View==="terrain")L.innerHTML=bar(ELEV_STOPS,-8,8,"−8 km","+8 km");
+  else if(l1View==="thick")L.innerHTML=bar(THICK_DIV,-15,30,"−15","+30 km");
+  else if(l1View==="finite")L.innerHTML=bar(FIN_STOPS,-0.5,0.6,"50% ext.","60% short.");
+  else if(l1View==="strain")L.innerHTML=bar(STRAIN_STOPS,-3,0.5,"0.001","3 /Myr");
+  else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("");
+  else if(l1View==="dyn")L.innerHTML=bar(DYN_STOPS,-1,0.6,"−1 km","+0.6 km");
+  else if(l1View==="rain")L.innerHTML=bar(RAIN_STOPS,-1.3,0.5,"50 mm","3 m/yr");
+  else if(l1View==="tiles")L.innerHTML=`<span><i class="swatch" style="background:#2d2622"></i>firm divide</span><span><i class="swatch" style="background:#d8d4cc"></i>contingent divide</span>`;
+  else L.innerHTML=`<span><i class="swatch" style="background:#3468be"></i>lake</span><span><i class="swatch" style="background:#78c4d6"></i>no outlet</span><span><i class="swatch" style="background:#eeeade"></i>dry lake floor</span><span><i class="swatch" style="background:#e2d0a4"></i>areic</span>`;}
 function l1MaxShort(sh){const sf=sh.strainField();let m=0;for(let c=0;c<sf.lmin.length;c++)if(!isNaN(sf.lmin[c])&&1-sf.lmin[c]>m)m=1-sf.lmin[c];return Math.round(100*m);}
 function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[sh.history.length-1],h0=sh.history[0],b=sh.budget,bal=sh.balance(),M=v=>`${(v/1e6).toFixed(2)} M km³`;
   $("l1stats").innerHTML=`<div>L1 time<b class="num">${sh.t.toFixed(1)} / ${S.plan.window.toFixed(1)} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
@@ -451,22 +507,23 @@ function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[s
     html+=`<div><b>Drainage basins</b>: ${(100*bs.inlandFrac).toFixed(1)}% of the land drains inland: ${(100*(bs.inlandFrac-bs.areicFrac)).toFixed(1)}% to ${bs.nClosed} lakes with no outlet and ${bs.nDry} rivers that run dry, and ${(100*bs.areicFrac).toFixed(1)}% is desert whose water never reaches a river at all${bs.nSea?` (${(bs.nSea*bs.h*bs.h/1e3).toFixed(0)} thousand km² of sea cut off from the ocean)`:""}. ${big.length} of at least 10,000 km² cover ${(100*inBig/bs.landCells).toFixed(0)}% of the land; the largest are ${big.slice(0,5).map(v=>(v*cell/1e6).toFixed(2)).join(", ")} M km². ${(bs.nBasins-big.length).toLocaleString("en-US")} smaller ones drain the rest, mostly short coastal streams. (${bs.nx}×${bs.ny} cells of ${bs.h} km, ${Math.round(S.bsMs)} ms.)</div>`;}
   $("l1budget").innerHTML=html;}
 document.querySelectorAll("#l1views button").forEach(b=>b.onclick=()=>{if(b.disabled)return;l1View=b.dataset.v;l1SetViews();l1Legend();l1Render();});
-document.querySelectorAll("#l1zoom button").forEach(b=>b.onclick=()=>{l1Zoom=+b.dataset.z;if(l1Zoom===1)l1Pan=[0,0];l1Pix=null;
-  document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));l1Render();});
 $("l1Rivers").onchange=()=>l1Render();
-{const wrap=$("l1wrap");let drag=false,dx0=0,dy0=0,lx=0,ly=0,mv=false;
-  wrap.addEventListener("pointerdown",e=>{if(!l1St||!l1St.sh)return;drag=true;mv=false;dx0=lx=e.clientX;dy0=ly=e.clientY;wrap.setPointerCapture(e.pointerId);});
-  wrap.addEventListener("pointermove",e=>{if(!drag)return;if(Math.abs(e.clientX-dx0)+Math.abs(e.clientY-dy0)>5)mv=true;if(!mv||l1Zoom===1)return;
-    const k=l1Geo.s*l1PW/wrap.clientWidth;l1Pan[0]-=(e.clientX-lx)*k;l1Pan[1]+=(e.clientY-ly)*k;lx=e.clientX;ly=e.clientY;l1Pix=null;l1Render();});
-  wrap.addEventListener("pointerup",e=>{drag=false;if(!mv)l1Inspect(e);});wrap.addEventListener("pointercancel",()=>{drag=false;});}
+// the L1 map: drag to pan, wheel or pinch to zoom about the pointer, tap to inspect
+gestures($("l1wrap"),{
+  drag:(dx,dy)=>{if(!l1Geo||l1Zoom<=1)return;const k=l1Geo.s*l1PW/$("l1wrap").clientWidth;l1Pan[0]-=dx*k;l1Pan[1]+=dy*k;l1Pix=null;l1Render();},
+  zoom:(f,cx,cy)=>{if(!l1St||!l1Geo)return;const r=$("l1map").getBoundingClientRect(),px=(cx-r.left)/r.width*l1PW,py=(cy-r.top)/r.height*l1PH,[x,y]=l1XY(px,py);
+    l1Zoom=Math.max(1,Math.min(32,l1Zoom*f));if(l1Zoom===1)l1Pan=[0,0];
+    else{const s1=l1Geo.s0/l1Zoom;l1Pan=[x-(px+0.5-l1PW/2)*s1-l1Geo.bx,y+(py+0.5-l1PH/2)*s1-l1Geo.by];}
+    l1Pix=null;l1Render();},
+  tap:e=>l1Inspect(e)});
 function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
   if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,c=l1Pix.cell[q],f=l1Pix.fine[q],sh=l1St.sh,bs=l1St.bs,box=$("l1inspect"),h=l1Pix.e[q];
   if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb))return;box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
-    if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr, mantle pull ${Math.round(sh.dyn[c]*1000)} m${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
+    if(c>=0&&sh){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr, mantle pull ${Math.round(sh.dyn[c]*1000)} m${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
     if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km² that ${["reaches the sea","drains inland","never reaches a river (desert)"][bs.closedB[f]]}`;if(bs.climate)t+=`; rain ${Math.round(bs.climate.P[f]*1000)} mm/yr, runoff ${Math.round(bs.climate.R[f]*1000)} mm/yr`;if(bs.lake[f])t+=["","; a lake that overflows","; a lake with no outlet","; a dry lake floor","; where a river runs dry"][bs.lake[f]];if(bs.inlandSea[f])t+=" (a sea cut off from the ocean)";}
     if(l1View==="tiles"&&f>=0&&bs&&bs.land[f]&&l1St.ho){const k=l1St.ho.tileOf[f];if(k>=0&&k!==l1TileSel){l1TileSel=k;l1TileInfo();l1Render();}}
-    box.textContent=t;}
+    box.textContent=t;const [xk,yk]=l1XY(px,py);l1LastInspect={xKm:+xk.toFixed(1),yKm:+yk.toFixed(1),text:t};}
   box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}
 // the L1 -> L2 handoff: the selected tile's summary, and downloads of the landmass summary and of one tile's fields
 let l1TileSel=-1;
@@ -476,13 +533,53 @@ function l1TileInfo(){const box=$("l1tile"),dl=$("l1dl"),ho=l1St&&l1St.ho;if(!ho
   let html=`<div><b>L2 handoff</b>: ${nF} tiles, ${ho.imprints.length} imprints (oldest first: ${ho.imprints.slice(0,3).map(I=>(I.kind?I.kind+" ":"")+I.class+" from "+I.startMa+" Ma").join(", ")}…); ${all?Math.round(100*firm/all):0}% of the divides between tiles are firm. (${Math.round(l1St.hoMs)} ms.)</div>`;
   if(l1TileSel>=0){const T=ho.tiles[l1TileSel],o=T.outlets,sea=o.filter(x=>x.kind==="sea"),inl=o.length-sea.length,fd=T.divides.reduce((s,d)=>s+d.firmKm,0),ad=T.divides.reduce((s,d)=>s+d.lengthKm,0),fmt=v=>v.toLocaleString("en-US");
     html+=`<div><b>Tile ${T.id}</b>, ${T.kind}: ${fmt(T.areaKm2)} km², ${T.meanElevationM} m mean elevation (highest ${fmt(T.maxElevationM)} m)${T.meanRainMmYr!=null?`, ${T.meanRainMmYr} mm/yr of rain`:""}. ${sea.length?`${sea.length} outlet${sea.length>1?"s":""} to the sea (largest ${fmt(Math.round(sea[0].dischargeM3s))} m³/s)`:"No outlet to the sea"}${inl?`, ${inl} ending inland`:""}${T.lakes.length?`; ${T.lakes.length} lake${T.lakes.length>1?"s":""}`:""}. Divides with ${T.divides.length} tile${T.divides.length===1?"":"s"}, ${ad?Math.round(100*fd/ad):0}% firm. A change at the outlet takes a median ${T.responseMyr.median} Myr to reach a cell (at most ${T.responseMyr.max}). ${T.maxShortening>=0.05?`Shortened up to ${Math.round(100*T.maxShortening)}% in the window. `:""}${T.imprints.length} imprints: ${T.imprints.map(k=>{const I=ho.imprints[k];return(I.kind?I.kind+" ":"")+I.class+" "+I.startMa+"–"+I.endMa+" Ma";}).join("; ")}.</div>`;}
-  else html+=`<div class="muted">Open the L2 tiles view and tap a tile to see its summary and download it.</div>`;
   box.innerHTML=html;}
 async function l1Save(kind){const d=await downloadsP,note=$("l1DlNote"),ho=l1St&&l1St.ho;if(!ho)return;if(!d){note.textContent="File downloads aren’t available in this view.";return;}
   const base=`l1-${($("seed").value||"genesis").replace(/[^a-z0-9-]/gi,"_")}-${Math.round(ho.meta.presentMyr)}myr`,data=JSON.stringify(kind==="tile"?ho.tile(l1TileSel):ho.summary());
   try{await d.save({filename:kind==="tile"?`${base}-tile${l1TileSel}.json`:`${base}-landmass.json`,data});note.textContent="Saved.";}
   catch(err){note.textContent=err&&err.code==="declined"?"Download cancelled.":"The download didn’t go through.";}}
 $("l1DlTile").onclick=()=>{if(l1TileSel>=0)l1Save("tile");};$("l1DlAll").onclick=()=>l1Save("all");
+// ---------- session export ----------
+// A session is reproducible from a short log: L0 is deterministic given its settings and step count, and L1 given the
+// selected cell, the saved state it started from (L0 at a step count), its window and its settings. The export records
+// those, check values to confirm a rerun matches, the viewports (what is on screen, how it is zoomed and coloured), the
+// statistics shown or removed from the page, and the actions taken. tools/session.js reruns it.
+let actions=[],l0LastInspect=null,l1LastInspect=null;
+function logAction(o){if(!world)return;actions.push(Object.assign({a:o.a,steps:world.steps,t:+world.t.toFixed(4)},o));if(actions.length>500)actions.splice(1,1);}
+function l0Hash(w){let a=0;for(let i=0;i<w.N;i++)a=(a*31+Math.round(w.elev[i]*1e4)+w.owner[i])|0;return a;}
+const PROJ_DATA=p=>p?{center:p.c,east:p.ea,north:p.nr}:null;
+function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*i+2])*180/Math.PI).toFixed(3),+(Math.atan2(p[3*i+1],p[3*i])*180/Math.PI).toFixed(3)];
+  const l1Extent=l1Geo&&S?{xKm:[l1Geo.cx-l1PW/2*l1Geo.s,l1Geo.cx+l1PW/2*l1Geo.s],yKm:[l1Geo.cy-l1PH/2*l1Geo.s,l1Geo.cy+l1PH/2*l1Geo.s],kmPerPx:l1Geo.s}:null;
+  const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
+  return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
+    settings:{seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
+      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value}},
+    reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
+      L1:S&&S.entry?{phase:S.phase,cell:S.cell,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null},
+    checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
+      L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
+        basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null},
+    viewports:{
+      L0:{colorMode:view,projection:proj,marks:$("marks").checked,faultTraces:!!handoff&&$("traces").checked,canvasPx:[pixW,pixH],
+        globe:{yaw,pitch,zoom:gZoom},map:{zoom:mZoom,centre:mC,goode:goode&&{centreLonDeg:goode.lc*180/Math.PI,edgeLonDeg:goode.edgeLonDeg,
+          northLobesDeg:goode.north.map(l=>[l.a,l.b].map(v=>+(v*180/Math.PI).toFixed(2))),southLobesDeg:goode.south.map(l=>[l.a,l.b].map(v=>+(v*180/Math.PI).toFixed(2)))}},
+        selected:selCell>=0?{cell:selCell,latLon:ll(selCell),elevationKm:w.elev[selCell]}:null,lastInspected:l0LastInspect},
+      L1:S?{colorMode:l1View,rivers:$("l1Rivers").checked,zoom:l1Zoom,pan:l1Pan,canvasPx:[l1PW,l1PH],visible:l1Extent,
+        frame:PROJ_DATA(sh?S.plan.proj:S.pv&&S.pv.proj),frameNote:sh?"the sheet's map: azimuthal equidistant co-moving with the reference plate (km)":"preview: azimuthal equidistant about the landmass's centroid in L0's fixed frame (km)",
+        lastInspected:l1LastInspect}:null,
+      L2:ho?{tilesShown:l1View==="tiles",selectedTile:l1TileSel,tile:l1TileSel>=0?ho.tiles[l1TileSel]:null}:null},
+    stats:{L0:{t:w.t,steps:w.steps,dt:w.dt,platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac,continentalFraction:w.contFrac,meanSeafloorAgeMyr:w.oceanAge,
+        meanUnitsPerContinentalColumn:w.meanUnits,netRotationDegPerMyr:w.netRot,msPerStep:msEma,simulatedMyrPerSecond:rateEma,savedStates:snaps.map(x=>({t:x.t,steps:x.steps}))},
+      L1:sh?{history:sh.history,budget:sh.budget,msPerStep:l1Ms,basinsMs:S.bsMs,handoffMs:S.hoMs}:null},
+    actions,events:w.events,
+    landmass:S&&S.pick?{cells:Array.from(S.pick.cells),land:S.pick.land,ref:S.pick.ref}:null,
+    handoffSummary:ho?ho.summary():null};}
+$("exportBtn").onclick=async()=>{const note=$("exportNote");if(l1Busy()||!world)return;
+  const d=await downloadsP;if(!d){note.textContent="File downloads aren’t available in this view.";return;}
+  const data=JSON.stringify(sessionData()),name=`session-${String(world.opts.seed).replace(/[^a-z0-9-]/gi,"_")}-${Math.round(world.t)}myr.json`;
+  try{await d.save({filename:name,data});note.textContent=`Saved ${name}.`;}
+  catch(err){note.textContent=err&&err.code==="declined"?"Download cancelled.":"The export didn’t go through.";}};
+$("infoBtn").onclick=()=>{const el=$("info"),open=el.hidden;el.hidden=!open;$("infoBtn").setAttribute("aria-expanded",open?"true":"false");};
 build();updateLegend();requestAnimationFrame(frame);
 </script>
 </body>

@@ -38,7 +38,7 @@ h1{font-size:22px;font-weight:600;margin:0;letter-spacing:-0.01em}
 .stage{background:var(--space);border-radius:6px;display:flex;justify-content:center;align-items:center;overflow:hidden}
 .mapwrap{position:relative;width:100%;touch-action:none;cursor:grab}
 .mapwrap.globe{width:min(100%,68vh);aspect-ratio:1/1}
-.mapwrap.flat{aspect-ratio:2/1;cursor:crosshair;touch-action:manipulation}
+.mapwrap.flat{aspect-ratio:2.307/1}
 .mapwrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .inspect{position:absolute;left:8px;bottom:8px;max-width:calc(100% - 16px);background:rgba(10,20,28,.82);color:#E8EEF1;font-size:13px;padding:5px 8px;border-radius:4px;pointer-events:none;display:none}
 .hint{font-size:13px;color:var(--muted);margin:6px 0 0}
@@ -99,62 +99,56 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
 .l1wrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .l1panel .row.l1controls{margin-top:10px;padding-top:0;border-top:0}
 button:disabled{opacity:.5;cursor:default}
-.pick .mapwrap{cursor:crosshair}
+.underbar{display:flex;align-items:baseline;justify-content:space-between;gap:8px 18px;flex-wrap:wrap;margin:8px 0 0}
+.stats.mini{margin:0;display:flex;gap:18px}
+.footer{margin-top:14px}
+.notes h3{font-size:15px;font-weight:600;margin:14px 0 6px}
+.ctl .row + .row{margin-top:10px;padding-top:10px}
 </style>
 </head>
 <body>
 <main>
-  <header>
-    <h1>L0 plates, L1 landmasses</h1>
-    <div class="clock num" id="clock">0<small>million years</small></div>
-  </header>
+  <header><h1>L0 plates, L1 landmasses</h1></header>
 
   <div class="stage"><div class="mapwrap globe" id="mapwrap">
     <canvas id="map" aria-label="Simulated planet"></canvas>
     <div class="inspect num" id="inspect"></div>
   </div></div>
-  <p class="hint" id="hint">Drag to turn the globe. Tap a spot to inspect it.</p>
+  <div class="underbar">
+    <div class="clock num" id="clock">0<small>million years</small></div>
+    <div class="stats mini">
+      <div>Land above sea<b class="num" id="sLand">–</b></div>
+      <div>Compute per step<b class="num" id="sMs">–</b></div>
+    </div>
+  </div>
   <div class="legend" id="legend"></div>
-  <section class="panel colpanel" id="colpanel" aria-live="polite">
-    <div class="muted" id="colEmpty">Tap the map to see the rock column and fault history at that spot.</div>
-    <div id="colBody" hidden></div>
+  <section class="panel colpanel" id="colpanel" aria-live="polite" hidden>
+    <div id="colBody"></div>
   </section>
 
-  <div class="stats">
-    <div>Plates<b class="num" id="sPlates">–</b></div>
-    <div>Land above sea<b class="num" id="sLand">–</b></div>
-    <div>Continental crust<b class="num" id="sCont">–</b></div>
-    <div>Mean seafloor age<b class="num" id="sAge">–</b></div>
-    <div>Units per continental column<b class="num" id="sUnits">–</b></div>
-    <div>Net rotation<b class="num" id="sNet">–</b></div>
-    <div>Compute per step<b class="num" id="sMs">–</b></div>
-    <div>Simulated rate<b class="num" id="sRate">–</b></div>
-  </div>
-
-  <div class="panel">
+  <div class="panel ctl">
     <div class="row">
       <button class="primary" id="play">Run</button>
       <button id="stepBtn">Step</button>
-      <label><span class="field-label">Steps per frame</span><input type="range" id="speed" min="1" max="20" value="3"><span class="num" id="speedVal">3</span></label>
       <div class="seg" role="group" aria-label="Projection" id="proj">
         <button data-p="globe" aria-pressed="true">Globe</button>
         <button data-p="flat" aria-pressed="false">Map</button>
       </div>
-      <label><input type="checkbox" id="spin" checked> Spin</label>
+    </div>
+    <div class="row">
+      <label><span class="field-label">Steps per frame</span><input type="range" id="speed" min="1" max="20" value="3"><span class="num" id="speedVal">3</span></label>
+    </div>
+    <div class="row">
+      <label><span class="field-label">Gyr</span><input type="range" id="gyr" min="0.25" max="3" step="0.25" value="1"><span class="num" id="gyrVal">1</span></label>
+      <label><input type="checkbox" id="marks" checked> Marks</label>
     </div>
     <div class="row">
       <div class="seg" role="group" aria-label="Map view" id="views">
         <button data-v="elev" aria-pressed="true">Elevation</button>
         <button data-v="rock" aria-pressed="false">Rock type</button>
-        <button data-v="faults" aria-pressed="false">Fault history</button>
         <button data-v="l1" aria-pressed="false">L1 preview</button>
         <button data-v="plates" aria-pressed="false">Plates</button>
-        <button data-v="age" aria-pressed="false">Seafloor age</button>
-        <button data-v="thick" aria-pressed="false">Crust thickness</button>
       </div>
-      <label><input type="checkbox" id="arrows" checked> Velocity arrows</label>
-      <label><input type="checkbox" id="hots" checked> Hotspots</label>
-      <label><input type="checkbox" id="nnr" checked> Remove net rotation</label>
     </div>
     <div class="row">
       <label><span class="field-label">Seed</span><input type="text" id="seed" value="genesis" spellcheck="false"></label>
@@ -171,16 +165,14 @@ button:disabled{opacity:.5;cursor:default}
 
   <section class="panel l1panel" id="l1panel">
     <h2>L1 landmass</h2>
-    <p>Pick a landmass at the present: one piece of land bounded by its coastline. L1 replays the last 10–30 Myr of its history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet. Each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. Coarse rivers wear it down as it goes. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started.</p>
     <div class="row">
-      <button id="l1Pick">Pick a landmass</button>
+      <button class="primary" id="l1Run" disabled>Refine selected landmass</button>
       <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="30" step="5" value="20"><span class="num" id="l1WinVal">20 Myr</span></label>
-      <label title="Cell size of the viscous sheet; the drainage pass is always 10 km"><span class="field-label">Sheet grid</span><select id="l1H"><option value="30">30 km</option><option value="50" selected>50 km</option><option value="70">70 km</option></select></label>
-      <label title="Argand number: how strongly thickened crust resists further thickening, against its strength. Higher means weaker crust that spreads into wide plateaus"><span class="field-label">Argand number</span><select id="l1Ar"><option value="1">1</option><option value="3" selected>3</option><option value="10">10</option></select></label>
-      <label title="How far a plate's drag reaches into the sheet: wide deformation zones when long"><span class="field-label">Coupling length</span><input type="range" id="l1Ell" min="200" max="1000" step="100" value="500"><span class="num" id="l1EllVal">500 km</span></label>
-      <button class="primary" id="l1Run" disabled>Run L1</button>
+      <label><span class="field-label">Sheet grid</span><select id="l1H"><option value="30">30 km</option><option value="50" selected>50 km</option><option value="70">70 km</option></select></label>
+      <label><span class="field-label">Argand number</span><select id="l1Ar"><option value="1">1</option><option value="3" selected>3</option><option value="10">10</option></select></label>
+      <label><span class="field-label">Coupling length</span><input type="range" id="l1Ell" min="200" max="1000" step="100" value="500"><span class="num" id="l1EllVal">500 km</span></label>
     </div>
-    <div class="summary" id="l1Info"><div class="muted">No landmass picked yet.</div></div>
+    <div class="summary" id="l1Info"></div>
     <div class="stage l1stage" id="l1stage" hidden><div class="l1wrap" id="l1wrap">
       <canvas id="l1map" aria-label="L1 landmass map"></canvas>
       <div class="inspect num" id="l1inspect"></div>
@@ -198,9 +190,6 @@ button:disabled{opacity:.5;cursor:default}
         <button data-v="tiles" aria-pressed="false" disabled>L2 tiles</button>
       </div>
       <label><input type="checkbox" id="l1Rivers" checked> Rivers</label>
-      <div class="seg" role="group" aria-label="Zoom" id="l1zoom">
-        <button data-z="1" aria-pressed="true">1×</button><button data-z="2" aria-pressed="false">2×</button><button data-z="4" aria-pressed="false">4×</button><button data-z="8" aria-pressed="false">8×</button>
-      </div>
     </div>
     <div class="legend" id="l1legend"></div>
     <div class="stats" id="l1stats"></div>
@@ -216,7 +205,6 @@ button:disabled{opacity:.5;cursor:default}
   <div class="cols">
     <section class="panel handoff">
       <h2>L1 handoff</h2>
-      <p>Freeze the world and package what the next level needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue, and current plate motions.</p>
       <div class="row">
         <button class="primary" id="extract">Extract handoff</button>
         <button id="download" hidden>Download JSON</button>
@@ -228,11 +216,27 @@ button:disabled{opacity:.5;cursor:default}
       <h2>Event log</h2>
       <ul class="log" id="log"></ul>
     </section>
-    <section class="panel notes">
-      <h2>What’s modeled, and what’s faked</h2>
+  </div>
+
+  <div class="row footer">
+    <button id="infoBtn" aria-expanded="false" aria-controls="info">Info</button>
+    <button id="exportBtn">Export session</button>
+    <span class="muted" id="exportNote"></span>
+  </div>
+  <section class="panel notes" id="info" hidden>
+    <h3>Using the page</h3>
+    <p><span class="tag">Views.</span> Drag the globe to turn it; on the map, drag to pan. Scroll or pinch to zoom, on both and on the L1 map. A tap or click without dragging selects that point: its landmass is highlighted, its rock column and fault history appear under the map, and the L1 panel shows the landmass as L0 has it now.</p>
+    <p><span class="tag">Running.</span> Run advances L0 by the Gyr slider and stops; Run again continues for that long. Step advances one step. Marks shows hotspots (yellow rings) and plate velocity arrows. Net rotation of the lithosphere is always removed (see below).</p>
+    <p><span class="tag">Map projection.</span> Interrupted Goode homolosine, an equal-area projection: sinusoidal within 40°44′ of the equator and Mollweide beyond. Its cuts are placed for this planet: the map edge is the meridian crossing the least land, the north gets one more cut and the south two, each at the meridian crossing the least land in that hemisphere, at least 50° from the others. Cuts are re-placed when the world stops moving.</p>
+    <p><span class="tag">Legends.</span> Elevation: sea level is the blue–green break; dark lines are trenches. Rock type: darker means older. L1 preview: smoothed L0 elevation and formations, cut by stand-in fine relief (noise, not a real L1 model). Plates: light fill is continental crust; boundaries coloured by relative motion.</p>
+    <p><span class="tag">L1 landmass.</span> Refine selected landmass replays the last 10–30 Myr of the selected landmass’s history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet: each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started. Before refining, the L1 map shows L0’s present surface around the landmass (the landmass in colour, other land grey); refinement starts from L0’s state one window earlier.</p>
+    <p><span class="tag">L1 views.</span> Terrain: shaded relief; outside the landmass’s crust, L0’s own surface, dimmed. Thickening: crust thickened (red) or thinned (blue) since the window began. Finite strain: total horizontal shortening (red) and extension (blue) where it has not shortened; ticks lie along the shortening direction where it exceeds 10%. Strain rate: how fast the sheet deforms now (log scale). Surface rock: topmost unit by volume. Mantle pull: dynamic topography from sinking slabs, included in the elevation. Rainfall: a crude climate of latitude belts, zonal winds and rain shadows. Drainage basins: one colour per basin of at least 10,000 km²; inland-draining basins in earth tones, areic desert sand-coloured, small coastal basins grey; lakes blue (overflowing), pale blue (no outlet), white (dry floor). L2 tiles: the tiles L1 hands to L2, dark edges where the divide is firm (re-seeding the stand-in fine relief, 77% of firm divides stay within 30 km, against about half of the others).</p>
+    <p><span class="tag">L1 handoff.</span> Extract handoff freezes the world and packages what L1 needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue and current plate motions.</p>
+    <p><span class="tag">Export session.</span> Saves a small JSON log from which the session reruns exactly: seed, settings and step counts; the selected point; the L1 refinement’s cell, saved state, window and settings; check values for the rerun; what each view shows and how it is zoomed and coloured (L0, the L1 map and the L2 tiles); the statistics, the event log and the actions taken. tools/session.js in the repository reruns it.</p>
+    <h3>What’s modeled, and what’s faked</h3>
       <p><span class="tag">Grid.</span> A cube-sphere: six faces of n × n cells projected onto an Earth-sized sphere, with constant-time lookup of the cell under any direction. Cell sizes vary by about ±25% across a face.</p>
       <p><span class="tag">Plates.</span> Each plate stores its crust in its own body frame and rotates rigidly about an Euler pole, with angular velocity drifting randomly. Each plate’s speed relaxes toward its own preferred value (a free 3D random walk would creep outward until it hit the 8 cm/yr cap). Every step, each fixed cell asks which plates now cover it.</p>
-      <p><span class="tag">Net rotation.</span> Independent random plate motions add up to a shared spin of the whole lithosphere over the mantle, which grows over time, like the flying ice cube in molecular dynamics. By default, every step computes that shared spin (each cell’s velocity weighted by its area, minus the part along its own position) and subtracts it from every plate. Relative motions, and so all boundaries and faults, are unchanged; only hotspot tracks and continents’ latitudes are affected. Earth’s lithosphere does drift slowly relative to hotspots, roughly 0.1–0.4° per million years by different estimates, so unticking the box is not wrong, just unconstrained.</p>
+      <p><span class="tag">Net rotation.</span> Independent random plate motions add up to a shared spin of the whole lithosphere over the mantle, which grows over time, like the flying ice cube in molecular dynamics. Every step computes that shared spin (each cell’s velocity weighted by its area, minus the part along its own position) and subtracts it from every plate. Relative motions, and so all boundaries and faults, are unchanged; only hotspot tracks and continents’ latitudes are affected. Earth’s lithosphere does drift slowly relative to hotspots, roughly 0.1–0.4° per million years by different estimates, so keeping some would not be wrong, just unconstrained; the page always removes it.</p>
       <p><span class="tag">Boundaries.</span> Where two plates overlap, denser crust is consumed: oceanic under continental, older oceanic under younger. Subduction thickens the overriding plate 1–3 cells inland and marks a trench. Continent–continent collision keeps all of the consumed crust: head-on, it underthrusts and thickens the winner a few cells inland; sideways, it piles up at the boundary. Continental slices pushed onto seafloor accrete as continent. Sustained collision welds plates. Uncovered cells get new seafloor of age zero, which is how ridges form.</p>
       <p><span class="tag">Rock columns.</span> Every crust parcel carries a stack of up to eight units, bottom to top, each with a rock type, formation time and thickness. Deposition pushes units: arc volcanics, hotspot or flood basalt, collisional metamorphics, marine shelf sediments, and clastic sediments shed by erosion. Erosion shaves the top and pops units, exposing older rock. Thickening at depth goes into the basement unit. Each unit remembers the plate it formed on. Same-type units from the same plate formed within 150 million years merge, and the two deepest fold together when the stack is full. Eroded sediment is spread over every lower neighbour in proportion to its drop. The Rock type map shows the rock with the most thickness in the top kilometre, not the topmost veneer.</p>
       <p><span class="tag">Faults.</span> At every plate-boundary cell, the relative motion is split into an across-boundary part (convergence or extension) and an along-boundary part. Those slips accumulate in the parcel’s fault record, along with the boundary’s strike, stored in the plate’s own frame so dead faults ride along with the crust. A record keeps the current and previous episode; a new one starts after 10 million years of quiet or of a different style. Continental collisions now thicken crust in proportion to the across-boundary share of motion, so oblique collisions build less relief.</p>
@@ -244,7 +248,6 @@ button:disabled{opacity:.5;cursor:default}
       <p><span class="tag">Surface and budget.</span> Continental crust diffuses and erodes; sediment builds shelves. A feedback term speeds margin growth when continental area is below the chosen target and makes drowned margins founder back to seafloor when it’s above. The Continental crust slider sets both the starting fraction and that target. Land above sea is roughly half of it in the long run, because erosion wears continents toward sea level; Earth has about 40% continental crust (including shelves) and 29% land. This thermostat is a deliberate fudge to keep the crust budget stable, not physics.</p>
       <p><span class="tag">Stale cells.</span> Plate-grid cells that no fixed cell samples in a step miss that step’s surface processes. Each step, such a cell surrounded by sampled neighbours takes their crust type and mean thickness, so old seafloor can’t hide inside a continent that grew around it. When plates weld, the surviving plate’s grid pulls crust from the absorbed plate for every cell on the absorbed plate’s territory, rather than each absorbed cell pushing to its nearest target, which left holes.</p>
       <p><span class="tag">Known artifacts.</span> Blocky streaks in seafloor age come from nearest-cell resampling as plates rotate. The same resampling makes ragged boundaries, so many continental margins carry some fault record, and extracted traces are fragmented into segments a few hundred kilometres long. Most remaining flicker in the Rock type map comes from that resampling: about one cell in five samples a different crust parcel each step. The handoff smooths it out, but L0 itself would need a finer plate grid or moving particles to remove it. The same seed and settings always reproduce the same world.</p>
-    </section>
-  </div>
+  </section>
 </main>
 <script>

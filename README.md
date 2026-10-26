@@ -39,14 +39,15 @@ Everything is deterministic given the seed and settings (seed text, resolution, 
 
 ## 2. Quick start
 
-**In a browser:** open `plates.html`. It needs no server and no build step; it loads only Google Fonts. Press **Run**.
+**In a browser:** open `plates.html`. It needs no server and no build step; it loads only Google Fonts. Press **Run**: L0 advances by the **Gyr** slider (default 1) and stops; **Run** again continues for that long. Explanations of every view and control are under **Info** at the bottom of the page.
 
-- **Views:** Elevation, Rock type, Fault history, L1 preview, Plates, Seafloor age, Crust thickness.
-- **Projections:** a draggable globe (with optional camera spin) or an equirectangular map.
-- **Tap any spot:** a panel under the map shows that cell's rock column, fault episodes, and plate motion.
-- **Extract handoff:** pauses the run, traces the fault network, builds formations and domains, and overlays fault traces.
-- **Download JSON:** saves the handoff. This uses the Claude artifact runtime's downloads capability (`window.claude.use("downloads")`); opened as a plain local file, the button stays hidden.
-- **L1 landmass:** run L0 for a while (1–2 Gyr gives an interesting history; it keeps a saved state every 10 Myr), press **Pick a landmass**, tap land, then **Run L1**. L0 replays the window twice (tracing the crust, then driving the sheet) and ends exactly where it started. The L1 map shows terrain, crustal thickening, strain rate, surface rock and drainage basins, with rivers, zoom and pan, over L0's own elevation. A mid-sized continent takes well under a minute; a supercontinent a few minutes.
+- **Views:** Elevation, Rock type, L1 preview, Plates. **Marks** shows hotspots and plate velocity arrows.
+- **Projections:** a globe (drag to orbit) or an interrupted Goode homolosine map (drag to pan), whose cuts are placed through ocean for the current world: the map edge on the meridian crossing the least land, one more cut in the north and two in the south, each on the least-land meridian of its hemisphere at least 50° from the others. Scroll or pinch to zoom on both, and on the L1 map.
+- **Tap or click without dragging:** selects that point. Its landmass is highlighted, the panel under the map shows its rock column, fault episodes and plate motion, and the L1 panel shows the landmass at once, as L0 has it now.
+- **Refine selected landmass** (top of the L1 panel) replays the last 10–30 Myr of the selected landmass from a saved state of L0 (kept every 10 Myr while L0 runs, so run L0 for a while first). L0 replays the window twice (tracing the crust, then driving the sheet) and ends exactly where it started. The L1 map then shows terrain, thickening, finite strain, strain rate, surface rock, mantle pull, rainfall, drainage basins and the L2 tiles.
+- **Extract handoff** traces the fault network, builds formations and domains, and overlays fault traces; **Download JSON** saves that L0 handoff.
+- **Export session** saves a small JSON log from which the session reruns exactly (section 2.1). Downloads use the Claude artifact runtime's downloads capability; opened as a plain local file, they are unavailable.
+- Net rotation is always removed (section 3.8). The statistics the page no longer shows (plate count, continental fraction, mean seafloor age, units per column, net rotation, simulated rate) are in the session export.
 
 **Rebuild the page** from its parts after editing `src/`:
 
@@ -63,6 +64,26 @@ node tests/test_budget.js --t=2400 # full-length crust budget run
 node tests/bench.js --t=300        # ms per step at each resolution
 ```
 
+### 2.1 Session exports
+
+**Export session** saves a JSON log, not the state: L0 is deterministic given its settings and step count, and L1 given the selected cell, the saved state it started from, the present it ran to, its window and its settings. A full state dump of a 1 Gyr session with a refined 42 M km² landmass was 240 MB raw and 37 MB compressed, while the log is a few hundred kB. The log holds:
+
+- `settings`: seed, resolution, initial plates, start, continental target, steps per frame, Gyr, L1 settings.
+- `reproduce`: L0's step count; the selected cell; for L1, the cell, `entrySteps` (the saved state), `presentSteps`, window and sheet settings, and whether L0 has moved on since (`stale`).
+- `checks`: values to confirm a rerun: a hash of L0's elevation and plate ownership, plate count, the sheet's steps, markers and highest point, the basin count and inland share, the tile count.
+- `viewports`: what is on screen and how. L0: colour mode, globe or map, camera (yaw, pitch, zoom), map zoom and centre, the Goode cuts, the selected cell and the last inspected point. L1: colour mode, zoom, pan, the visible extent in map km, the map frame, the last inspected point. L2: whether the tiles view is shown, the selected tile and its summary.
+- `stats`, `actions` (build, run, stop, step, select, refine, extract, with step counts), `events`, the landmass's cells, and the L2 handoff summary.
+- `build`: a hash of the page's sources (`build.sh` writes it); reruns need the same code.
+
+`tools/session.js` reads it:
+
+```sh
+node tools/session.js session.json          # summary, and the commit whose sources match the build hash
+node tools/session.js session.json --rerun  # rerun, compare every check, stash the results as session.stash
+```
+
+As a module, `reproduce(sess, SIM, L1)` returns the world at the session's present and L1's plan, sheet, drainage pass and handoff as they were. `stash` and `unstash` save and restore those (Node's v8 serialization, tens of MB) so later work can skip the rerun. The UI smoke test exports a session, reruns it in a fresh simulation, requires every check to match, and round-trips a stash.
+
 ### Repository layout
 
 ```
@@ -73,6 +94,7 @@ src/sim.js             the simulation core: a self-contained SIM module, usable 
 src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff (L1 module)
 src/ui.js              rendering, controls, inspector, handoff panel, L1 panel
 tests/                 headless tests and benchmarks (see section 3.13)
+tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
 docs/                  diagnostic images produced during development
 ```
