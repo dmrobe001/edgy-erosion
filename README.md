@@ -366,7 +366,47 @@ These are design sketches, not implementations (L1 above is partly built; its sk
 
 ### L1: landmass: what remains
 
-Built so far: section 5. Still to do, roughly in order: handing the basins down to L2 (outlets, drainage graph, formation stacks per basin); erodibility from the exposed formation and fault-zone weakening in the drainage pass; climate (winds, orographic rain, temperature); deposition of eroded rock (basins, fans, shelves); fault strands from the sheet's strain history; crust created during the window (accreted arcs, new shelves); restoring island chains. The original sketch:
+Built so far: section 5. The current plan, organised around the L1→L2 handoff (each item either feeds it, decides whether something belongs in it, or is parked):
+
+**A. L1 work, in order**
+1. **Finite strain per marker.** A 2×2 deformation gradient on each marker, updated with the sheet's velocity gradient: total horizontal shortening, its direction and vertical-axis rotation. This is what L2 needs to build thrust sheets and folds in crumple zones.
+2. **Closed basins.** A water balance on the depressions the drainage pass finds, with a crude aridity field (latitude belts plus a rain shadow from the sheet's topography and a prevailing wind): a hollow overflows only if inflow beats evaporation over its lake. This decides basins that drain inland versus to the sea.
+3. **Erodibility test (a decision gate).** Compare basin maps (adjusted Rand index) with uniform K against K driven by variables that actually predict rock strength:
+   - rock type;
+   - consolidation with age (young sediment soft, old lithified: ×10–100);
+   - fault damage from L0's fault records (crushed zones erode fast, which also gives fault-guided valleys);
+   - metamorphic grade.
+
+   Add a threshold hillslope angle as a stand-in for landsliding, so strong contrasts don't build walls. If grounded contrasts of ×100 or more still don't move the major basins, detailed erodibility belongs to L2. Contrasts from type labels alone stay modest (×3–10): within-class variation exceeds the difference between classes, and contacts are blocky at L0's resolution.
+4. **Glacial overprint (optional).** Gated by a world setting: whether there was recent ice, and how long ago it left. Only what is regional and permanent: the glaciated-region mask with its age, river diversions, large troughs and lake basins. It shares the lake logic of item 2 and gets the same basin-map test. No glacial buzzsaw: it is indistinguishable from older mountains.
+
+**B. The L1→L2 handoff**
+
+5. **Schema.** Passes are ordered by the age of the event they represent, oldest first. Every imprint carries its event class and age, plus a table of lifetimes by erasure mechanism (hillslope blurring, σ = √(2Dt); knickpoints sweeping up the network; lakes filling). Each basin tile carries:
+   - its outlet and drainage graph;
+   - whether it drains inland or to the sea;
+   - rock stacks;
+   - finite strain and vergence in crumple zones;
+   - its glaciation record, if any.
+6. **Export** and a basin-tile view in the page.
+
+**C. L0 additions (recording only)**
+
+7. **Climate history per parcel:** time spent in each climate belt, and glaciation exposure. This gives weathering maturity for later soils and erodibility.
+8. **Icehouse index** from polar land, ocean gateways and weathering. It replaces item 4's setting.
+
+**D. Performance, when needed**
+
+9. A multigrid preconditioner or a Web Worker for large landmasses.
+
+**E. Parked or decided against**
+- Glacial buzzsaw.
+- Jitter in L0 (aliasing would become noise, not go away).
+- Thrust-sheet and fold generation (balanced cross-sections, critical taper, Biot buckling wavelengths). This belongs to L2; item 1 is shaped to serve it.
+- Limits accepted in L1 v2:
+  - crumpling stops once L0 welds two plates;
+  - crust created during the window has no markers;
+  - the coupling is one-way.
 
 - **Inputs:** smoothed elevation, formation stacks and domains, fault zones, events, plate velocities (for present-day uplift).
 - **Terrain:** uplift field from present plate motion and active faults; stream-power erosion (river incision ∝ drainage area^m × slope^n) with an O(n) implicit solver, as in Braun & Willett's FastScape. Run only long enough to relax wavelengths between L0's and L1's resolution.
