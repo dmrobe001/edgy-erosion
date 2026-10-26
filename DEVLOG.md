@@ -121,6 +121,33 @@ A recurring lesson: **measure before tuning.** Several problems had a different 
 
 **Speed:** the first version took ~430 ms per coupled step at 483k cells. Per-cell closures in the coarse↔fine transfers (flexure, crustal flow) were replaced by precomputed stencils, crustal-flow edge coefficients are computed once per step, and Priority-Flood uses the Zhou et al. (2016) variant (bit-identical filled surface, receivers and areas compared with the plain algorithm). Now ~250 ms in Chromium.
 
+## L1 v2 (`src/l1.js`): one landmass, a thin viscous sheet, drainage basins
+
+**Design change.** v1 conflated a continent with a landmass, and spent most of its effort tracking which crust mattered as rigid pieces met. The new unit is one landmass at the present, bounded by its coastline at the end of L1. The reasoning behind the change:
+- Rivers mature within a few Myr, so fine erosion over a long window bought little.
+- What L0 cannot do is deform crust where plates meet.
+
+So L1 now:
+1. picks a landmass at the present;
+2. replays its last ~20 Myr from a saved L0 state, with the crust as a thin viscous sheet driven by L0's plates;
+3. freezes tectonics and runs 5 Myr of fine erosion only to settle drainage basins, the tiles for L2.
+
+The world-space overlap layer, lookahead relevance, pieces and refined cube-sphere grid of v1 are gone; picking at the end with replay answers "which crust" directly.
+
+**L0 changes, all recording only (bit-identical runs, checked by hash):**
+- `snapshot()` and `restore()`, with the generator's state exposed;
+- `trackParcels()` and `untrackParcels()`;
+- the tectonic recorder now records only arcs and hotspots (see below).
+
+**Why L0's collision ranges seemed to fade** (measured before starting): parcels that rise above 4 km hold 4.4–4.7 km for 30 Myr. Peaks above 6 km relax to about 5.9 km within 5 Myr and to 5.1 km by 30 Myr. About 20% of the highest parcels are consumed or relabelled within that time, and diffusion contributes little. The "flash" of white was the top band of the colour map (white from 5.5 km), not missing physics. L0 was left alone.
+
+**What went wrong on the way:**
+- **Max thickness 113 km and 15 km peaks in the first run.** Grid thickness came from deposited volume ÷ area, which underestimates thickness where markers thin out at the crust's edge, while the reference thickness was an average. The mismatch gave spurious buoyancy at every edge. Markers now carry their own thickness and area, both strained by exp(∓div·dt), so each marker conserves its volume exactly and grid fields are plain averages.
+- **A one-step spike to 431 km** (31 km elevation). L0's orogenic collapse turns an ocean cell into 28 km of continent in one step. Passed on as "volcanism" and shared by volume among the few markers in a sheet cell, it multiplied their thickness. Collisions and collapse are now not passed on (the sheet makes its own), and arcs and hotspots thicken each marker by what its L0 cell gained.
+- **Conjugate gradients never converging** at 30 km cells (residual 10⁻² after 400 iterations; 9–10 s per step). At 50 km, 200 iterations land within tens of metres of a converged solve at a tenth of the cost (README 5.4). A multigrid preconditioner is the real fix.
+- **Holes and a gap in the crust at t0.** Pinholes were parcels L0 relabelled during the window. The gap was crust overrun in the collision: absent at the end, so not traced. That crust is exactly what a crumple zone is made of. Consumed crust that touches the landmass during the window is now included, and pinholes are filled. After the fix, the two collision fronts showed parallel thickening bands of 5–14 km.
+- **Grid-aligned gullies.** Stream power on the 50 km sheet grid cut 50 km gullies along the grid axes, and the drainage pass inherited them as parallel stripe-shaped basins. During the sheet, erosion is now a smooth function of elevation (calibrated to Ahnert's magnitudes). A first linear version (elevation ÷ 10 Myr) stripped 2–4 km from lowlands, because isostatic rebound keeps a plain's elevation up while it erodes. The fine drainage pass now draws all the rivers, with stronger fixed relief to organise around, and the basins come out dendritic.
+
 ---
 
 ## Things that turned out not to matter, or were left alone

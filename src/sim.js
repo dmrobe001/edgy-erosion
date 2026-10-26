@@ -127,6 +127,7 @@ class World{
   kill(P){P.alive=false;P.T=P.B=P.S=P.K=P.col=P.clr=P.seen=P.pid=null;P.area=0;}
   // Optional parcel identities for L1 (recording only): every crust cell present now gets id = plate*N + body cell,
   // carried wherever L0 moves crust (splits, welds, hole fills) and cleared where new crust forms.
+  untrackParcels(){this.tracking=false;for(const P of this.plates)delete P.pid;}
   trackParcels(){const N=this.N;this.tracking=true;for(const P of this.plates){if(!P.alive)continue;P.pid=new Int32Array(N).fill(-1);for(let k=0;k<N;k++)if(P.T[k]>0)P.pid[k]=P.id*N+k;}}
   log(type,text,v){this.nEvents++;const ll=v?latlon(v[0],v[1],v[2]):null;
     this.events.push({n:this.nEvents,t:this.t,type,text,where:v?loc(v[0],v[1],v[2]):"",lat:ll?+ll[0].toFixed(2):null,lon:ll?+ll[1].toFixed(2):null});
@@ -269,10 +270,10 @@ class World{
     this.gather();
     const {wT,wB,wS,wK,wCol,dT,arcAdd,arcPlate,collAdd,collPlate,trench,pool}=this,t=this.t,r=this.rand;
     // optional record of tectonic thickening per fixed cell (arcs, collisions, hotspots, collapse), read by L1
-    const rec=this.tecRec||null;
+    const rec=this.tecRec||null; // new crust from arcs and hotspots (what L1's sheet cannot make itself)
     for(let i=0;i<N;i++){
       const a=arcAdd[i];if(a>0&&arcPlate[i]===O[i]){wT[i]+=a;if(rec)rec[i]+=a;if(wK[i]?a>0.25:wT[i]>C.OCEAN_T+4)pool.push(wCol[i],ROCK.ARC,t,a,O[i]);}
-      const c=collAdd[i];if(c>0&&collPlate[i]===O[i]){wT[i]+=c;if(rec)rec[i]+=c;if(!wK[i]&&wT[i]>C.ARC_CONV)wK[i]=1; // continental slices pushed onto seafloor accrete as continent
+      const c=collAdd[i];if(c>0&&collPlate[i]===O[i]){wT[i]+=c;if(!wK[i]&&wT[i]>C.ARC_CONV)wK[i]=1; // continental slices pushed onto seafloor accrete as continent
         if(c>0.4)pool.push(wCol[i],ROCK.OROGEN,t,c*0.4,O[i]);}
       trench[i]*=0.85;
     }
@@ -306,7 +307,7 @@ class World{
     for(let i=0;i<N;i++){
       if(!wK[i]||wT[i]<C.COLLAPSE||r()>collapseP)continue;
       const c=nb[4*i+Math.floor(r()*4)];
-      if(!wK[c]&&O[c]===O[i]){const base=pool.R[wCol[i]*U];if(rec){rec[i]-=8;rec[c]+=28-wT[c];}wK[c]=1;wT[c]=28;wS[c]=0;wCol[c]=pool.make(base,t,26,O[i]);pool.push(wCol[c],ROCK.CLASTIC,t,2,O[i]);wT[i]-=8;}
+      if(!wK[c]&&O[c]===O[i]){const base=pool.R[wCol[i]*U];wK[c]=1;wT[c]=28;wS[c]=0;wCol[c]=pool.make(base,t,26,O[i]);pool.push(wCol[c],ROCK.CLASTIC,t,2,O[i]);wT[i]-=8;}
     }
     if(fb>1){const pz=0.1*dt*(fb-1);
       for(let i=0;i<N;i++){if(!wK[i]||E[i]>0.3||r()>pz)continue;let coast=false;for(let k=0;k<4;k++)if(!wK[nb[4*i+k]])coast=true;

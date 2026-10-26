@@ -1,8 +1,7 @@
-// L1 checks: the stream-power solver against its analytic steady state; then a real continent coupled to L0, with
-// the lookahead choosing which crust is simulated: L0 restored exactly after looking ahead, crust budget closes,
-// every land cell drains (to the sea, a sea edge or a recorded inland basin), no overlapping crust is left, peaks
-// stay bounded, runs are deterministic; then a continent that another collides with, checking that the other is
-// brought in and that crust and rivers interact across the contact. Hack's law and L0-L1 divergence are printed.
+// L1 checks: the stream-power solver against its analytic steady state; the thin viscous sheet against its exact
+// solutions; then a real landmass: the replay brings L0 back exactly, the sheet leaves L0 untouched, the crust budget
+// closes, thickness and peaks stay bounded, runs are deterministic, and in the drainage pass every land cell drains
+// to an outlet and the basin labels partition the land. Hack's law is printed.
 const { loadSim, loadL1, runTo, arg } = require("./lib");
 const SIM = loadSim(), L1 = loadL1(SIM);
 let ok = true; const check = (cond, msg) => { if (!cond) { ok = false; console.log("FAIL " + msg); } };
@@ -20,54 +19,58 @@ let ok = true; const check = (cond, msg) => { if (!cond) { ok = false; console.l
   console.log(`steady state: slope-area exponent ${slope.toFixed(4)} (expect -0.5), max |ksn/(U/K) - 1| ${dev.toExponential(1)}`);
   check(Math.abs(slope + 0.5) < 1e-6 && dev < 1e-9, "stream-power steady state"); }
 
-// 2. a continent coupled to L0, with the lookahead deciding which crust is simulated
-const n = +arg("n", 64), r = +arg("r", 4), W = +arg("win", 20), T0 = +arg("t0", 400);
-function make(seed, ct, t0, plate, win = W) {
-  const w = runTo(new SIM.World({ n, seed, nPlates: 10, mode: "scatter", contTarget: ct }), t0);
-  let cell = -1, bn = 0; for (let i = 0; i < w.N; i++) { if (!w.wK[i] || w.elev[i] <= 0 || (plate >= 0 && w.owner[i] !== plate)) continue; const s = L1.select(w, i, 3); if (s && s.nCont > bn) { bn = s.nCont; cell = i; } }
-  const hash = () => { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; }, before = hash();
-  const la = new L1.Lookahead(w, cell, win); while (!la.advance(1e9)); const rel = la.finish();
-  return { R: new L1.Region(w, { cell, r, window: win, relevance: rel }), rel, restored: hash() === before };
+// 2. the thin viscous sheet against exact solutions: a Newtonian sheet with no buoyancy, its left half dragged at +U
+//    and its right half at -U, has u(x) = U sign(-x) (1 - exp(-|x| / lambda)). In a narrow strip (free sides, so the
+//    across-strip stress vanishes) lambda = sqrt(3/4) ell; in the middle of a wide sheet (no sideways motion) lambda = ell.
+function synthetic(nx, ny, h, ell, U0) {
+  const s = Object.create(L1.Sheet.prototype);
+  s.o = { h, n: 1, picard: 1, ellKm: ell, U0: 50, S0: 35, Ar: 3, cgTol: 1e-8, cgMax: 4000 }; s.nx = nx; s.ny = ny; s.x0 = -nx * h / 2; s.y0 = -ny * h / 2;
+  const nc = nx * ny; s.e0 = s.o.U0 / ell; s.eta0 = 0.5 * 35 * 35 / (2 * 3 * s.e0); s.kappa = 4 * s.eta0 / (ell * ell);
+  s.S = new Float64Array(nc).fill(35); s.Sref = new Float64Array(nc).fill(35); s.str = new Float64Array(nc).fill(1); s.act = new Uint8Array(nc).fill(1);
+  s.eta = new Float64Array(nc).fill(s.eta0); s.eps = new Float64Array(nc); s.Ux = new Float64Array(nc); s.Uy = new Float64Array(nc);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) s.Ux[j * nx + i] = (s.x0 + (i + 0.5) * h) < 0 ? U0 : -U0;
+  s.u = new Float64Array((nx + 1) * ny); s.v = new Float64Array(nx * (ny + 1)); return s;
 }
-function checks(R, label) {
-  const { G, S, live, outlet } = R, h = R.history[R.history.length - 1], rr = G.rr, part = l => R.pieceOf[(l / rr) | 0] * 65536 + R.slotPlate[(l / rr) | 0];
-  const bal = R.balance(); console.log(`${label}: budget ${JSON.stringify(Object.fromEntries(Object.entries(R.budget).map(([k, v]) => [k, Math.round(v / 1e3)])))} (thousand km^3), error ${bal.error.toExponential(1)}`);
-  check(Math.abs(bal.error) < 1e-9, label + ": crust budget closes");
-  check(h.maxElevKm < 10.5, label + ": peaks bounded by the thickness cap plus the strength limit");
-  // every live land cell's receiver chain ends at the sea, a sea edge, or a recorded inland basin, with no cycles
-  let stuck = 0, land = 0, cross = 0;
-  for (let l = 0; l < G.nC; l++) { if (!live[l] || outlet[l]) continue; land++; let c = l, g = 0; while (S.rec[c] !== c && g < G.nC) { c = S.rec[c]; g++; }
-    if (!outlet[c] && !S.sink[c] && !S.seaEdge[c]) stuck++; const rc = S.rec[l]; if (rc !== l && part(rc) !== part(l)) cross++; }
-  console.log(`${label}: ${land} land cells, ${stuck} reach neither sea nor basin; ${cross} drain across a contact between rigid parts; ${h.contacts} contacts`);
-  check(stuck === 0, label + ": all land drains");
-  // no two live cells of different rigid parts left overlapping
-  R.place(); const idx = new L1.CellIndex(G.NR, G.nC); idx.clear(); let bad = 0;
-  for (let l = 0; l < G.nC; l++) if (live[l] && R._pl[l]) idx.insert(l, R.W3[3 * l], R.W3[3 * l + 1], R.W3[3 * l + 2]);
-  for (let a = 0; a < G.nC; a++) { if (!live[a] || !R._pl[a]) continue; const hh = 0.5 * Math.sqrt(G.area[a]) / SIM.R_KM, na = idx.neighbours(idx.g[a]);
-    for (let q = 0; q < na; q++) for (let b = idx.first(idx.around[q]); b >= 0; b = idx.next[b]) { if (b <= a || part(a) === part(b)) continue; const W3 = R.W3, dx = W3[3 * a] - W3[3 * b], dy = W3[3 * a + 1] - W3[3 * b + 1], dz = W3[3 * a + 2] - W3[3 * b + 2]; if (dx * dx + dy * dy + dz * dz < hh * hh) bad++; } }
-  check(bad === 0, label + ": no overlapping crust left"); return cross;
+for (const [label, ny, f, row] of [["narrow strip, free sides", 4, Math.sqrt(3 / 4), 2], ["middle of a wide sheet", 160, 1, 80]]) {
+  const h = 20, ell = 300, U0 = 40, t = synthetic(300, ny, h, ell, U0); t.solve(); let e = 0;
+  for (let i = 0; i <= t.nx; i++) { const x = t.x0 + i * h; if (Math.abs(x) > 2000) continue; const ex = U0 * Math.sign(-x) * (1 - Math.exp(-Math.abs(x) / (f * ell))); e = Math.max(e, Math.abs(t.u[row * (t.nx + 1) + i] - ex)); }
+  console.log(`sheet, ${label}: max |u - exact| ${e.toFixed(3)} km/Myr (${(100 * e / U0).toFixed(2)}% of the plate speed)`);
+  check(e / U0 < 0.005, "sheet: " + label);
 }
-{ const { R, rel, restored } = make("genesis", 0.4, T0, -1); check(restored, "lookahead restores L0 exactly");
-  const t0 = Date.now(); while (R.t < W - 1e-9) R.advance(); const ms = (Date.now() - t0) / R.steps, h = R.history[R.history.length - 1];
-  console.log(`continent: ${rel.target.reduce((a, v) => a + v, 0)} target parcels, ${rel.pids.length} relevant in ${R.pieces.length} piece(s), ${G0(R)} L1 cells of ${(R.world.cellKm / r).toFixed(0)} km, ${R.steps} steps, ${ms.toFixed(0)} ms/step`);
-  console.log(`after ${R.t.toFixed(0)} Myr: mean land elevation ${h.meanElevKm.toFixed(2)} km (start ${R.history[0].meanElevKm.toFixed(2)}), max ${h.maxElevKm.toFixed(1)} km, erosion ${Math.round(h.erosionRateKmPerMyr * 1000)} m/Myr`);
-  checks(R, "continent");
-  // Hack's law: longest upstream flow length against drainage area, for cells draining 20+ cells
-  { const { G, S, live, outlet } = R, Lup = new Float64Array(G.nC); for (let q = S.ns - 1; q >= 0; q--) { const l = S.stack[q], rc = S.rec[l]; if (rc !== l) Lup[rc] = Math.max(Lup[rc], Lup[l] + S.rdist[l]); }
-    let n2 = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; const amin = 20 * G.area[0];
-    for (let l = 0; l < G.nC; l++) { if (!live[l] || outlet[l] || S.A[l] < amin || Lup[l] <= 0) continue; const X = Math.log(S.A[l]), Y = Math.log(Lup[l]); n2++; sx += X; sy += Y; sxx += X * X; sxy += X * Y; }
-    console.log(`Hack's law: length ~ area^${((n2 * sxy - sx * sy) / (n2 * sxx - sx * sx)).toFixed(2)} over ${n2} cells (Earth's rivers: roughly 0.5-0.6)`); }
-  const dv = R.divergence(); console.log(`L0 vs L1: mean thickness difference ${dv.meanThicknessDiffKm.toFixed(2)} km, rms ${dv.rmsThicknessDiffKm.toFixed(2)} km over ${dv.parcels} parcels`);
-  // determinism: a second run from scratch gives the same surface
-  const R2 = make("genesis", 0.4, T0, -1).R; while (R2.t < W - 1e-9) R2.advance(); let same = R2.G.nC === R.G.nC; for (let l = 0; same && l < R.G.nC; l++) if (R2.e[l] !== R.e[l]) same = false;
-  check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "different"} on a second run`); }
-function G0(R) { return R.G.nC; }
 
-// 3. a continent another one collides with: the lookahead brings the second one in, and they interact
-{ const CW = 60, { R, rel } = make("genesis", 0.5, 1000, 21, CW); const plates = new Set([...rel.pids].map(p => (p / rel.N) | 0));
-  console.log(`collision case: relevant crust from plates ${[...plates].join(", ")}; pieces ${R.pieces.map(p => p.plate0 + ":" + p.nS).join(" ")}`);
-  check(plates.size > 1, "other land comes within reach");
-  let crossAny = 0, contactsMax = 0; while (R.t < CW - 1e-9) { R.advance(); contactsMax = Math.max(contactsMax, R.X.count); }
-  crossAny = checks(R, "collision case");
-  check(contactsMax > 0 && crossAny > 0, "crust in contact across rigid parts, with rivers crossing"); }
+// 3. a real landmass: snapshots every 10 Myr, pick at the present, replay, sheet, drainage pass
+const n = +arg("n", 64), W = +arg("win", 10), T0 = +arg("t0", 400), H = +arg("h", 70), target = +arg("land", 200);
+const w = new SIM.World({ n, seed: "genesis", nPlates: 10, mode: "scatter", contTarget: 0.5 }), snaps = [];
+while (w.t < T0) { const last = snaps[snaps.length - 1]; if (!last || w.t - last.t >= 10 - 1e-9) { snaps.push({ t: w.t, steps: w.steps, snap: w.snapshot() }); while (snaps.length > 4) snaps.shift(); } w.step(); }
+const hash = () => { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; }, before = hash();
+let cell = -1, bd = Infinity; { const seen = new Uint8Array(w.N);
+  for (let i = 0; i < w.N; i++) { if (seen[i] || w.elev[i] <= 0) continue; const lm = L1.landmassAt(w, i); for (const c of lm.cells) seen[c] = 1; const d = Math.abs(lm.land - target); if (d < bd) { bd = d; cell = i; } } }
+const pick = L1.landmassAt(w, cell), entry = [...snaps].reverse().find(s => s.t <= w.t - W - 1e-9);
+function run() {
+  const rp = new L1.Replay(w, entry, W, pick); while (!rp.advance(1e9)); const plan = rp.finish(), back = hash() === before;
+  w.restore(entry.snap); w.trackParcels(); while (w.steps < plan.t0Steps) w.step();
+  const t0 = Date.now(), sh = new L1.Sheet(w, plan, { h: H }); let maxS = 0;
+  while (w.steps < plan.endSteps) { sh.advance(); for (let k = 0; k < sh.nm; k++) if (sh.mIn[k] && sh.mS[k] > maxS) maxS = sh.mS[k]; }
+  w.untrackParcels(); return { plan, sh, back, maxS, ms: (Date.now() - t0) / sh.steps, after: hash() === before };
+}
+const A = run(), { sh, plan } = A, hl = sh.history[sh.history.length - 1], bal = sh.balance();
+console.log(`landmass: ${pick.land} L0 land cells, ${plan.nObj} parcels; sheet ${sh.nx}x${sh.ny} at ${H} km, ${sh.nm} markers, ${sh.steps} steps, ${A.ms.toFixed(0)} ms/step`);
+console.log(`after ${sh.t.toFixed(1)} Myr: mean land elevation ${hl.meanElevKm.toFixed(2)} km (start ${sh.history[0].meanElevKm.toFixed(2)}), max ${hl.maxElevKm.toFixed(1)} km, most thickening ${hl.maxThickeningKm.toFixed(1)} km, thickest marker ${A.maxS.toFixed(1)} km`);
+console.log(`budget ${JSON.stringify(Object.fromEntries(Object.entries(sh.budget).map(([k, v]) => [k, Math.round(v / 1e3)])))} (thousand km^3), error ${bal.error.toExponential(1)}`);
+check(A.back, "the replay brings L0 back to the present exactly");
+check(A.after, "the sheet's pass leaves L0 exactly as it was");
+check(Math.abs(bal.error) < 1e-9, "crust budget closes");
+check(A.maxS < 100 && hl.maxElevKm < 11, "thickness and peaks bounded");
+const B = run(); let same = B.sh.nm === sh.nm; for (let c = 0; same && c < sh.nx * sh.ny; c++) if (!(B.sh.e[c] === sh.e[c] || isNaN(B.sh.e[c]) && isNaN(sh.e[c]))) same = false;
+check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "different"} on a second run`);
+// the drainage pass
+{ const t0 = Date.now(), bs = L1.basins(sh), { S } = bs; let stuck = 0, label = 0, sum = 0;
+  for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l]) continue; let c = l, g = 0; while (S.rec[c] !== c && g < bs.land.length) { c = S.rec[c]; g++; } if (bs.land[c] && !S.sink[c]) stuck++; if (bs.basin[l] !== bs.basin[S.rec[l]] && bs.land[S.rec[l]]) label++; }
+  for (const v of bs.sizes) sum += v;
+  console.log(`drainage pass: ${bs.nx}x${bs.ny} at ${bs.h} km, ${bs.landCells} land cells, ${bs.nBasins} basins (largest ${bs.sizes.slice(0, 3).join(", ")} cells), ${Date.now() - t0} ms; ${stuck} cells drain nowhere`);
+  check(stuck === 0, "all land drains to the sea or an inland sink"); check(label === 0 && sum === bs.landCells, "basins partition the land");
+  const Lup = new Float64Array(bs.land.length); for (let q = S.ns - 1; q >= 0; q--) { const l = S.stack[q], rc = S.rec[l]; if (rc !== l) Lup[rc] = Math.max(Lup[rc], Lup[l] + S.rdist[l]); }
+  let n2 = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; const amin = 20 * bs.h * bs.h;
+  for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l] || S.A[l] < amin || Lup[l] <= 0) continue; const X = Math.log(S.A[l]), Y = Math.log(Lup[l]); n2++; sx += X; sy += Y; sxx += X * X; sxy += X * Y; }
+  console.log(`Hack's law: length ~ area^${((n2 * sxy - sx * sy) / (n2 * sxx - sx * sx)).toFixed(2)} over ${n2} cells (Earth's rivers: roughly 0.5-0.6)`); }
 console.log(ok ? "PASS L1" : "FAIL L1"); process.exitCode = ok ? 0 : 1;

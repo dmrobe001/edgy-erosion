@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>L0 plates, L1 continents</title>
+<title>L0 plates, L1 landmasses</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap" rel="stylesheet">
@@ -105,7 +105,7 @@ button:disabled{opacity:.5;cursor:default}
 <body>
 <main>
   <header>
-    <h1>L0 plates, L1 continents</h1>
+    <h1>L0 plates, L1 landmasses</h1>
     <div class="clock num" id="clock">0<small>million years</small></div>
   </header>
 
@@ -170,27 +170,28 @@ button:disabled{opacity:.5;cursor:default}
   </div>
 
   <section class="panel l1panel" id="l1panel">
-    <h2>L1 continent</h2>
-    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window. First L0 looks ahead through the window and rewinds exactly, to find which crust will matter: the picked continent wherever it goes (every fragment it breaks into), plus any land within the reach of it through contiguous land at any moment. That crust is simulated from 15 Myr before it first matters until it separates; where pieces of crust meet, L1 resolves the collision at its own resolution. Outside L1’s crust, the map shows L0’s own elevation, slightly dimmed.</p>
+    <h2>L1 landmass</h2>
+    <p>Pick a landmass at the present: one piece of land bounded by its coastline. L1 replays the last 10–30 Myr of its history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet. Each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. Coarse rivers wear it down as it goes. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started.</p>
     <div class="row">
-      <button id="l1Pick">Pick a continent</button>
-      <label><span class="field-label">Cell size</span><select id="l1Ref"><option value="4">4× finer</option><option value="8" selected>8× finer</option><option value="16">16× finer</option></select></label>
-      <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="150" step="10" value="100"><span class="num" id="l1WinVal">100 Myr</span></label>
-      <label><span class="field-label">Erodibility K</span><input type="range" id="l1K" min="-2" max="0" step="0.25" value="-1"><span class="num" id="l1KVal">0.10</span></label>
-      <label title="How far into land that touches the picked continent L1 simulates it"><span class="field-label">Reach</span><input type="range" id="l1Reach" min="300" max="3000" step="100" value="1200"><span class="num" id="l1ReachVal">1,200 km</span></label>
+      <button id="l1Pick">Pick a landmass</button>
+      <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="30" step="5" value="20"><span class="num" id="l1WinVal">20 Myr</span></label>
+      <label title="Cell size of the viscous sheet; the drainage pass is always 10 km"><span class="field-label">Sheet grid</span><select id="l1H"><option value="30">30 km</option><option value="50" selected>50 km</option><option value="70">70 km</option></select></label>
+      <label title="Argand number: how strongly thickened crust resists further thickening, against its strength. Higher means weaker crust that spreads into wide plateaus"><span class="field-label">Argand number</span><select id="l1Ar"><option value="1">1</option><option value="3" selected>3</option><option value="10">10</option></select></label>
+      <label title="How far a plate's drag reaches into the sheet: wide deformation zones when long"><span class="field-label">Coupling length</span><input type="range" id="l1Ell" min="200" max="1000" step="100" value="500"><span class="num" id="l1EllVal">500 km</span></label>
       <button class="primary" id="l1Run" disabled>Run L1</button>
     </div>
-    <div class="summary" id="l1Info"><div class="muted">No continent picked yet.</div></div>
+    <div class="summary" id="l1Info"><div class="muted">No landmass picked yet.</div></div>
     <div class="stage l1stage" id="l1stage" hidden><div class="l1wrap" id="l1wrap">
-      <canvas id="l1map" aria-label="L1 continent map"></canvas>
+      <canvas id="l1map" aria-label="L1 landmass map"></canvas>
       <div class="inspect num" id="l1inspect"></div>
     </div></div>
     <div class="row l1controls" id="l1controls" hidden>
       <div class="seg" role="group" aria-label="L1 view" id="l1views">
         <button data-v="terrain" aria-pressed="true">Terrain</button>
-        <button data-v="erosion" aria-pressed="false">Erosion</button>
-        <button data-v="uplift" aria-pressed="false">Uplift</button>
-        <button data-v="basins" aria-pressed="false">Drainage basins</button>
+        <button data-v="thick" aria-pressed="false">Thickening</button>
+        <button data-v="strain" aria-pressed="false">Strain rate</button>
+        <button data-v="rock" aria-pressed="false">Surface rock</button>
+        <button data-v="basins" aria-pressed="false" disabled>Drainage basins</button>
       </div>
       <label><input type="checkbox" id="l1Rivers" checked> Rivers</label>
       <div class="seg" role="group" aria-label="Zoom" id="l1zoom">
@@ -227,7 +228,7 @@ button:disabled{opacity:.5;cursor:default}
       <p><span class="tag">Faults.</span> At every plate-boundary cell, the relative motion is split into an across-boundary part (convergence or extension) and an along-boundary part. Those slips accumulate in the parcel’s fault record, along with the boundary’s strike, stored in the plate’s own frame so dead faults ride along with the crust. A record keeps the current and previous episode; a new one starts after 10 million years of quiet or of a different style. Continental collisions now thicken crust in proportion to the across-boundary share of motion, so oblique collisions build less relief.</p>
       <p><span class="tag">Formations and domains.</span> At handoff, units in neighbouring continental columns are linked when their rock type and origin plate match and their ages agree (within 40 million years, or 10% of their age for old rock), walking both stacks bottom to top so order is preserved. Linked units become formations. Neighbours on the same plate whose stacks share at least 40% of their thickness by matched units form a domain; slivers under eight columns join a neighbouring domain.</p>
       <p><span class="tag">L1 preview.</span> Elevation is smoothed over about three cells and interpolated bilinearly on the cube grid; the coast is its zero contour. Formation thicknesses are averaged over neighbours in the same domain (absent counts as zero, so isolated specks fade and edges pinch out) and interpolated per pixel without crossing domain boundaries. A ridged noise field stands in for L1 relief: valleys cut deeper into the formation stack and expose older units. The noise is a placeholder for a real L1 terrain model.</p>
-      <p><span class="tag">L1 continent.</span> L0 first tags its crust parcels, looks ahead through the window and rewinds exactly. Crust is relevant while it lies within the reach of the picked continent (wherever its fragments go) through contiguous land; it is simulated from 15 Myr before it first matters until it separates. Relevant parcels are refined on the same cube-sphere (each L0 cell split 4–16 ways) in the frame of the plate that held them, and each step move rigidly with the plate carrying them now. Where L1’s pieces of crust meet, L1 resolves overlaps at its own resolution (continental beats oceanic, otherwise the side L0 shows on top) and links touching cells, so rivers, flexure and crustal flow cross collision zones; crust L1 does not simulate that L0 puts on top consumes L1’s; holes refill as in L0. Each step L0 runs once and records its tectonic thickening; L1 applies it, spreads thickened crust sideways as lower-crustal flow, and computes elevation as the inherited elevation plus the thickness change minus a flexural root (40 km flexural length, the plate yielding beyond 3 km of departure from local balance). Rivers follow steepest descent after depressions are filled and incise by the stream-power law, solved implicitly. Eroded rock leaves the system for now; erodibility and rain are uniform. A volume budget tracks every source and sink of crust and closes to rounding error.</p>
+      <p><span class="tag">L1 landmass.</span> L0 saves its whole state every 10 Myr (the last four). Picking a landmass at the present restores the newest state older than the window and replays to the present, tagging crust parcels: the landmass’s crust is every parcel that ends up in it, plus continental crust that touches it during the window and is gone by the end (consumed in a collision). L0 is deterministic, so the replay lands exactly on the present. A second replay runs the sheet alongside, in an azimuthal equidistant map co-moving with the plate that carries most of the landmass. Markers (36 per L0 cell) carry each parcel’s crust thickness, rock column and strength (old cratons ten times stronger). Each step the sheet’s velocity solves the thin viscous sheet equations (England and McKenzie 1982): power-law viscosity with exponent 3, buoyancy from the crust’s excess potential energy, and a basal drag toward the velocity of the plate L0 says carries each marker. Free edges, conjugate gradients on a staggered grid, two Picard iterations. The Argand number sets the viscosity at a reference strain rate of 50 km/Myr over the coupling length. Markers move with the sheet and thicken by its convergence, conserving volume exactly. L0’s arcs and hotspots add crust under the markers, a new top unit of arc rock. Elevation is the inherited elevation plus the thickness change minus a flexural root (40 km flexural length, the plate yielding beyond 3 km from local balance). Rivers on the sheet grid erode by the stream-power law; eroded rock leaves the system. A volume budget closes to rounding error. The drainage pass then refines the final surface to 10 km (bilinear plus a little fixed noise), runs 5 Myr of stream-power erosion with tectonics frozen, and labels every land cell by the outlet it drains to.</p>
       <p><span class="tag">Handoff.</span> Extraction groups continental cells with at least 60 km of recorded slip and similar strike, then traces each group into polylines. Its kind is thrust, normal or strike-slip from the summed slip. Rock columns and faults are copied when crust is copied, and orphaned records are garbage-collected.</p>
       <p><span class="tag">Elevation.</span> Derived, not stored: Airy isostasy for continents, square-root-of-age cooling for seafloor. Hotspots are fixed in the mantle frame, so moving plates drag curved island chains off them.</p>
       <p><span class="tag">Surface and budget.</span> Continental crust diffuses and erodes; sediment builds shelves. A feedback term speeds margin growth when continental area is below the chosen target and makes drowned margins founder back to seafloor when it’s above. The Continental crust slider sets both the starting fraction and that target. Land above sea is roughly half of it in the long run, because erosion wears continents toward sea level; Earth has about 40% continental crust (including shelves) and 29% land. This thermostat is a deliberate fudge to keep the crust budget stable, not physics.</p>

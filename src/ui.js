@@ -177,7 +177,7 @@ function drawArrow(ctx,x0,y0,x1,y1,dpr){
 const EMPTY_LOG='<li class="empty" style="border:0">Events appear here as the world evolves: rifts, collisions, sutures, consumed plates, hotspot islands.</li>';
 function build(){
   world=new SIM.World({n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:$("nnr").checked,contTarget:+$("contT").value/100});
-  l1Reset();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();
+  l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();
 }
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
@@ -210,17 +210,16 @@ function updateLegend(){
 }
 function frame(now){
   let need=false;
-  if(running){const n=+$("speed").value,t0=performance.now();for(let k=0;k<n;k++)world.step();
+  if(running){const n=+$("speed").value,t0=performance.now();for(let k=0;k<n;k++){world.step();snapTick();}
     const ms=(performance.now()-t0)/n;msEma=msEma?msEma*0.9+ms*0.1:ms;
     const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=n*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
     colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();l1WorldMoved();}
-  if(l1Running){l1Tick();need=true;}
-  if(l1Look){l1LookTick();lastFrame=now;requestAnimationFrame(frame);return;}
+  if(l1Busy()){l1Tick();lastFrame=now;requestAnimationFrame(frame);return;}
   if(proj==="globe"&&$("spin").checked&&!dragging){yaw+=0.0035;camDirty=true;need=true;}
   if(need)render();lastFrame=now;requestAnimationFrame(frame);
 }
-$("play").onclick=()=>{if(l1Running||l1Look)return;running=!running;$("play").textContent=running?"Pause":"Run";};
-$("stepBtn").onclick=()=>{if(l1Running||l1Look)return;l1WorldMoved();const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
+$("play").onclick=()=>{if(l1Busy())return;running=!running;$("play").textContent=running?"Pause":"Run";};
+$("stepBtn").onclick=()=>{if(l1Busy())return;l1WorldMoved();const t0=performance.now();world.step();snapTick();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
 $("speed").oninput=e=>$("speedVal").textContent=e.target.value;
 $("nPlates").oninput=e=>$("nPlatesVal").textContent=e.target.value;
 $("contT").oninput=e=>$("contTVal").textContent=e.target.value+"%";
@@ -297,149 +296,145 @@ $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
   try{await d.save({filename:name,data});$("dlNote").textContent="Saved.";}
   catch(err){$("dlNote").textContent=err&&err.code==="declined"?"Download cancelled.":"The download didn’t go through.";}};
 downloadsP=(window.claude&&typeof window.claude.use==="function")?window.claude.use("downloads").catch(()=>null):Promise.resolve(null);
-window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(region)l1Render();});
-// ---------- L1 continent ----------
-let l1Look=null,l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1Back=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
-const L1_ERO_STOPS=[[0,"#f3efe2"],[0.5,"#e7cf8e"],[2,"#d39a4f"],[5,"#a85a2c"],[10,"#5e2a17"]];
-const L1_UP_STOPS=[[0,"#eef1f3"],[2,"#c7d9e8"],[10,"#7f9fd0"],[30,"#7a55b0"],[80,"#3d1859"]];
-const LUT_ERO=buildLut(L1_ERO_STOPS,256,0,10),LUT_UP=buildLut(L1_UP_STOPS,256,0,80);
-const l1Km=()=>world.cellKm/+$("l1Ref").value;
-function l1Labels(){const o=$("l1Ref").options;for(const op of o)op.textContent=`~${(world.cellKm/+op.value).toFixed(world.cellKm/+op.value<10?1:0)} km`;}
-function l1Reset(){l1Look=null;l1Picking=false;l1Sel=null;region=null;l1Running=false;l1Stale=false;l1Mask=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
+window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(l1St&&l1St.sh)l1Render();});
+// ---------- L1 landmass ----------
+// L0 keeps its whole state every 10 Myr (the last four), so a landmass picked at the present can be replayed
+let snaps=[],l1Picking=false,l1St=null,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
+const SNAP_EVERY=10,SNAP_KEEP=4;
+function snapTick(){if(!world)return;const last=snaps[snaps.length-1];
+  if(!last||world.t-last.t>=SNAP_EVERY-1e-9){snaps.push({t:world.t,steps:world.steps,snap:world.snapshot()});while(snaps.length>SNAP_KEEP)snaps.shift();}}
+const l1Busy=()=>!!(l1St&&/^(replay|forward|run|basins)$/.test(l1St.phase));
+const THICK_DIV=[[-15,"#2c5aa0"],[-5,"#9db8de"],[0,"#f2f0ea"],[5,"#e6a07a"],[15,"#b8322a"],[30,"#5e0f12"]];
+const STRAIN_STOPS=[[-3,"#f3f1ea"],[-2,"#d9e2c0"],[-1.25,"#9cc38c"],[-0.5,"#3f9b8a"],[0,"#265c8f"],[0.5,"#2b1f5c"]];
+const LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
+function l1Reset(){l1Picking=false;l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
-  $("l1Info").innerHTML=`<div class="muted">No continent picked yet.</div>`;if(world)l1Labels();}
-// a picked continent is tied to this moment of L0; once L0 moves on without L1, the pick (or the L1 result) goes stale
-function l1WorldMoved(){if(l1Sel&&!region){l1Sel=null;l1Mask=null;$("l1Run").disabled=true;$("l1Info").innerHTML=`<div class="muted">L0 moved on, so the pick was cleared. Pick again.</div>`;}
-  else if(region&&!l1Running&&!l1Stale){l1Stale=true;l1Mask=null;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">L0 has moved on since this L1 run; the map still shows the continent at ${fmtT(region.t0+region.t)} Myr.</div>`);}}
-function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world)return null;const N=world.N;
-  if(region&&!l1Stale){const m=new Uint8Array(N);
-    for(let i=0;i<N;i++){const s=region.slotAtFixed(i);if(s>=0&&region.slotActive[s])m[i]=region.slotTarget[s]?2:1;}return l1Mask=m;}
-  if(l1Sel){const m=new Uint8Array(N),{plate,dist}=l1Sel.sel;for(let i=0;i<N;i++)if(world.owner[i]===plate&&dist[world.bodyIdx[i]]>=0)m[i]=dist[world.bodyIdx[i]]===0?2:1;return l1Mask=m;}
-  return null;}
-$("l1Pick").onclick=()=>{if(l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
-  $("l1Info").innerHTML=`<div>Tap a continent on the map above.</div>`;$("hint").textContent="Tap a continent to pick it for L1.";};
+  $("l1Info").innerHTML=`<div class="muted">No landmass picked yet.</div>`;}
+// the newest saved state at least a window before the present
+const l1Entry=win=>{for(let k=snaps.length-1;k>=0;k--)if(snaps[k].t<=world.t-win-1e-9)return snaps[k];return null;};
+// a pick (or a finished run) belongs to this moment of L0; once L0 moves on, the pick is cleared and the result kept
+function l1WorldMoved(){if(!l1St)return;
+  if(l1St.phase==="picked"){l1St=null;l1Mask=null;$("l1Run").disabled=true;$("l1Info").innerHTML=`<div class="muted">L0 moved on, so the pick was cleared. Pick again.</div>`;}
+  else if(l1St.phase==="done"&&!l1St.stale){l1St.stale=true;l1Mask=null;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">L0 has moved on since this run; the map still shows the landmass as it was.</div>`);}}
+function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world||!l1St||l1St.stale||l1Busy())return null;const m=new Uint8Array(world.N),{cells,land}=l1St.pick;
+  for(let h=0;h<cells.length;h++)m[cells[h]]=h<land?2:1;return l1Mask=m;}
+$("l1Pick").onclick=()=>{if(l1Busy())return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
+  $("l1Info").innerHTML=`<div>Tap a landmass on the map above.</div>`;$("hint").textContent="Tap land to pick its landmass for L1.";};
 function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("hint").textContent=proj==="globe"?"Drag to turn the globe. Tap a spot to inspect it.":"Tap a spot to inspect it.";
-  const sel=L1.select(world,i,3);if(!sel){$("l1Info").innerHTML=`<div class="muted">That spot is oceanic crust. Pick again and tap a continent.</div>`;return;}
-  region=null;l1Stale=false;l1Sel={cell:i,sel};l1Mask=null;$("l1Run").disabled=false;
-  const r=+$("l1Ref").value,cells=sel.slots.length*r*r,a=sel.nCont*world.cellKm*world.cellKm;
-  $("l1Info").innerHTML=`<div><b>Continent on plate ${sel.plate}</b>, about ${(a/1e6).toFixed(1)} million km² of continental crust (${sel.nCont.toLocaleString("en-US")} L0 cells), with ${(sel.slots.length-sel.nCont).toLocaleString("en-US")} cells of margin.</div>
-    <div class="muted">At ~${l1Km().toFixed(1)} km cells that is ${(cells/1e6).toFixed(2)} million L1 cells${cells>2.5e6?"; expect a slow, memory-hungry run":""}.</div>`;render();}
-$("l1Ref").onchange=()=>{if(l1Sel&&!region)l1PickAt(l1Sel.cell);};
-$("l1Win").oninput=e=>$("l1WinVal").textContent=e.target.value+" Myr";
-$("l1Reach").oninput=e=>$("l1ReachVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";
-$("l1K").oninput=e=>$("l1KVal").textContent=Math.pow(10,+e.target.value).toFixed(e.target.value<-1.5?3:2);
-$("l1Run").onclick=()=>{if(!l1Sel||l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}
-  $("l1Run").disabled=true;$("l1Pick").disabled=true;
-  l1Look=new L1.Lookahead(world,l1Sel.cell,+$("l1Win").value,{reachKm:+$("l1Reach").value});$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Looking">Looking ahead…</div>`);};
-// the lookahead runs L0 forward in slices between frames, then rewinds it exactly
-function l1LookTick(){const done=l1Look.advance(120),el=$("l1Looking"),w=+$("l1Win").value;
-  if(el)el.textContent=`Looking ahead: ${Math.min(w,Math.round(world.t-l1Look.t0))} / ${w} Myr…`;
-  if(!done)return;const rel=l1Look.finish();l1Look=null;if(el)el.remove();
-  // summarize: crust beyond the picked continent, by the plate that held it at the start
-  const km=world.cellKm*world.cellKm,N=rel.N,by=new Map();
-  for(let q=0;q<rel.pids.length;q++){if(rel.target[q])continue;const p=(rel.pids[q]/N)|0,v=by.get(p)||{n:0,first:Infinity,leave:0};v.n++;v.first=Math.min(v.first,rel.first[q]);if(isFinite(rel.last[q]))v.leave++;by.set(p,v);}
-  const lines=[...by].sort((a,b)=>b[1].n-a[1].n).map(([p,v])=>`<div>Crust from plate ${p} (about ${(v.n*km/1e6).toFixed(1)} million km²) comes within reach ${v.first>0?`at +${Math.round(v.first)} Myr`:"from the start"}${v.leave?`; ${Math.round(100*v.leave/v.n)}% of it later separates and drops out`:""}.</div>`);
-  $("l1Info").insertAdjacentHTML("beforeend",lines.length?lines.join(""):`<div class="muted">Looking ahead: no other land comes within reach during the window.</div>`);
-  l1Build(rel);}
-function l1Build(rel){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
-  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value,relevance:rel});}
-    catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not build L1: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
-    const b=$("l1Building");if(b)b.remove();
-    $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">${region.G.nC.toLocaleString("en-US")} L1 cells of ~${l1Km().toFixed(1)} km; flexure and crustal flow on a ${(world.cellKm/region.rf).toFixed(0)} km grid.</div>`);
-    l1Running=true;l1Mask=null;l1Zoom=1;l1Pan=[0,0];l1Pix=null;$("l1stage").hidden=false;$("l1controls").hidden=false;
-    document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x.dataset.z==="1"?"true":"false"));l1Legend();l1Render();l1Stats();},30);};
-function l1Tick(){const t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
-  l1Mask=null;colorsDirty=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();
-  // pieces of crust move against each other, so the map's pixel lookup is rebuilt; it is redrawn every other step
-  if(region.steps%2===0||region.t>=region.o.window-1e-9){l1Pix=null;l1Render();}l1Stats();
-  if(region.t>=region.o.window-1e-9){l1Running=false;$("l1Pick").disabled=false;l1Stats(true);}}
-// map: orthographic projection about the picked continent's centroid, north up as it was at the start, in the frame
-// of the plate carrying most of it (F0 maps that frame to the world)
-function l1Frame(){const c=region.center,nB=region.northB,d=nB[0]*c[0]+nB[1]*c[1]+nB[2]*c[2];let nr=[nB[0]-d*c[0],nB[1]-d*c[1],nB[2]-d*c[2]];const L=Math.hypot(...nr)||1;nr=nr.map(v=>v/L);
-  const ea=[nr[1]*c[2]-nr[2]*c[1],nr[2]*c[0]-nr[0]*c[2],nr[0]*c[1]-nr[1]*c[0]];
-  if(!region._ext){const p=world.cube.pos,F0=region.mapFrame();let x0=1,x1=-1,y0=1,y1=-1;
-    for(let s=0;s<region.slots.length;s++){const k=region.slots[s],F=region.partF(s);if(!F)continue;const b=[p[3*k],p[3*k+1],p[3*k+2]];
-      const wv=[F[0]*b[0]+F[1]*b[1]+F[2]*b[2],F[3]*b[0]+F[4]*b[1]+F[5]*b[2],F[6]*b[0]+F[7]*b[1]+F[8]*b[2]];
-      const v=[F0[0]*wv[0]+F0[3]*wv[1]+F0[6]*wv[2],F0[1]*wv[0]+F0[4]*wv[1]+F0[7]*wv[2],F0[2]*wv[0]+F0[5]*wv[1]+F0[8]*wv[2]]; // world -> map frame
-      const x=v[0]*ea[0]+v[1]*ea[1]+v[2]*ea[2],y=v[0]*nr[0]+v[1]*nr[1]+v[2]*nr[2];x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
-    const pad=world.cellRad;region._ext=[x0-pad,x1+pad,y0-pad,y1+pad];}
-  return{c,ea,nr,ext:region._ext};}
-function l1Size(){const wrap=$("l1wrap"),f=l1Frame(),[x0,x1,y0,y1]=f.ext,asp=Math.min(1.3,Math.max(0.45,(y1-y0)/(x1-x0)));
-  wrap.style.aspectRatio=`${1/asp}`;const dpr=window.devicePixelRatio||1,W=Math.min(1000,Math.round((wrap.clientWidth||600)*dpr)),H=Math.round(W*asp);
-  if(W!==l1PW||H!==l1PH||!l1Pix){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
-  // per pixel: the L1 cell there, or else L0's elevation there (bilinear on L0's fixed grid) as the backdrop
-  if(!l1Pix){l1Pix=new Int32Array(W*H);l1Back=new Float32Array(W*H).fill(NaN);const F0=region.mapFrame(),cube=world.cube,nb=cube.nb,el=world.elev,out=[0,0,0];
-    const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
-    for(let py=0;py<H;py++){const Y=cy+(H/2-py-0.5)*s;for(let px=0;px<W;px++){const X=cx+(px+0.5-W/2)*s,z2=1-X*X-Y*Y,q=py*W+px;
-      if(z2<=0){l1Pix[q]=-1;continue;}const z=Math.sqrt(z2),dx=f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,dy=f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,dz=f.c[2]*z+f.ea[2]*X+f.nr[2]*Y;
-      const wx=F0[0]*dx+F0[1]*dy+F0[2]*dz,wy=F0[3]*dx+F0[4]*dy+F0[5]*dz,wz=F0[6]*dx+F0[7]*dy+F0[8]*dz,l=region.cellAtWorld(wx,wy,wz);l1Pix[q]=l;
-      if(l<0||!region.cont[l]){cube.lookupFrac(wx,wy,wz,out);const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty);
-        l1Back[q]=(1-ax)*(1-ay)*el[c]+ax*(1-ay)*el[cB]+(1-ax)*ay*el[cC]+ax*ay*el[cD];}}}}}
-function l1Render(){if(!region)return;l1Size();
-  const W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,{e,cont,live:alive,eroded,uplifted,S}=region,A=S.A;
-  const rivers=$("l1Rivers").checked,cellA=region.G.area[0],Amin=Math.max(2000,10*cellA),bas=l1View==="basins"?region.basins():null,out=region.outlet;
-  const shade=l1Shade();
-  for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,l=P[q];
-    if(l<0||!alive[l]||!cont[l]){const hb=l1Back[q];
-      if(isNaN(hb)){d[o]=d[o+1]=d[o+2]=24;d[o+3]=255;continue;}
-      // L0 backdrop, also for L1's (static) ocean: sea as L0 has it; land L1 does not simulate dimmed and greyed
-      let k=Math.round((hb+8)/16*1023);k=k<0?0:k>1023?1023:k;const r0=LUT_E[k*3],g0=LUT_E[k*3+1],b0=LUT_E[k*3+2],m=(r0+g0+b0)/3;
-      if(hb<=0){d[o]=r0;d[o+1]=g0;d[o+2]=b0;}else{d[o]=0.72*(0.6*r0+0.4*m);d[o+1]=0.72*(0.6*g0+0.4*m);d[o+2]=0.72*(0.6*b0+0.4*m);}d[o+3]=255;continue;}
-    const h=e[l],land=cont[l]&&h>0,sh=shade[l];
-    let r,g,b;
-    if(!land){let k=Math.round((Math.min(h,-0.01)+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}
-    else if(l1View==="terrain"){let k=Math.round((h+8)/16*1023);k=k>1023?1023:k;r=LUT_E[k*3]*sh;g=LUT_E[k*3+1]*sh;b=LUT_E[k*3+2]*sh;}
-    else if(l1View==="erosion"){let k=Math.round(eroded[l]/10*255);k=k>255?255:k;const f=0.75+0.25*sh;r=LUT_ERO[k*3]*f;g=LUT_ERO[k*3+1]*f;b=LUT_ERO[k*3+2]*f;}
-    else if(l1View==="uplift"){let k=Math.round(uplifted[l]/80*255);k=k>255?255:k<0?0:k;const f=0.75+0.25*sh;r=LUT_UP[k*3]*f;g=LUT_UP[k*3+1]*f;b=LUT_UP[k*3+2]*f;}
-    else{const id=bas[l];let hh=Math.imul(id^(id>>>16),0x45d9f3b);hh^=hh>>>13;const c=hsl((hh>>>0)%360,45,62),f=0.7+0.3*sh;r=c[0]*f;g=c[1]*f;b=c[2]*f;}
-    if(rivers&&land&&A[l]>=Amin&&(l1View==="terrain"||l1View==="basins")){const a=Math.min(0.9,0.35+0.18*Math.log10(A[l]/Amin)*2);r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}
-    d[o]=r>255?255:r;d[o+1]=g>255?255:g;d[o+2]=b>255?255:b;d[o+3]=255;}
+  const pick=L1.landmassAt(world,i);if(!pick){$("l1Info").innerHTML=`<div class="muted">That spot is under the sea. Pick again and tap land.</div>`;return;}
+  l1St={phase:"picked",pick,cell:i};l1Mask=null;l1PickInfo();render();}
+function l1PickInfo(){if(!l1St||l1St.phase!=="picked")return;const {pick}=l1St,win=+$("l1Win").value,entry=l1Entry(win),a=pick.land*world.cellKm*world.cellKm;
+  $("l1Run").disabled=!entry;
+  $("l1Info").innerHTML=`<div><b>Landmass</b> of about ${(a/1e6).toFixed(1)} million km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}.</div>`+
+    (entry?`<div class="muted">The replay starts from L0’s state saved at ${fmtT(entry.t)} Myr and runs ${fmtT(world.t-entry.t)} Myr to the present; the sheet runs the last ${win}.</div>`
+      :`<div class="muted">L0 has no saved state ${win} Myr back yet (it keeps one every ${SNAP_EVERY} Myr while it runs here). Run L0 a little longer, or shorten the window.</div>`);}
+$("l1Win").oninput=e=>{$("l1WinVal").textContent=e.target.value+" Myr";l1PickInfo();};
+$("l1Ell").oninput=e=>$("l1EllVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";
+$("l1Run").onclick=()=>{if(!l1St||l1St.phase!=="picked")return;const win=+$("l1Win").value,entry=l1Entry(win);if(!entry)return;
+  if(running){running=false;$("play").textContent="Run";}$("l1Run").disabled=true;$("l1Pick").disabled=true;
+  const o={h:+$("l1H").value,Ar:+$("l1Ar").value,ellKm:+$("l1Ell").value};
+  try{l1St.rp=new L1.Replay(world,entry,win,l1St.pick);}catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not start: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
+  Object.assign(l1St,{phase:"replay",entry,win,o,t0Wall:performance.now()});l1Mask=null;
+  $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Prog">Replaying L0 to trace the landmass’s crust…</div>`);};
+function l1Prog(t){const el=$("l1Prog");if(el)el.textContent=t;}
+// one slice of work per animation frame: replay, replay again to the window's start, the sheet a step at a time, the basins
+function l1Tick(){const S=l1St,w=world;colorsDirty=true;
+  if(S.phase==="replay"){const done=S.rp.advance(120);l1Prog(`Pass 1, tracing the crust: L0 at ${fmtT(w.t)} Myr (present ${fmtT(S.rp.endT)})…`);
+    if(!done)return;S.plan=S.rp.finish();S.rp=null;w.restore(S.entry.snap);w.trackParcels();S.phase="forward";return;}
+  if(S.phase==="forward"){const t1=performance.now();while(w.steps<S.plan.t0Steps&&performance.now()-t1<120)w.step();l1Prog(`Pass 2: L0 back at ${fmtT(w.t)} Myr, heading for the window’s start…`);
+    if(w.steps<S.plan.t0Steps)return;
+    try{S.sh=new L1.Sheet(w,S.plan,S.o);}catch(err){l1Prog(`Could not build the sheet: ${err.message}`);w.untrackParcels();l1St=null;$("l1Pick").disabled=false;return;}
+    S.phase="run";l1Zoom=1;l1Pan=[0,0];l1Pix=null;l1View="terrain";l1SetViews();$("l1stage").hidden=false;$("l1controls").hidden=false;
+    $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Sheet: ${S.sh.nx}×${S.sh.ny} cells of ${S.o.h} km, ${S.sh.nm.toLocaleString("en-US")} markers carrying ${S.plan.nObj.toLocaleString("en-US")} L0 parcels.</div>`);
+    l1Legend();l1Render();l1Stats();return;}
+  if(S.phase==="run"){const t0=performance.now();S.sh.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.7+ms*0.3:ms;
+    l1Prog(`Pass 2, the sheet: ${fmtT(S.sh.t)} of ${fmtT(S.plan.window)} Myr…`);updateUi();if(selCell>=0)showColumn();l1Pix=null;l1Render();l1Stats();
+    if(w.steps>=S.plan.endSteps)S.phase="basins";return;}
+  if(S.phase==="basins"){l1Prog("Tectonics frozen: 5 Myr of erosion on a 10 km grid to settle the drainage basins…");
+    // the frame draws the message first; the pass itself runs on the next one
+    if(!S.basinsDue){S.basinsDue=true;return;}
+    const t0=performance.now();S.bs=L1.basins(S.sh);S.bsMs=performance.now()-t0;w.untrackParcels();
+    S.phase="done";const el=$("l1Prog");if(el)el.remove();$("l1Pick").disabled=false;l1Mask=null;l1View="basins";l1SetViews();l1Pix=null;l1Legend();l1Render();l1Stats();updateUi();}}
+function l1SetViews(){const has=!!(l1St&&l1St.bs);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v==="basins")x.disabled=!has;x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
+// canvas geometry: the sheet's grid, zoomed and panned; per pixel its map-plane point
+function l1Size(){const sh=l1St.sh,wrap=$("l1wrap"),X0=sh.x0,X1=sh.x0+sh.nx*sh.o.h,Y0=sh.y0,Y1=sh.y0+sh.ny*sh.o.h,asp=Math.min(1.3,Math.max(0.45,(Y1-Y0)/(X1-X0)));
+  wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp);
+  if(W!==l1PW||H!==l1PH||!l1Img){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
+  const s=Math.max((X1-X0)/W,(Y1-Y0)/H)/l1Zoom,cx=(X0+X1)/2+l1Pan[0],cy=(Y0+Y1)/2+l1Pan[1];l1Geo={s,cx,cy};}
+const l1XY=(px,py)=>[l1Geo.cx+(px+0.5-l1PW/2)*l1Geo.s,l1Geo.cy-(py+0.5-l1PH/2)*l1Geo.s];
+// per pixel: the field values to draw (recomputed when the sheet moves or the view changes)
+function l1Fields(){const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,n=W*H,h=sh.o.h,{nx,ny}=sh;
+  const P=l1Pix={cell:new Int32Array(n),fine:new Int32Array(n),e:new Float32Array(n),back:new Float32Array(n)},tmp=[0,0,0];
+  for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=l1XY(px,py),i=Math.floor((x-sh.x0)/h),j=Math.floor((y-sh.y0)/h);
+    const c=i>=0&&j>=0&&i<nx&&j<ny?j*nx+i:-1;P.cell[q]=c>=0&&sh.act[c]?c:-1;P.fine[q]=-1;P.back[q]=NaN;
+    if(bs&&P.cell[q]>=0){const fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);if(fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny)P.fine[q]=fj*bs.nx+fi;}
+    if(P.fine[q]>=0)P.e[q]=bs.e[P.fine[q]];
+    else if(P.cell[q]>=0){// bilinear over active neighbours
+      const gx=(x-sh.x0)/h-0.5,gy=(y-sh.y0)/h-0.5,i0=Math.floor(gx),j0=Math.floor(gy),fx=gx-i0,fy=gy-j0;let s=0,ws=0;
+      for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=nx||jj>=ny)continue;const cc=jj*nx+ii;if(!sh.act[cc])continue;s+=ww*sh.e[cc];ws+=ww;}
+      P.e[q]=ws>0?s/ws:sh.e[P.cell[q]];}
+    else{P.e[q]=NaN;P.back[q]=sh.l0ElevAt(x,y,tmp);}}}
+function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
+  const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,E=P.e,ex=10/l1Geo.s,rivers=$("l1Rivers").checked;
+  const rock=l1View==="rock"?sh.surfaceRock():null,fAmin=2e4;
+  const bcol=new Map(),bsize=bs?l1BasinSizes():null;
+  for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,c=P.cell[q],f=P.fine[q];let r,g,b;
+    if(isNaN(E[q])){// outside L1's crust: L0's own surface, land greyed
+      const hb=P.back[q];if(isNaN(hb)){r=g=b=20;}else{let k=Math.round((hb+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];
+        if(hb>0){const m=(r+g+b)/3;r=0.35*r+0.65*m;g=0.35*g+0.65*m;b=0.35*b+0.65*m;}r*=0.72;g*=0.72;b*=0.72;}
+      d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;continue;}
+    const h=E[q],land=h>0;
+    // hillshade from the drawn surface (vertical exaggeration 10x)
+    const eL=px>0&&!isNaN(E[q-1])?E[q-1]:h,eR=px<W-1&&!isNaN(E[q+1])?E[q+1]:h,eU=py>0&&!isNaN(E[q-W])?E[q-W]:h,eD=py<H-1&&!isNaN(E[q+W])?E[q+W]:h;
+    const gx=(eR-eL)*ex/2,gy=(eU-eD)*ex/2,nl=1/Math.sqrt(1+gx*gx+gy*gy);let sh_=land?Math.max(0.35,Math.min(1.25,(0.55*-gx+0.55*gy+0.63)*nl/0.63)):1;
+    if(l1View==="terrain"||!land&&l1View!=="thick"&&l1View!=="strain"){let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3]*sh_;g=LUT_E[k*3+1]*sh_;b=LUT_E[k*3+2]*sh_;}
+    else if(l1View==="thick"){const v=c>=0?sh.dS[c]:0;let k=Math.round((v+15)/45*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_DS[k*3]*s2;g=LUT_DS[k*3+1]*s2;b=LUT_DS[k*3+2]*s2;}
+    else if(l1View==="strain"){const v=c>=0?Math.log10(Math.max(1e-3,sh.eps[c])):-3;let k=Math.round((v+3)/3.5*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_EPS[k*3]*s2;g=LUT_EPS[k*3+1]*s2;b=LUT_EPS[k*3+2]*s2;}
+    else if(l1View==="rock"){const R=ROCK_RGB[c>=0?rock[c]:0]||[128,128,128];r=R[0]*sh_;g=R[1]*sh_;b=R[2]*sh_;}
+    else if(l1View==="basins"){if(f>=0&&bs.land[f]){const id=bs.basin[f];let col=bcol.get(id);
+        if(!col){const big=bsize.get(id)>=l1BasinMin(),u=(Math.imul(id+1,2654435761)>>>0)/4294967296;col=big?hsl(u*360,45+20*((u*7)%1),58+12*((u*13)%1)):[205,200,188];bcol.set(id,col);}
+        r=col[0]*sh_;g=col[1]*sh_;b=col[2]*sh_;}
+      else{let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}}
+    // rivers draining 20,000 km² or more (the drainage pass draws them; the sheet itself has none)
+    if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins")){const A=bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
+      if(a>0){r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}}
+    d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
   $("l1map").getContext("2d").putImageData(l1Img,0,0);}
-// hillshade per cell (light from the northwest, 6x exaggeration): the slope is a least-squares plane through the
-// land neighbours, in the map's east/north frame, so it is the same at every zoom and continuous across cube faces
-function l1Shade(){const {G,e,cont,live:alive,pieceOf}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,rr=G.rr,f=l1Frame(),out=region._shade||(region._shade=new Float32Array(nC));
-  const Lx=-0.55,Ly=0.55,Lz=0.63,sp=region.slotPlate,rot=(R,v)=>[R[0]*v[0]+R[1]*v[1]+R[2]*v[2],R[3]*v[0]+R[4]*v[1]+R[5]*v[2],R[6]*v[0]+R[7]*v[1]+R[8]*v[2]];
-  // the map's east and north axes, carried into each part's frame (neighbours are compared within one part)
-  const axes=new Map();for(const pt of region.viewParts())axes.set(pt.piece*65536+pt.plate,[rot(pt.A,f.ea),rot(pt.A,f.nr)]);
-  for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;const sl=(l/rr)|0,key=pieceOf[sl]*65536+sp[sl],[ea,nr]=axes.get(key)||[f.ea,f.nr];
-    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0||pieceOf[(j/rr)|0]*65536+sp[(j/rr)|0]!==key)continue;
-      const dx=pos[3*j]-pos[3*l],dy=pos[3*j+1]-pos[3*l+1],dz=pos[3*j+2]-pos[3*l+2],x=(dx*ea[0]+dy*ea[1]+dz*ea[2])*R_KM,y=(dx*nr[0]+dy*nr[1]+dz*nr[2])*R_KM,de=e[j]-e[l];
-      a+=x*x;b+=x*y;c+=y*y;u+=x*de;v+=y*de;}
-    const det=a*c-b*b;if(!(det>1e-9))continue;const gx=6*(c*u-b*v)/det,gy=6*(a*v-b*u)/det;
-    out[l]=Math.max(0.35,Math.min(1.35,(Lx*gx+Ly*gy+Lz)/Math.sqrt(gx*gx+gy*gy+1)/Lz));}
-  return out;}
+// basins worth a colour of their own: at least 10,000 km² (100 cells of 10 km)
+const l1BasinMin=()=>Math.round(1e4/(l1St.bs.h*l1St.bs.h));
+function l1BasinSizes(){const bs=l1St.bs;if(bs._size)return bs._size;const m=new Map();for(let f=0;f<bs.land.length;f++)if(bs.land[f]){const id=bs.basin[f];m.set(id,(m.get(id)||0)+1);}return bs._size=m;}
 function l1Legend(){const L=$("l1legend");
-  if(l1View==="terrain")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span><span>Shaded relief, 6× vertical exaggeration. Blue lines drain more than ${Math.round(Math.max(2000,10*region.G.area[0])).toLocaleString("en-US")} km².</span>`;
-  else if(l1View==="erosion")L.innerHTML=`<span class="num">0</span><span class="bar" style="background:${gradCss(L1_ERO_STOPS,0,10)}"></span><span class="num">10 km</span><span>Rock removed by rivers since the start.</span>`;
-  else if(l1View==="uplift")L.innerHTML=`<span class="num">0</span><span class="bar" style="background:${gradCss(L1_UP_STOPS,0,80)}"></span><span class="num">80 km</span><span>Crust added by L0’s tectonics since the start (thickness, before isostasy).</span>`;
-  else L.innerHTML=`<span>Each colour drains to one outlet on the coast.</span>`;}
-function l1Stats(final){if(!region)return;const h=region.history[region.history.length-1],h0=region.history[0],b=region.budget,bal=region.balance();
-  $("l1stats").innerHTML=`<div>L1 time<b class="num">${fmtT(region.t)} / ${region.o.window} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
-    <div>Mean elevation<b class="num">${h.meanElevKm.toFixed(2)} km</b></div><div>Highest point<b class="num">${h.maxElevKm.toFixed(1)} km</b></div>
-    <div>Mean erosion<b class="num">${Math.round(h.erosionRateKmPerMyr*1000)} m/Myr</b></div><div>Mean tectonic input<b class="num">${Math.round(h.upliftRateKmPerMyr*1000)} m/Myr</b></div>
-    <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>
-    <div>Cells simulated<b class="num">${h.cells.toLocaleString("en-US")}</b></div><div>Contact links<b class="num">${h.contacts.toLocaleString("en-US")}</b></div>`;
-  const M=v=>(v/1e6).toFixed(2)+" M km³";
-  let html=`<div><b>Crust budget</b> (continental crust simulated by L1): started ${M(b.initial)}; ${M(b.activated)} brought in as land came within reach, ${M(b.dropped)} dropped as it separated; L0 tectonics added ${M(b.tectonicApplied)} (${M(b.unappliedOcean)} more fell on static ocean); rivers removed ${M(b.eroded)}; ${M(b.capped)} lost to the 75 km thickness cap; ${M(b.consumed)} consumed where L1’s own pieces collided and ${M(b.consumedOutside)} under crust L1 does not simulate; ${M(b.refilled)} refilled holes, as L0 does. Now ${M(bal.now)}, bookkeeping error ${Math.abs(bal.error)<1e-9?"below 10⁻⁹":bal.error.toExponential(1)}.</div>`;
-  if(final){const dv=region.divergence();html+=`<div><b>L0 against L1</b> on ${dv.parcels.toLocaleString("en-US")} parcels continental in both: L1’s crust is ${dv.meanThicknessDiffKm>=0?"thicker":"thinner"} by ${Math.abs(dv.meanThicknessDiffKm).toFixed(1)} km on average (root-mean-square difference ${dv.rmsThicknessDiffKm.toFixed(1)} km, or ${dv.rmsElevationDiffKm.toFixed(2)} km of Airy elevation). L0 keeps its own crude erosion; this is how far the two levels drifted apart.</div>`;}
+  if(l1View==="terrain")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span><span>Shaded relief. Outside the landmass’s crust: L0’s own surface, dimmed (land greyed).</span>`;
+  else if(l1View==="thick")L.innerHTML=`<span class="num">−15</span><span class="bar" style="background:${gradCss(THICK_DIV,-15,30)}"></span><span class="num">+30 km</span><span>Crust thickened (red) or thinned (blue) since the window began: shortening, spreading, volcanism and erosion together.</span>`;
+  else if(l1View==="strain")L.innerHTML=`<span class="num">0.001</span><span class="bar" style="background:${gradCss(STRAIN_STOPS,-3,0.5)}"></span><span class="num">3 /Myr</span><span>How fast the sheet deforms now (log scale). 0.1 per Myr is 10% shortening or stretching every million years.</span>`;
+  else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Topmost unit of the markers in each cell, by volume.</span>`;
+  else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast (or one inland sink). Smaller coastal basins are grey. These are the tiles for L2.</span>`;}
+function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[sh.history.length-1],h0=sh.history[0],b=sh.budget,bal=sh.balance(),M=v=>`${(v/1e6).toFixed(2)} M km³`;
+  $("l1stats").innerHTML=`<div>L1 time<b class="num">${sh.t.toFixed(1)} / ${S.plan.window.toFixed(1)} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
+    <div>Mean / max elevation<b class="num">${h.meanElevKm.toFixed(2)} / ${h.maxElevKm.toFixed(1)} km</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>
+    <div>Most thickening<b class="num">${h.maxThickeningKm.toFixed(1)} km</b></div><div>Peak strain rate<b class="num">${h.maxStrainRate.toFixed(2)} /Myr</b></div>
+    <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>Markers<b class="num">${sh.nm.toLocaleString("en-US")}</b></div>`;
+  let html=`<div><b>Crust budget</b>: started ${M(b.initial)}; ${M(b.arcsHotspots)} added by arcs and hotspots, ${M(b.eroded)} eroded, ${M(b.left)} carried off the grid; now ${M(bal.now)}, off by ${(Math.abs(bal.error)*100).toExponential(1)}%.</div>`;
+  if(S.bs){const bs=S.bs,sz=l1BasinSizes(),min=l1BasinMin(),big=[...sz.values()].filter(v=>v>=min).sort((a,b2)=>b2-a),cell=bs.h*bs.h,inBig=big.reduce((a,v)=>a+v,0);
+    html+=`<div><b>Drainage basins</b>: ${big.length} of at least 10,000 km² cover ${(100*inBig/bs.landCells).toFixed(0)}% of the land; the largest are ${big.slice(0,5).map(v=>(v*cell/1e6).toFixed(2)).join(", ")} M km². ${(bs.nBasins-big.length).toLocaleString("en-US")} smaller ones drain the rest, mostly short coastal streams. (${bs.nx}×${bs.ny} cells of ${bs.h} km, ${Math.round(S.bsMs)} ms.)</div>`;}
   $("l1budget").innerHTML=html;}
-document.querySelectorAll("#l1views button").forEach(b=>b.onclick=()=>{l1View=b.dataset.v;
-  document.querySelectorAll("#l1views button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));l1Legend();l1Render();});
+document.querySelectorAll("#l1views button").forEach(b=>b.onclick=()=>{if(b.disabled)return;l1View=b.dataset.v;l1SetViews();l1Legend();l1Render();});
 document.querySelectorAll("#l1zoom button").forEach(b=>b.onclick=()=>{l1Zoom=+b.dataset.z;if(l1Zoom===1)l1Pan=[0,0];l1Pix=null;
   document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));l1Render();});
 $("l1Rivers").onchange=()=>l1Render();
 {const wrap=$("l1wrap");let drag=false,dx0=0,dy0=0,lx=0,ly=0,mv=false;
-  wrap.addEventListener("pointerdown",e=>{if(!region)return;drag=true;mv=false;dx0=lx=e.clientX;dy0=ly=e.clientY;wrap.setPointerCapture(e.pointerId);});
+  wrap.addEventListener("pointerdown",e=>{if(!l1St||!l1St.sh)return;drag=true;mv=false;dx0=lx=e.clientX;dy0=ly=e.clientY;wrap.setPointerCapture(e.pointerId);});
   wrap.addEventListener("pointermove",e=>{if(!drag)return;if(Math.abs(e.clientX-dx0)+Math.abs(e.clientY-dy0)>5)mv=true;if(!mv||l1Zoom===1)return;
     const k=l1Geo.s*l1PW/wrap.clientWidth;l1Pan[0]-=(e.clientX-lx)*k;l1Pan[1]+=(e.clientY-ly)*k;lx=e.clientX;ly=e.clientY;l1Pix=null;l1Render();});
   wrap.addEventListener("pointerup",e=>{drag=false;if(!mv)l1Inspect(e);});wrap.addEventListener("pointercancel",()=>{drag=false;});}
-function l1Inspect(e){if(!region||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
-  if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,l=l1Pix[q],box=$("l1inspect");
-  if(l<0||!region.live[l]){if(isNaN(l1Back[q]))return;box.style.display="block";box.textContent=`Not simulated by L1 here; L0 ${l1Back[q]>=0?"elevation":"depth"} ${Math.abs(l1Back[q]).toFixed(2)} km`;clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",4000);return;}
-  const h=region.e[l];box.style.display="block";
-  box.textContent=region.cont[l]?`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km, crust ${region.T[l].toFixed(1)} km, eroded ${region.eroded[l].toFixed(2)} km, tectonic input ${region.uplifted[l].toFixed(1)} km, drains ${Math.round(region.S.A[l]).toLocaleString("en-US")} km²`:`Ocean, depth ${Math.abs(h).toFixed(1)} km (held fixed)`;
-  clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",4000);}
-
+function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
+  if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,c=l1Pix.cell[q],f=l1Pix.fine[q],sh=l1St.sh,bs=l1St.bs,box=$("l1inspect"),h=l1Pix.e[q];
+  if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb))return;box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
+  else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
+    if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;}
+    if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km²`;}
+    box.textContent=t;}
+  box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}
 build();updateLegend();requestAnimationFrame(frame);
 </script>
 </body>

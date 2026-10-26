@@ -1,10 +1,10 @@
-# Procedural Earth-like worlds from geological history: L0 plate tectonics, L1 continents
+# Procedural Earth-like worlds from geological history: L0 plate tectonics, L1 landmasses
 
-This repository holds the first two levels of a multi-level procedural generator for Earth-like game worlds, plus sketches of the levels below them. L0 is a planet-scale plate tectonics simulation. L1 (first version) takes one continent from L0, together with whatever land will come within reach of it, refines it about 8–16 times, and runs it forward for tens of millions of years with river erosion and flexural isostasy, resolving collisions at its own resolution, while L0 keeps running underneath and supplies the tectonics. Both run in a browser (`plates.html`, a single self-contained page) and in Node.js for headless testing.
+This repository holds the first two levels of a multi-level procedural generator for Earth-like game worlds, plus sketches of the levels below them. L0 is a planet-scale plate tectonics simulation. L1 takes one landmass at the present and replays the last 10–30 Myr of its history at finer resolution, with its crust deforming as a thin viscous sheet driven by L0's plates, so collisions crumple it into mountain belts and plateaus; it then settles the landmass's drainage basins on a 10 km grid, the tiles for L2. Both run in a browser (`plates.html`, a single self-contained page) and in Node.js for headless testing.
 
 The goal is diversity that comes from **material and history** rather than from noise layered on hand-made rules. Each level simulates or procedurally generates the structure that is plausible at its own scale. It hands down only what it can actually resolve, plus a record of what happened, so finer levels inherit causes as well as shapes.
 
-Contents: the big picture; quick start; L0 in detail; the L1 handoff format; L1 continent (first version); sketches of the levels below; known limitations and next steps. `DEVLOG.md` explains how the current version came about, including what didn't work.
+Contents: the big picture; quick start; L0 in detail; the L1 handoff format; L1 landmass; sketches of the levels below; known limitations and next steps. `DEVLOG.md` explains how the current version came about, including what didn't work.
 
 ---
 
@@ -17,7 +17,7 @@ Each level takes the coarser level's output as a condition and produces finer st
 | Level | Cell size | What it owns | Representative methods |
 |---|---|---|---|
 | L0 planet | ~80–160 km | Plates, crust type and age, rock columns, fault history, events | Rigid plates on a sphere (this repository) |
-| L1 continent | ~5–10 km | Drainage basins, climate, biomes, fault strands, glaciation | Stream-power erosion, orographic rainfall |
+| L1 landmass | ~10–50 km | Crumple zones, drainage basins, climate, biomes, fault strands, glaciation | Thin viscous sheet, stream-power erosion, orographic rainfall |
 | L2 region | ~500 m | River networks, folded and tilted strata, water table | Flow routing, layer geometry |
 | L3 landscape | ~50 m | Hillslopes, landslides, terraces, cave networks, springs | Diffusion, event catalogues, graph search |
 | L4 site | ~5 m | Cliff bands, talus, meanders, vegetation instances | Differential erosion, point processes |
@@ -46,7 +46,7 @@ Everything is deterministic given the seed and settings (seed text, resolution, 
 - **Tap any spot:** a panel under the map shows that cell's rock column, fault episodes, and plate motion.
 - **Extract handoff:** pauses the run, traces the fault network, builds formations and domains, and overlays fault traces.
 - **Download JSON:** saves the handoff. This uses the Claude artifact runtime's downloads capability (`window.claude.use("downloads")`); opened as a plain local file, the button stays hidden.
-- **L1 continent:** run L0 for a while (1–2 Gyr gives an interesting history), press **Pick a continent**, tap one, set the reach, then **Run L1**. L0 looks ahead and rewinds, then advances by the window while L1 evolves the continent and any land that comes within reach; the L1 map shows terrain with rivers, erosion, tectonic input and drainage basins, with zoom and pan, over L0's own elevation. A 100 Myr window at ~13 km cells takes 70–90 s in a desktop browser.
+- **L1 landmass:** run L0 for a while (1–2 Gyr gives an interesting history; it keeps a saved state every 10 Myr), press **Pick a landmass**, tap land, then **Run L1**. L0 replays the window twice (tracing the crust, then driving the sheet) and ends exactly where it started. The L1 map shows terrain, crustal thickening, strain rate, surface rock and drainage basins, with rivers, zoom and pan, over L0's own elevation. A mid-sized continent takes well under a minute; a supercontinent a few minutes.
 
 **Rebuild the page** from its parts after editing `src/`:
 
@@ -58,7 +58,7 @@ Everything is deterministic given the seed and settings (seed text, resolution, 
 
 ```sh
 node tests/run_all.js              # quick pass over everything (about two minutes)
-node tests/test_l1.js --n=96 --r=8 --win=100   # L1 checks at the browser's default resolution
+node tests/test_l1.js --n=96 --h=50 --win=20 --t0=1000 --land=3000   # L1 checks at the browser's defaults
 node tests/test_budget.js --t=2400 # full-length crust budget run
 node tests/bench.js --t=300        # ms per step at each resolution
 ```
@@ -70,7 +70,7 @@ plates.html            the built single-file page (what the artifact serves)
 build.sh               rebuilds plates.html from src/
 src/head.html          markup, styles, explanatory notes; ends with an opening <script> tag
 src/sim.js             the simulation core: a self-contained SIM module, usable in browser and Node
-src/l1.js              L1: continent selection, refined grid, coupling to L0, erosion, flexure, crust budget (L1 module)
+src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass (L1 module)
 src/ui.js              rendering, controls, inspector, handoff panel, L1 panel
 tests/                 headless tests and benchmarks (see section 3.13)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
@@ -232,14 +232,14 @@ All are tuned for plausible appearance, not fitted to Earth data.
 
 | Test | What it checks |
 |---|---|
-| `test_ui_smoke.js` | runs the whole page script against a stubbed DOM: every view, both projections, inspector, extraction, export |
+| `test_ui_smoke.js` | runs the whole page script against a stubbed DOM: every view, both projections, inspector, extraction, export, and an L1 landmass from pick to drainage basins |
 | `test_budget.js` | land, continental crust and peak elevation over time for three seeds; fails if land falls under 10% or crust drifts more than 8 points from target |
 | `test_netrotation.js` | net rotation with removal on and off; removal must zero it and leave relative motion unchanged |
 | `test_handoff.js` | fault, formation and domain statistics; schema consistency of the exported JSON |
 | `test_flicker.js` | rock-type flicker per step, split into surface processes versus resampling |
 | `test_pinholes.js` | single-cell ocean pinholes inside freshly absorbed plates versus elsewhere |
 | `test_volume_budget.js` | continental volume sources and sinks, via a patched copy of the sim |
-| `test_l1.js` | L1: stream-power steady state against the analytic solution; on a real continent with the lookahead, exact rewind, crust budget closure, drainage, no overlapping crust left, determinism, peak bound; a continent another collides with, checking it is brought in and that rivers cross the contact; prints Hack's law and the L0–L1 divergence |
+| `test_l1.js` | L1: stream-power steady state and the viscous sheet against exact solutions; on a real landmass, exact replay, L0 untouched by the sheet, crust budget closure, bounded thickness and peaks, determinism; in the drainage pass, every land cell drains and basins partition the land; prints Hack's law |
 | `bench.js` | ms per step, extraction and export cost at each resolution |
 
 Representative numbers from development, in Node.js on a single core:
@@ -280,77 +280,91 @@ Times are "Myr before the snapshot". Velocity anywhere is Ω × position, from e
 
 ---
 
-## 5. L1: continent (first version)
+## 5. L1: landmass
 
-L1 follows the plan agreed when it was started: rather than forcing a refined continent to match L0's final elevation, it starts from L0's state at some time t0 and runs forward through a window (default 100 Myr) **with L0 running alongside**, taking only L0's tectonics. That keeps L1's history its own (knickpoints, relict surfaces) while staying tied to plate motion. The time scales motivate it: isostatic rebound is effectively instant (~10 kyr), a plate crosses an L1 cell in ~100 kyr, rivers respond to a change in uplift in ~1–10 Myr, and the uplift pattern itself reorganises over ~10–50 Myr.
+L1 takes **one landmass at the present**: a single piece of land bounded by its coastline at the end of L1. It replays the last 10–30 Myr of that landmass's history (default 20) at finer resolution, with the crust deforming instead of riding rigid plates. Then it settles the landmass's drainage basins, which become the tiles for L2.
 
-### 5.1 Which crust L1 simulates: lookahead and relevance
+The window is short because of the time scales involved:
+- Rivers respond to a change in uplift in about 1–10 Myr, so the drainage network matures almost at once and needs no long run.
+- Collision zones build mountain belts and plateaus over 10–50 Myr. That is what L0 cannot resolve: its plates are rigid, so a collision becomes thickening of a few 100 km cells.
 
-Before a run, L0 tags every crust parcel present at t0 with an identity (plate × N + body cell; L0 carries it wherever it moves crust, through splits, welds and hole fills, and clears it where new crust forms; recording only, runs are bit-identical). It then runs ahead through the window from a saved state (the whole world, including the random generator's state) and is restored exactly afterwards, so the real run replays the same future.
+So the window is spent on crumple zones. Tectonics then stops, and a short erosion pass on a fine grid draws the rivers.
 
-During the lookahead, each step records which parcel sits on each fixed cell and whether it is continental. **Crust is relevant at a step if it lies within the reach D (default 1,200 km) of the target, through continental crust contiguous at that step.** The target is the picked continent's parcels wherever they are, so every fragment it breaks into stays relevant. A landmass that mashes against the target is relevant while attached and within reach, and drops out once it has separated. Each relevant parcel is simulated from 15 Myr before it first matters (a warm-up of a few river response times, instead of its whole history) until it last matters; parcels relevant to the end, or that L0 removes while still relevant, are never dropped, so L1 decides their fate itself. (A first version chained relevance back through time, "within reach of whatever is relevant next step"; that compounds the reach every step and swallowed whole landmasses.)
+An earlier version of L1 (DEVLOG, "L1 v1") ran one continent for ~100 Myr on a refined cube-sphere with fine stream-power erosion all the way. It handled meeting continents with a world-space overlap layer. That is replaced by the design below.
 
-### 5.1b Pieces, grid and parcels
+### 5.1 Picking at the end, with replay
 
-- **Pieces:** relevant parcels are grouped by the plate that held them at t0; each group is a piece in that plate's body frame, plus three L0 cells of ocean margin around relevant crust (active whenever what it borders is).
-- **Grid:** the same equal-angle cube-sphere, each L0 cell split r × r (r = 4, 8 or 16; ~13 km at r = 8 on the medium L0 grid). Equal-angle subdivision nests exactly, so each fine cell has exactly one parent and positions, areas and neighbours are analytic. Fine cell index = slot × r² + jj × r + ii; pieces are concatenated. Neighbours are 8-connected; across cube faces they come from the fine-grid lookup. Each cell's *node* (used for distances, hence slopes) is jittered within the cell by up to 0.4 cell widths, by a fixed hash of its global index, so neighbour directions vary from cell to cell; areas, indexing and drawing stay on the regular grid.
-- **Following parcels:** each step, L1 finds every parcel by its identity. Each piece keeps a frame for every plate it has parcels on (world = Q(plate) · M · b; a split copies M, a weld composes it with the fixed rotation between the frames), so every parcel's cells move rigidly with the plate now carrying it. A parcel L0 no longer has keeps riding its last plate: in L1 its crust lives on until L1 resolves it. Static links between cells hold only while both ends are on the same plate, so a rift simply opens.
+- **Snapshots.** While L0 runs in the page, it saves its whole state every 10 Myr and keeps the last four. A saved state includes the random generator's state. It costs 14 MB at n = 64, 29 MB at n = 96 and 59 MB at n = 128, and about 50 ms to take at n = 96.
+- **Pick.** At the present, a tap on land selects its landmass: the land cells connected to the tapped one, plus a ring of submerged continental crust around them. The plate carrying most of the land is the reference plate.
+- **Pass 1, tracing.** L0 restores the newest saved state older than the window and tags every crust parcel with an identity (plate × N + body cell). L0 carries that identity wherever it moves crust, through splits, welds and hole fills. It then replays to the present, recording which parcel sits on each fixed cell at each step of the window. L0 is deterministic, so the replay lands exactly on the present; this is tested.
 
-### 5.1c Where crust meets: the world-space layer
+  The landmass's crust is two sets of parcels:
+  - every parcel that ends up in the landmass;
+  - every continental parcel that touches that crust at some step and is gone by the end. These were overrun in a collision, or relabelled by L0's resampling. That crust was squeezed into the landmass and is what its crumple zones are made of.
 
-Each step, every active parcel's centre is placed in the world and its L0 cell found. Parcels whose L0 neighbourhood holds another rigid part (a piece's parcels on one plate) are *near*; those whose neighbourhood L0 shows on another plate are *exposed*. Only their fine cells are placed in a world-frame index and searched:
+  A continental parcel with at least three traced neighbours also counts as traced, which fills pinholes from L0's resampling.
+- **Map frame.** The map is an azimuthal equidistant projection about the landmass's centroid, co-moving with the reference plate. If the reference plate split off another plate during the window, the frame follows its ancestor before the split. The footprint is everywhere the crust has been during the window, plus a 400 km margin.
+- **Pass 2, the sheet.** L0 restores the same state again, replays to the window's start, and from there runs alongside the sheet, one L0 step per sheet step. It ends exactly where it started.
 
-- **Overlap** (closer than 0.6 cell widths, different rigid parts): continental beats oceanic; otherwise the part L0 shows on top there wins (majority over the overlap between the two parts), else the thicker crust. The loser is consumed. L0 still supplies the collision thickening to the winner; L1 decides, at its own resolution, which crust goes.
-- **Crust outside L1** that L0 shows on top of a cell (bilinear weight over one half) consumes it too.
-- **Holes** are refilled, as L0 refills its own: a consumed cell that has stayed consumed for 5 Myr comes back when neither rule would consume it again and at least three neighbours on its part are alive, taking their mean state.
-- **Contacts** (within 1.5 cell widths, different parts) become temporary links, rebuilt every step, on the fine grid and on the coarse flexure grid, so rivers, flexure and crustal flow cross collision zones before and after any weld.
-- **Sea edges:** a land cell with a missing neighbour (a rift, the edge of the domain, consumed crust) drains to a virtual sea-level neighbour if L0 shows sea there and no L1 cell is there; where L0 shows land outside L1 the edge stays a drainage divide.
+### 5.2 The thin viscous sheet
 
-The map is drawn in world space, centred on the picked continent: L1's continental crust where it exists, and L0's own elevation everywhere else (sea as L0 has it; land L1 doesn't simulate dimmed and greyed).
+The crust is treated as a thin viscous sheet, the vertically averaged model of continental deformation of England and McKenzie (1982):
 
-### 5.2 Each step
+∂ⱼσᵢⱼ − κ (uᵢ − Uᵢ) = ∂ᵢΦ,  with σᵢⱼ = 2η (ε̇ᵢⱼ + δᵢⱼ ε̇ₖₖ) and Φ = ½ (S² − S₀²)
 
-One L1 step per L0 step (Δt ≈ 0.9 Myr at the medium grid):
+- **Symbols.** u is the sheet's horizontal velocity and ε̇ its strain rate. The δᵢⱼ ε̇ₖₖ term is the vertical strain, from incompressibility. S is crust thickness and S₀ the thickness at the window's start.
+- **Buoyancy.** The right-hand side is the gradient of the crust's excess gravitational potential energy (constants absorbed into η and κ). Thickened crust pushes outward, so plateaus spread.
+- **Basal drag.** κ (u − U) drags the sheet toward the velocity U of the plate that L0 says carries each marker's parcel at that step, relative to the reference plate. This is how L0's plate motions drive the sheet: where two plates converge, the crust between them shortens and thickens.
+- **Viscosity.** Power law with exponent 3: η = η₀ · strength · (ε̇/ε̇₀)^(1/3 − 1), floored at 2% of ε̇₀. Old cratons (basement older than 500 Myr) are ten times stronger.
+- **Parameters.** Two dimensionless numbers set the behaviour:
+  - the **Argand number** Ar (default 3) sets η₀ at the reference strain rate ε̇₀ = 50 km/Myr ÷ ℓ. Higher means weaker crust that spreads into broader plateaus.
+  - the **coupling length** ℓ = √(4η₀/κ) (default 500 km) sets how far a plate's drag reaches into the sheet.
+- **Numerics.**
+  - Staggered (Marker-and-Cell, MAC) grid, 50 km cells by default.
+  - The operator is the gradient of a discrete dissipation function, so it is symmetric positive definite and conjugate gradients apply (Jacobi preconditioner, relative tolerance 10⁻⁴, at most 200 iterations), with two Picard iterations on the viscosity per solve.
+  - Edges of the crust are traction-free; cells hold crust where the markers cover at least a quarter of them.
+- **Markers.** There are 6 × 6 markers per L0 parcel. Each carries its parcel's identity, plate, rock column (as fractions of thickness), strength, the thickness and elevation it started with (L0's elevation smoothed over three passes, sampled bilinearly), and its own thickness and area.
+  - Markers move with the sheet (midpoint rule, substeps limited to half a cell per substep).
+  - They thicken by the local convergence: S → S·e^(−div·dt), A → A·e^(div·dt). Each marker's volume S·A is therefore exactly conserved.
+  - Grid fields are bilinear weighted averages of marker values.
+- **Volcanism.** L0 records the crust its arcs and hotspots add. Its collisions and collapse are not passed on, because the sheet makes those itself. Each marker thickens by what its L0 cell gained, as a new top unit of arc rock.
+- **Elevation.** As in the first version: the inherited elevation plus the thickness change, minus a flexural root, e = e₀ + ΔS − 0.84·F[ΔS]. F is a Gaussian of width 1.18 × the 40 km flexural length, and the plate yields beyond 3 km from local balance. The inherited state counts as equilibrium.
+- **Erosion during the sheet** is a smooth stand-in for rivers, which a 50 km grid cannot draw. Denudation is 0.5 km/Myr × (e / 5 km)^1.4: 0.5 km/Myr in ranges at 5 km and about 20 m/Myr on lowlands at 0.5 km. These are the magnitudes of Ahnert's (1970) relation between denudation and relief. Eroded rock is stripped from the top of the rock columns and leaves the system. A first version ran stream power on the sheet grid; its 50 km gullies were aligned with the grid, and the drainage pass inherited them as parallel stripe-shaped basins.
+- **Budget.** A volume budget tracks initial crust, arcs and hotspots, erosion and crust carried off the grid. It closes to about 10⁻¹⁴ of the initial volume; this is tested.
 
-1. **L0 steps** with a recorder on: the thickness each fixed cell gains from arcs, collisions, hotspots and orogenic collapse (not diffusion or erosion, which L1 replaces). These are mapped onto parcels by identity, spread twice over neighbouring parcels (volume-conserving; against resampling noise, and so that input concentrated in one L0 cell becomes a rounded bell rather than a square pyramid), and interpolated bilinearly onto fine cells as a thickening rate. Parcels are then found, brought in or dropped, and the world-space layer resolves overlaps and contacts (5.1c). Thickening that lands on (static) ocean cells is booked, not applied.
-2. **Lower-crustal flow:** thickened crust spreads sideways (across contacts too), as a diffusion of the thickness *change since it was brought in* (inherited contrasts such as thin rifted margins are part of the equilibrium state) with coefficient 300 km²/Myr × (T / 33 km)³ (channel flux grows with the cube of channel thickness). It runs on a coarser nested grid (~26 km), so it relaxes collision piles without filling river valleys.
-3. **Thickness cap** at L0's 75 km.
-4. **Elevation** from thickness by flexural isostasy applied to changes since each cell was brought in (the inherited state is taken as in equilibrium): e = e₀ + ΔT − 0.84·F[ΔT], with F a Gaussian of width 1.18 × flexural length (40 km), which matches the half-power point of an elastic plate's response 1/(1 + (kα)⁴). Long wavelengths follow L0's Airy relation; narrow loads are held up by the plate, but by no more than 3 km away from local balance (the plate yields).
-5. **Routing:** sea cells (ocean and drowned continent) are outlets; sea-edge cells drain to the sea; other land edges are drainage divides; contact links are routed over like any neighbour. Depressions are filled with Priority-Flood+ε (Barnes et al. 2014) in the Zhou et al. (2016) variant, receivers are steepest descent (D8) on the filled surface, and land the flood can't reach (cut off by consumed parcels) becomes an inland basin draining to its lowest cell.
-6. **Erosion:** detachment-limited stream power, E = K A^m S with m = 0.5, n = 1, solved implicitly down the receiver tree (Braun & Willett 2013). Units are km, Myr and km², so K = 0.1 corresponds to about 1 × 10⁻⁷ yr⁻¹ in SI units. Eroded rock is exported to the sea.
+### 5.3 The drainage pass
 
-Initial elevation is L0's elevation smoothed over the domain (three passes), interpolated bilinearly, plus fractal relief in the band L1 owns and L0 can't resolve (wavelengths from 1.5 L0 cells down to 2 L1 cells; 50 m in lowlands, rising with elevation), fixed in each piece's frame and seeded from the world seed. A parcel brought in later starts from L0's state at that moment, the same way. Without it, D8 routing on a bilinear surface draws parallel streams.
+With tectonics frozen at the end, the sheet's surface is refined to 10 km cells: bilinear, plus fixed fractal relief of ±(0.15 + 0.15·e) km in the band the sheet cannot resolve (wavelengths from 150 km down), seeded from the world seed. Then 5 Myr of stream-power erosion runs (E = K A^m S, m = 0.5, n = 1, K = 0.1, implicit solver of Braun and Willett 2013, Priority-Flood+ε depression filling of Barnes et al. 2014 in the Zhou et al. 2016 variant, D8 receivers). That is long enough for the network to organise, but not to change the landscape. Every land cell is then labelled by the outlet it drains to: a point on the coast, or the lowest cell of an inland sink. The map colours basins of at least 10,000 km²; smaller coastal basins are grey.
 
-### 5.3 Bookkeeping and measured behaviour
+### 5.4 Measured behaviour
 
-The crust budget (continental crust simulated by L1) tracks the initial volume, crust brought in and dropped as land comes within reach or separates, tectonic input applied, rock eroded, volume lost to the cap, crust consumed where L1's pieces overlap and under crust L1 doesn't simulate, holes refilled, and the small residue of interpolating crustal flow back from the coarse grid. It closes to about 10⁻¹⁴ of the initial volume.
+Measured on seed "genesis" in Node.js, unless stated:
 
-Measured (seed "genesis", Node.js unless stated):
+- **Sheet solver against exact solutions.** A Newtonian sheet with no buoyancy has its left half dragged at +U and its right half at −U. The exact profile is U(1 − e^(−|x|/λ)). The solver matches it to 0.06% in a narrow strip with free sides (λ = √(3/4)·ℓ) and 0.03% in the middle of a wide sheet (λ = ℓ).
+- **Stream-power solver.** It reaches the analytic steady state S·A^m = U/K at every cell to 5 × 10⁻¹⁵.
+- **Hack's law** in the drainage pass comes out at 0.47 with no tuning (Earth's rivers: roughly 0.5–0.6).
+- **A landmass at 1 Gyr** (medium grid; 41.5 M km² of land on plate 44, three lobes, two plates at the window's start): pass 1 replays 27 Myr in 2.1 s and traces 4,224 parcels. The sheet is 223 × 185 cells of 50 km with 152,928 markers, at 1.65 s per L0 step (22 steps). The replay and the sheet both leave L0 bit-identical. After 20 Myr: the most thickening is 13 km, in parallel bands at two collision fronts; the highest point is 6.9 km; the strain rate falls from about 0.3/Myr during the collision to 0.02/Myr once L0 has welded the plates. Erosion removed 71 M km³ (1.7 km averaged over the land), arcs and hotspots added 1.5 M km³, and the budget closes to 9 × 10⁻¹⁶. The drainage pass (1115 × 925 cells) finds 5,203 basins, of which about 380 are 10,000 km² or larger; the largest is 1.4 M km². It takes 2.2 s.
+- **Solver tolerance.** On the same landmass, capping conjugate gradients at 200 iterations leaves a residual of about 5 × 10⁻³ and costs 1.66 s per step. A fully converged solve (10⁻⁶, four Picard iterations) costs 14.8 s per step. The final surfaces differ by 8 m on average (at most 0.35 km), against a mean thickness change of 1.5 km. A 30 km grid (5.4 s per step, never converging within the cap) gives the same peaks to within 0.15 km and the same most-thickening (12.5 km). The 50 km default is a cost choice, and the answer is not sensitive to it at that level.
+- **A thickness spike** in an early run (one marker at 431 km for one step) came from passing on L0's orogenic collapse as volcanism: L0 turns an ocean cell into 28 km of continent in one step, and that volume landed on the few markers in the cell. Only arcs and hotspots are passed on now, as thickness per marker.
+- **Cost in Chromium:** a 110 M km² supercontinent (365 × 366 sheet cells, 381k markers) took 5.9 s per step, about 2.5 minutes in all, with the drainage pass on 1825 × 1830 cells taking 8.8 s. Small landmasses take seconds.
 
-- **Solver:** on a planar grid with uniform uplift, the steady state satisfies S·A^m = U/K at every cell to 5 × 10⁻¹⁵, so the slope–area exponent is exactly −m.
-- **Networks:** Hack's law (length ∝ area^h) comes out at h ≈ 0.56–0.57 at ~13 km cells with no tuning (Earth's rivers: roughly 0.5–0.6); the coarse test setting gives about 0.47.
-- **Lattice alignment** (100 Myr, ~13 km cells): without node jitter, 53% of channel length lies in straight runs of four or more identical D8 steps; with jitter 0.4, 29%. Over 6-cell reaches, channel directions are close to isotropic either way (the bin nearest a lattice direction holds 14% without jitter, 12% with, against 11% for uniform), so the lattice look was at the scale of single steps.
-- **Choosing K.** Over 100 Myr on one continent (n = 64, r = 4), mean land elevation and how far L1's coarse-grained crust drifts from L0's own:
+### 5.5 What it does not do yet
 
-  | K | L1 mean elevation, start → 100 Myr | L0 over the same parcels | mean / rms thickness difference (L1 − L0) |
-  |---|---|---|---|
-  | 0.03 | 2.10 → 2.47 km | 2.11 → 2.20 km | +1.3 / 3.9 km |
-  | 0.1 | 2.10 → 2.20 km | 2.11 → 2.20 km | +0.2 / 3.5 km |
-  | 0.3 | 2.10 → 1.40 km | 2.11 → 2.20 km | −2.9 / 5.4 km |
-  | 1 | 2.10 → 0.44 km | 2.11 → 2.20 km | −6.4 / 10.0 km |
-
-  K = 0.1 is the default: L1's coarse-grained crust then tracks L0's to within about 0.2 km on average, and mean continental erosion comes out at 25–35 m/Myr, the same order as Earth's average continental denudation. Larger K carves more relief faster but drains the continent toward sea level well ahead of L0. This is a calibration choice, not a derivation.
-- **Relevance:** for the largest continent of seed "genesis" (medium grid, 1 Gyr, 62.8 M km²), 6,546 parcels are relevant, 5,777 of them the target; crust from plate 50 comes within reach at +26 Myr (about 8 M km² of it), and 2% of that later separates. A small continent that another collides with (n = 64): 800 relevant parcels from three plates, against 11,133 with the compounding rule.
-- **Collisions:** no two live cells of different rigid parts are left overlapping after a step (tested). Over 40 Myr on one continent about 2% of cells flip between consumed and refilled more than once: L0's flicker in plate ownership along boundaries showing through, which L0's own hole filling also has.
-- **Cost:** lookahead about 6 s (100 Myr at the medium grid). A coupled step at ~536k cells: L0 70–90 ms, the world-space layer ~85 ms (510 ms before it worked parcel-first), routing ~80 ms, crustal flow ~55 ms, flexure ~35 ms; about 370 ms per step in Chromium, so a 100 Myr window takes 70–80 s.
+- **Coupling to L0 is one-way.** L0 does not see the sheet's deformation.
+- **Sutures stop the crumpling.** When L0 welds two plates, their markers get the same velocity, so a collision crumples the crust only until L0 welds it. That is L0's rule, and L1 inherits it.
+- **Crust created during the window is missing.** Arcs that become continent and shelves that emerge have no markers.
+- **Ocean is outside the sheet.** Continental crust is the only material.
+- **Erosion during the sheet** is a smooth function of elevation, and eroded rock leaves the system instead of filling basins.
+- **The drainage pass** has uniform rain and erodibility.
+- **Cost.** The conjugate-gradient solve is the cost: a multigrid preconditioner, or a Web Worker, would make large landmasses quicker.
 
 ## 6. Sketches of the levels below
 
 These are design sketches, not implementations (L1 above is partly built; its sketch lists what remains). Each level should follow the same pattern as L0: deterministic given the seed and its parent's output; owns one band of wavelengths; hands down band-limited fields plus history.
 
-### L1: continent (~5–10 km cells): what remains
+### L1: landmass: what remains
 
-Built so far: section 5. Still to do, roughly in order: erodibility from the exposed formation (and fault-zone weakening), with the exposed-formation map; deposition of eroded rock (basins, fans, shelves) as new L1 units; climate (winds, orographic rain, temperature) including drift in latitude over the window; fault strands; restoring island chains; growing the domain when crust accretes. The original sketch:
+Built so far: section 5. Still to do, roughly in order: handing the basins down to L2 (outlets, drainage graph, formation stacks per basin); erodibility from the exposed formation and fault-zone weakening in the drainage pass; climate (winds, orographic rain, temperature); deposition of eroded rock (basins, fans, shelves); fault strands from the sheet's strain history; crust created during the window (accreted arcs, new shelves); restoring island chains. The original sketch:
 
 - **Inputs:** smoothed elevation, formation stacks and domains, fault zones, events, plate velocities (for present-day uplift).
 - **Terrain:** uplift field from present plate motion and active faults; stream-power erosion (river incision ∝ drainage area^m × slope^n) with an O(n) implicit solver, as in Braun & Willett's FastScape. Run only long enough to relax wavelengths between L0's and L1's resolution.
@@ -404,7 +418,7 @@ Built so far: section 5. Still to do, roughly in order: erodibility from the exp
 - **Formation identity is inferred** at handoff from rock type, origin plate and age. Recording an explicit depositional-episode ID when each unit forms would be cleaner.
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
-- **L1:** contacts are found within a cube face only (pairs straddling a face edge are missed); about 2% of cells churn between consumed and refilled where L0's boundary ownership flickers; land beyond the reach is not simulated, so a landmass can be partly simulated; the map is redrawn every other step. Erodibility and rain are uniform; eroded rock leaves the system instead of filling basins; ocean cells are static, so tectonic input that lands on them is booked but not applied; crust created after t0 (accreted arcs, new shelves) is not simulated, only drawn from L0; horizontal shortening is treated as vertical thickening. Coastal cells incise straight to sea level, which leaves a one-cell scarp along most coasts. Lower-crustal flow, the strength limit and the flexure kernel are simple stand-ins. A 100 Myr window takes 70–80 s at ~13 km cells, well over the 30 s target; a Web Worker or the WebGPU solver from the `Moving-on` tag would help.
+- **L1:** see section 5.5.
 
 ---
 
@@ -414,6 +428,8 @@ Built so far: section 5. Still to do, roughly in order: erodibility from the exp
 - Cordonnier et al. (2016), large-scale terrain generation from tectonic uplift and fluvial erosion; (2017) coupled ecosystem and erosion; (2023) glacial erosion.
 - Génevaux et al. (2013), terrain generation using procedural models based on hydrology.
 - Paris et al. (2021), synthesising geologically coherent cave networks.
+- England & McKenzie (1982), the thin viscous sheet model of continental deformation; Houseman & England (1986) on the Argand number.
+- Ahnert (1970), denudation rate against relief in mid-latitude drainage basins.
 - Braun & Willett (2013), the FastScape implicit stream-power solver.
 - Barnes, Lehman & Mulla (2014), Priority-Flood depression filling; Zhou, Sun & Fu (2016), its faster variant used in L1.
 - Hack (1957), the length–area scaling of river networks used as a check on L1.
