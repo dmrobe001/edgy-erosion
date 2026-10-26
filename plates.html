@@ -1344,7 +1344,7 @@ function climate(sheet,nx,ny,h,e,land,o){
 function basins(sheet,o){
   o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4,climate:true,Lr:3000,He:3,orogMax:5,fuW:2.6,rainSmoothKm:30,lakeMinKm:0.002,basinMinKm:0.01},o);
   const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),es=new Float64Array(nc),land=new Uint8Array(nc);
-  const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins")|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4;
+  const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins"+(o.salt||""))|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4;
   for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h,gx=(x-sheet.x0)/H-0.5,gy=(y-sheet.y0)/H-0.5;
     let i0=Math.floor(gx),j0=Math.floor(gy);const fx=gx-i0,fy=gy-j0;let s=0,w=0;
     for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=snx||jj>=sny)continue;const v=se[jj*snx+ii];if(isNaN(v))continue;s+=ww*v;w+=ww;}
@@ -1358,7 +1358,10 @@ function basins(sheet,o){
   // exist only in the fine relief are stand-in texture, filled as sediment would fill them.
   // The sheet resolves nothing narrower than about three of its cells, so its surface is first smoothed over one cell.
   const esm=Float64Array.from(blurGrid(es,nx,ny,f)),deep=new Uint8Array(nc);route(G,esm,alive,out,S,null);for(let c=0;c<nc;c++)deep[c]=land[c]&&S.f[c]-esm[c]>o.basinMinKm?1:0;
-  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,wgt);const hN=streamPower(e,S,o.K,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
+  // erodibility: uniform, or o.Kmul, a multiplier per sheet cell, interpolated in log
+  let Kc=o.K;if(o.Kmul){Kc=new Float64Array(nc);const lk=Float64Array.from(o.Kmul,v=>Math.log(v));
+    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++)Kc[j*nx+i]=o.K*Math.exp(sheet.sample(lk,sheet.x0+(i+.5)*h,sheet.y0+(j+.5)*h));}
+  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,wgt);const hN=streamPower(e,S,Kc,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
   route(G,e,alive,out,S,null);
   const rec=Int32Array.from(S.rec),stack=S.stack.subarray(0,S.ns),A=new Float64Array(nc),Q=new Float64Array(nc),lake=new Uint8Array(nc);let nClosed=0;
   // lakes: cells the filling raised by more than lakeMinKm; each lake's exit is a lake cell draining out of the lake
