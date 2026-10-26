@@ -317,7 +317,15 @@ An earlier version of L1 (DEVLOG, "L1 v1") ran one continent for ~100 Myr on a r
 ### 5.1 Picking at the end, with replay
 
 - **Snapshots.** While L0 runs in the page, it saves its whole state every 10 Myr and keeps the last four. A saved state includes the random generator's state. It costs 14 MB at n = 64, 29 MB at n = 96 and 59 MB at n = 128, and about 50 ms to take at n = 96.
-- **Pick.** At the present, a tap on land selects its landmass: the land cells connected to the tapped one, plus a ring of submerged continental crust around them. The plate carrying most of the land is the reference plate.
+- **Pick.** At the present, a tap on land selects its landmass, grown from the tapped cell (`landmassAt(world, cell, bufferKm)`):
+  1. *Land:* the land cells connected to it, corners included (two cells meeting at a corner are one coast at L0's resolution).
+  2. *Buffer:* the sea within `bufferKm` of that land's coast (great-circle distance between cell centres, less one cell). An island with a cell in the buffer joins, and the buffer grows around it, until nothing more joins. This is single-linkage clustering of the land at the buffer distance: an archipelago whose gaps are all under the buffer comes as one landmass. The buffer always includes the ring of continental crust around the land, so the coast can move. Default 200 km; 0 to 1,000 km on the slider.
+  3. *Enclosed seas:* water the region surrounds (every piece of the rest of the sphere except the largest, the open ocean) joins, with any islands in it. A strait narrower than about twice the buffer is closed by the buffer, so a sea behind one counts as enclosed (in image-processing terms, a morphological closing).
+  4. *Crust:* of the region's continental crust, only what connects to the landmass's land through the region's continental crust is kept, so a sliver of another continent's shelf that the buffer reaches stays out.
+
+  The sheet carries the region's continental crust and the landmass's land on oceanic crust (islands built by arcs and hotspots, 1–3% of a large landmass's land; before this they showed as unrefined lumps). The region's oceanic floor stays L0's backdrop. The plate carrying most of the land is the reference plate.
+
+  Measured (seed b, 1 Gyr, 96-cell grid, 10 Myr window, largest landmass): with a 300 km buffer, 15 islands joined and 4,873 of the 4,889 land cells lie under the sheet's crust at the end. The other 16 cells do carry markers, but the sheet moved the coast a cell away from where L0 has it. Land in the L1 frame without sheet crust is now the other landmasses, beyond the buffer.
 - **Pass 1, tracing.** L0 restores the newest saved state older than the window and tags every crust parcel with an identity (plate × N + body cell). L0 carries that identity wherever it moves crust, through splits, welds and hole fills. It then replays to the present, recording which parcel sits on each fixed cell at each step of the window. L0 is deterministic, so the replay lands exactly on the present; this is tested.
 
   The landmass's crust is two sets of parcels:

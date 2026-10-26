@@ -164,6 +164,18 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
   - **Tiles.** Basins under 10,000 km² first became tiles one by one: 152 tiles on a small landmass, many of them 100 km² specks. Grouping minor basins breadth first left small closed basins boxed in by major ones. These now join the neighbouring tile they share the most boundary with; any union of whole basins is still closed to water.
   - **Which divides are real.** A first test counted a divide as surviving a re-seed only if the exact 10 km edge stayed a divide. That kept 12–40%, with high crests faring worst, because the synthetic relief's amplitude grows with elevation and jitters crests by a cell. Distance to the nearest divide afterwards flattered every place with dense divides, lowlands full of tiny basins and escarpments full of parallel streams alike: rugged random cells were within 50 km of one 77–92% of the time. The test that held compares point pairs 30 km either side of each divide with random pairs as far apart. Persistence then rises steadily with local relief, from 45% (random 25%) to 90% (random 62%), with no sharp threshold. Three other predictors did worse: crest height, the convexity of the sheet's smooth surface, and divides of the drainage routed over that smooth surface alone, which were worse than chance because its near-flat lowlands are full of arbitrary divides. The firm/contingent flag (relief above the synthetic relief's peak-to-peak amplitude: 77% against 52%) is a convenience; the table travels with it.
 
+- **What counts as the landmass.** Refined land sometimes ended in a straight edge against a lump of unrefined land. Measured on three 1 Gyr worlds before changing anything, the pick missed four things:
+  - land touching only at a corner: 18–68 such contacts per world;
+  - islands one or two sea cells off the coast;
+  - enclosed seas: 13–55 cells on the largest landmass, left out of the pick because they are water;
+  - land on oceanic crust: 1–3% of the land, never carried by the sheet, which seeded continental crust only.
+
+  The pick now joins corner contacts, chains islands within a buffer of the coast (the buffer growing around each island that joins, so it is single-linkage clustering at the buffer distance), takes in everything the region encloses, and marks land on oceanic crust for the sheet to carry.
+
+  Distance was first measured between cell centres, so a one-cell strait (about 100 km of water) needed a 210 km buffer to bridge. It is now coast to coast, the centre distance less a cell.
+
+  After the change, all but 16 of 4,889 land cells end under the sheet's crust (seed b, 300 km buffer). The 16 carry markers, but the sheet moved the coast a cell away from L0's.
+
 ---
 
 ## Things that turned out not to matter, or were left alone

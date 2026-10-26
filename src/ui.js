@@ -352,13 +352,13 @@ const l1Entry=win=>{for(let k=snaps.length-1;k>=0;k--)if(snaps[k].t<=world.t-win
 // A finished run belongs to its moment of L0: once L0 moves on it is marked stale and kept until the selection changes.
 function l1WorldMoved(){if(l1St&&l1St.phase==="done"&&!l1St.stale){l1St.stale=true;l1Status();}}
 // the selected point's landmass, highlighted on L0's map (land strongly, its submerged rim faintly)
-function selGlobeMask(){if(!world||selCell<0||l1Busy())return null;const key=selCell+":"+world.steps;if(selMaskKey===key)return selMask;selMaskKey=key;
-  const pick=L1.landmassAt(world,selCell);if(!pick)return selMask=null;const m=new Uint8Array(world.N);for(let h=0;h<pick.cells.length;h++)m[pick.cells[h]]=h<pick.land?2:1;return selMask=m;}
+function selGlobeMask(){if(!world||selCell<0||l1Busy())return null;const key=selCell+":"+world.steps+":"+l1Buf();if(selMaskKey===key)return selMask;selMaskKey=key;
+  const pick=L1.landmassAt(world,selCell,l1Buf());if(!pick)return selMask=null;const m=new Uint8Array(world.N);for(let h=0;h<pick.cells.length;h++)m[pick.cells[h]]=h<pick.land?2:1;return selMask=m;}
 // Selection drives the L1 panel: a landmass shows at once, as L0 has it now (refining replays from a window earlier).
 // A finished run stays while the selection is on its landmass.
 function l1Select(i,force){if(l1Busy()||!world)return;
   const S=l1St;if(!force&&S&&S.phase==="done"&&!S.stale&&S.pick.cells.indexOf(i)>=0&&S.pick.cells.indexOf(i)<S.pick.land){l1Status();return;}
-  const pick=L1.landmassAt(world,i);
+  const pick=L1.landmassAt(world,i,l1Buf());
   if(!pick){l1Reset();$("l1Info").innerHTML=`<div class="muted">The selected point is under the sea.</div>`;return;}
   l1Reset();l1St={phase:"picked",pick,cell:i,pv:l1MakePreview(pick)};l1Zoom=1;l1Pan=[0,0];l1View="terrain";
   $("l1stage").hidden=false;$("l1controls").hidden=false;l1SetViews();l1Legend();l1Status();l1Render();}
@@ -379,19 +379,22 @@ function l0Elev(x,y,z){const w=world,out=[0,0,0],nb=w.cube.nb;w.cube.lookupFrac(
 // status lines under the L1 button; the button refines the current selection when a saved state is old enough
 function l1Status(){const S=l1St,el=$("l1Info");if(!world||l1Busy())return;const win=+$("l1Win").value,entry=l1Entry(win);
   const pick=S&&S.pick;$("l1Run").disabled=!(pick&&entry&&selCell>=0);if(!pick)return;const a=pick.land*world.cellKm*world.cellKm;
-  let html=`<div><b>Landmass</b>: ${(a/1e6).toFixed(1)} M km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}.</div>`;
+  let html=`<div><b>Landmass</b>: ${(a/1e6).toFixed(1)} M km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}${pick.islands?`, with ${pick.islands} island${pick.islands>1?"s":""} within ${pick.bufferKm} km`:""}; with the buffer and enclosed seas, ${((pick.cells.length-pick.land)*world.cellKm*world.cellKm/1e6).toFixed(1)} M km² of sea and shelf.</div>`;
   if(S.phase==="picked")html+=`<div class="muted">${entry?`Showing L0 now; refining replays from ${fmtT(entry.t)} Myr.`:`No saved L0 state ${win} Myr back yet: run L0 longer or shorten the window.`}</div>`;
   else if(S.phase==="done")html+=`<div class="muted">Refined over ${fmtT(S.plan.window)} Myr from L0 at ${fmtT(S.entry.t)} Myr${S.stale?"; L0 has moved on since":""}.</div>`;
   el.innerHTML=html;}
+// the buffer changes which landmass is selected: the L0 highlight and an unrefined preview follow it
+function l1Buf(){return +$("l1Buf").value;}
+$("l1Buf").oninput=e=>{$("l1BufVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";if(l1Busy())return;selMaskKey="";if(selCell>=0&&(!l1St||l1St.phase==="picked"))l1Select(selCell,true);render();};
 $("l1Win").oninput=e=>{$("l1WinVal").textContent=e.target.value+" Myr";l1Status();};
 $("l1Ell").oninput=e=>$("l1EllVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";
 $("l1Run").onclick=()=>{if(l1Busy()||selCell<0)return;const win=+$("l1Win").value,entry=l1Entry(win);if(!entry)return;
-  const pick=l1St&&l1St.phase==="picked"?l1St.pick:L1.landmassAt(world,selCell);if(!pick)return;
+  const pick=l1St&&l1St.phase==="picked"?l1St.pick:L1.landmassAt(world,selCell,l1Buf());if(!pick)return;
   if(running)stopRun();$("l1Run").disabled=true;
   const o={h:+$("l1H").value,Ar:+$("l1Ar").value,ellKm:+$("l1Ell").value};let rp;
   try{rp=new L1.Replay(world,entry,win,pick);}catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not start: ${err.message}</div>`);return;}
   l1TileSel=-1;l1TileInfo();$("l1stats").innerHTML="";$("l1budget").innerHTML="";
-  l1St={phase:"replay",pick,cell:selCell,rp,entry,win,o,t0Wall:performance.now()};logAction({a:"refine",cell:selCell,entrySteps:entry.steps,windowMyr:win,sheet:o});l1Mask=null;$("exportBtn").disabled=true;
+  l1St={phase:"replay",pick,cell:selCell,rp,entry,win,o,t0Wall:performance.now()};logAction({a:"refine",cell:selCell,bufferKm:pick.bufferKm,entrySteps:entry.steps,windowMyr:win,sheet:o});l1Mask=null;$("exportBtn").disabled=true;
   $("l1Info").innerHTML=`<div class="muted" id="l1Prog">Replaying L0 to trace the landmass’s crust…</div>`;};
 function l1Prog(t){const el=$("l1Prog");if(el)el.textContent=t;}
 // one slice of work per animation frame: replay, replay again to the window's start, the sheet a step at a time, the basins
@@ -556,9 +559,9 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
     settings:{seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
-      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value}},
+      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
-      L1:S&&S.entry?{phase:S.phase,cell:S.cell,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null},
+      L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null},
     checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
       L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
         basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null},

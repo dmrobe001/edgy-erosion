@@ -167,6 +167,7 @@ button:disabled{opacity:.5;cursor:default}
     <h2>L1 landmass</h2>
     <div class="row">
       <button class="primary" id="l1Run" disabled>Refine selected landmass</button>
+      <label><span class="field-label">Buffer</span><input type="range" id="l1Buf" min="0" max="1000" step="50" value="200"><span class="num" id="l1BufVal">200 km</span></label>
       <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="30" step="5" value="20"><span class="num" id="l1WinVal">20 Myr</span></label>
       <label><span class="field-label">Sheet grid</span><select id="l1H"><option value="30">30 km</option><option value="50" selected>50 km</option><option value="70">70 km</option></select></label>
       <label><span class="field-label">Argand number</span><select id="l1Ar"><option value="1">1</option><option value="3" selected>3</option><option value="10">10</option></select></label>
@@ -229,7 +230,7 @@ button:disabled{opacity:.5;cursor:default}
     <p><span class="tag">Running.</span> Run advances L0 by the Gyr slider and stops; Run again continues for that long. Step advances one step. Marks shows hotspots (yellow rings) and plate velocity arrows. Net rotation of the lithosphere is always removed (see below).</p>
     <p><span class="tag">Map projection.</span> Interrupted Goode homolosine, an equal-area projection: sinusoidal within 40°44′ of the equator and Mollweide beyond. Its cuts are placed for this planet: the map edge is the meridian crossing the least land, the north gets one more cut and the south two, each at the meridian crossing the least land in that hemisphere, at least 50° from the others. Cuts are re-placed when the world stops moving.</p>
     <p><span class="tag">Legends.</span> Elevation: sea level is the blue–green break; dark lines are trenches. Rock type: darker means older. L1 preview: smoothed L0 elevation and formations, cut by stand-in fine relief (noise, not a real L1 model). Plates: light fill is continental crust; boundaries coloured by relative motion.</p>
-    <p><span class="tag">L1 landmass.</span> Refine selected landmass replays the last 10–30 Myr of the selected landmass’s history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet: each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started. Before refining, the L1 map shows L0’s present surface around the landmass (the landmass in colour, other land grey); refinement starts from L0’s state one window earlier.</p>
+    <p><span class="tag">L1 landmass.</span> Refine selected landmass replays the last 10–30 Myr of the selected landmass’s history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet: each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started. Buffer sets which land counts as the landmass: islands within that distance of its coast join it (and islands within that distance of those), and seas it encloses are always part of it, so an archipelago or an inland sea is refined with the land around it rather than cut off at a straight edge. Before refining, the L1 map shows L0’s present surface around the landmass (the landmass in colour, other land grey); refinement starts from L0’s state one window earlier.</p>
     <p><span class="tag">L1 views.</span> Terrain: shaded relief; outside the landmass’s crust, L0’s own surface, dimmed. Thickening: crust thickened (red) or thinned (blue) since the window began. Finite strain: total horizontal shortening (red) and extension (blue) where it has not shortened; ticks lie along the shortening direction where it exceeds 10%. Strain rate: how fast the sheet deforms now (log scale). Surface rock: topmost unit by volume. Mantle pull: dynamic topography from sinking slabs, included in the elevation. Rainfall: a crude climate of latitude belts, zonal winds and rain shadows. Drainage basins: one colour per basin of at least 10,000 km²; inland-draining basins in earth tones, areic desert sand-coloured, small coastal basins grey; lakes blue (overflowing), pale blue (no outlet), white (dry floor). L2 tiles: the tiles L1 hands to L2, dark edges where the divide is firm (re-seeding the stand-in fine relief, 77% of firm divides stay within 30 km, against about half of the others).</p>
     <p><span class="tag">L1 handoff.</span> Extract handoff freezes the world and packages what L1 needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue and current plate motions.</p>
     <p><span class="tag">Export session.</span> Saves a small JSON log from which the session reruns exactly: seed, settings and step counts; the selected point; the L1 refinement’s cell, saved state, window and settings; check values for the rerun; what each view shows and how it is zoomed and coloured (L0, the L1 map and the L2 tiles); the statistics, the event log and the actions taken. tools/session.js in the repository reruns it.</p>
@@ -251,7 +252,7 @@ button:disabled{opacity:.5;cursor:default}
   </section>
 </main>
 <script>
-const BUILD_ID="3f2f9dee06be";
+const BUILD_ID="553961bdabda";
 // ===== SIM-START =====
 const SIM = (() => {
 const R_KM=6371, U=8, FS=15;
@@ -988,16 +989,50 @@ function faceDir(f,a,b,t){let x,y,z;switch(f){case 0:x=1;y=a;z=b;break;case 1:x=
   const L=Math.hypot(x,y,z);t[0]=x/L;t[1]=y/L;t[2]=z/L;return t;}
 
 // ---------- the landmass: picked at the end, its history found by replay ----------
-// The object is one landmass at the present: the fixed-grid land cells connected to the picked one, plus a ring of
-// submerged continental crust around them (so the coast can move). Its crust is every parcel that ends up there.
-function landmassAt(world,cell){
-  const N=world.N,nb=world.cube.nb,E=world.elev,K=world.wK;if(E[cell]<=0)return null;
-  const inSet=new Uint8Array(N),q=[cell];inSet[cell]=1;
-  for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(!inSet[b]&&E[b]>0){inSet[b]=1;q.push(b);}}}
-  const land=q.length;for(let h=0;h<land;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(!inSet[b]&&K[b]){inSet[b]=2;q.push(b);}}}
-  const votes=new Map();for(let h=0;h<land;h++){const p=world.owner[q[h]];votes.set(p,(votes.get(p)||0)+1);}
+// The object is one landmass at the present. It is grown from the picked cell in four steps:
+// 1. Land: the fixed-grid land cells connected to it, corners included (two cells meeting only at a corner are one
+//    coast at L0's resolution).
+// 2. Buffer: the sea within bufferKm of that land's coast (great-circle distance to the nearest land cell, less a cell). An island with a
+//    cell in the buffer joins, and the buffer grows around it, until nothing more joins: islands are chained to the
+//    landmass by steps of at most bufferKm (single-linkage clustering of the land at that distance). The buffer is at
+//    least the ring of continental crust around the land, so the coast can move.
+// 3. Enclosed seas: water the region now surrounds (the pieces of the rest of the sphere other than the largest, the
+//    open ocean) joins, with any islands in it. A strait narrower than about twice the buffer is closed by the
+//    buffer, so its sea counts as enclosed.
+// 4. Crust: of the region's continental crust, only what is connected to the landmass's land through the region's
+//    continental crust is kept (a sliver of another continent's shelf that the buffer reaches stays out).
+// Cells: the land first (`land` of them), then the rest of the region. The sheet carries the continental crust of all
+// of it; the region's oceanic floor stays L0's. Its crust is every parcel that ends up there.
+const CORNER=[2,3,1,0];
+function landmassAt(world,cell,bufferKm=0){
+  const N=world.N,nb=world.cube.nb,E=world.elev,K=world.wK,pos=world.cube.pos;if(E[cell]<=0)return null;
+  const nb8=(a,f)=>{for(let k=0;k<4;k++){const b=nb[4*a+k];f(b);f(nb[4*b+CORNER[k]]);}};   // the 4 sides and the 4 corners (NE, SW, NW, SE)
+  const inL=new Uint8Array(N),landQ=[],dist=new Float64Array(N).fill(Infinity),src=new Int32Array(N).fill(-1),Q=[];
+  // distances are coast to coast: between cell centres, less one cell
+  const B=bufferKm>0?(bufferKm+world.cellKm)/R_KM:0,cosB=Math.cos(Math.min(Math.PI,B));
+  // add the land component containing c; its cells become buffer sources
+  const addLand=c=>{const q=[c];inL[c]=1;for(let h=0;h<q.length;h++){const a=q[h];landQ.push(a);dist[a]=0;src[a]=a;Q.push(a);nb8(a,b=>{if(!inL[b]&&E[b]>0){inL[b]=1;q.push(b);}});}};
+  addLand(cell);let islands=0;
+  // the buffer, by label-correcting search: each cell keeps its nearest land cell and the great-circle distance to it
+  for(let h=0;h<Q.length;h++){const a=Q[h],s=src[a];
+    nb8(a,b=>{const c=pos[3*b]*pos[3*s]+pos[3*b+1]*pos[3*s+1]+pos[3*b+2]*pos[3*s+2];if(c<cosB-1e-12)return;
+      const d=Math.acos(Math.min(1,c));if(d>=dist[b]-1e-12)return;
+      if(E[b]>0&&!inL[b]){islands++;addLand(b);return;}dist[b]=d;src[b]=s;Q.push(b);});}
+  const inR=new Uint8Array(N);for(let i=0;i<N;i++)if(dist[i]<Infinity)inR[i]=1;
+  for(const a of landQ)for(let k=0;k<4;k++){const b=nb[4*a+k];if(K[b])inR[b]=1;}
+  // enclosed seas: the pieces of the rest of the sphere, all but the largest
+  const piece=new Int32Array(N).fill(-1),pieces=[];
+  for(let i=0;i<N;i++){if(inR[i]||piece[i]>=0)continue;const q=[i];piece[i]=pieces.length;for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(!inR[b]&&piece[b]<0){piece[b]=pieces.length;q.push(b);}}}pieces.push(q);}
+  let open=-1;for(let p=0;p<pieces.length;p++)if(open<0||pieces[p].length>pieces[open].length)open=p;
+  let seaCells=0;for(let p=0;p<pieces.length;p++)if(p!==open){seaCells+=pieces[p].length;for(const c of pieces[p])inR[c]=1;}
+  for(let i=0;i<N;i++)if(inR[i]&&E[i]>0&&!inL[i]){islands++;addLand(i);}
+  // the region's continental crust connected to the land through continental crust in the region
+  const keep=new Uint8Array(N),q=[];for(const a of landQ){keep[a]=1;q.push(a);}
+  for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(inR[b]&&K[b]&&!keep[b]){keep[b]=1;q.push(b);}}}
+  const cells=landQ.slice();for(let i=0;i<N;i++)if(inR[i]&&!inL[i]&&(keep[i]||!K[i]))cells.push(i);
+  const land=landQ.length,votes=new Map();for(let h=0;h<land;h++){const p=world.owner[cells[h]];votes.set(p,(votes.get(p)||0)+1);}
   let ref=-1,bv=-1;for(const [p,v] of votes)if(v>bv){bv=v;ref=p;}
-  return{cells:Int32Array.from(q),land,ref};
+  return{cells:Int32Array.from(cells),land,ref,bufferKm,islands,seaCells};
 }
 // Pass 1: restore the snapshot, tag every parcel, replay to the present step and record where parcels are from
 // t0 = present - window on. At the end the object's parcels are read off the picked cells; the reference frame is
@@ -1023,6 +1058,8 @@ class Replay{
   static refAt(fr,chain){for(const p of chain)if(fr.Q.has(p))return p;return chain[chain.length-1];}
   finish(){const w=this.world,N=w.N,last=this.frames[this.frames.length-1],obj=new Uint8Array(this.idSpace);let nObj=0;
     for(const c of this.pick.cells){const id=last.id[c];if(id>=0&&!obj[id]){obj[id]=1;nObj++;}}
+    // plus the landmass's land on oceanic crust (islands built by arcs and hotspots), marked 2: the sheet carries it too
+    for(let h=0;h<this.pick.land;h++){const id=last.id[this.pick.cells[h]];if(id<-1&&!obj[-2-id]){obj[-2-id]=2;nObj++;}}
     // plus the crust it consumes: a continental parcel that touches the object's crust at some frame and is gone by
     // the end (overrun in a collision, or relabelled by L0) was squeezed into it, so it belongs to the sheet
     const atEnd=new Uint8Array(this.idSpace),nb=w.cube.nb;for(let i=0;i<N;i++){const v=last.id[i];if(v>=0)atEnd[v]=1;else if(v<-1)atEnd[-2-v]=1;}
@@ -1041,7 +1078,7 @@ class Replay{
     // footprint of the object's crust over the window
     let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;const xy=[0,0];
     for(const fr of this.frames){const Q=fr.Q.get(Replay.refAt(fr,chain));
-      for(let i=0;i<N;i++){const id=fr.id[i];if(id<0||!obj[id])continue;mtv(Q,pos[3*i],pos[3*i+1],pos[3*i+2],t);proj.fwd(t,xy);
+      for(let i=0;i<N;i++){const v=fr.id[i],id=v<-1?-2-v:v;if(id<0||!obj[id])continue;mtv(Q,pos[3*i],pos[3*i+1],pos[3*i+2],t);proj.fwd(t,xy);
         if(xy[0]<x0)x0=xy[0];if(xy[0]>x1)x1=xy[0];if(xy[1]<y0)y0=xy[1];if(xy[1]>y1)y1=xy[1];}}
     const t0Steps=this.frames[0].steps;
     // L0 is now back at the present (the replay reached it); the sheet's pass restores and replays again
@@ -1143,7 +1180,7 @@ class Sheet{
     // L0 relabels some parcels during the window (resampling copies a neighbour's identity), leaving pinholes in the
     // traced set: a continental parcel with at least three traced neighbours on its plate counts as traced too
     const take=new Map();
-    for(const P of w.plates){if(!P.alive||!P.pid)continue;const pid=P.pid,tk=new Uint8Array(N);for(let k=0;k<N;k++)if(pid[k]>=0&&obj[pid[k]]&&P.T[k]>0&&P.K[k])tk[k]=1;
+    for(const P of w.plates){if(!P.alive||!P.pid)continue;const pid=P.pid,tk=new Uint8Array(N);for(let k=0;k<N;k++)if(pid[k]>=0&&obj[pid[k]]&&P.T[k]>0&&(P.K[k]||obj[pid[k]]===2))tk[k]=1;
       for(let pass=0;pass<2;pass++){const add=[];for(let k=0;k<N;k++){if(tk[k]||!(P.T[k]>0)||!P.K[k])continue;let s=0;for(let d=0;d<4;d++)s+=tk[nb[4*k+d]];if(s>=3)add.push(k);}for(const k of add)tk[k]=1;}
       take.set(P.id,tk);}
     for(const P of w.plates){if(!P.alive||!P.pid)continue;const tk=take.get(P.id);
@@ -1991,13 +2028,13 @@ const l1Entry=win=>{for(let k=snaps.length-1;k>=0;k--)if(snaps[k].t<=world.t-win
 // A finished run belongs to its moment of L0: once L0 moves on it is marked stale and kept until the selection changes.
 function l1WorldMoved(){if(l1St&&l1St.phase==="done"&&!l1St.stale){l1St.stale=true;l1Status();}}
 // the selected point's landmass, highlighted on L0's map (land strongly, its submerged rim faintly)
-function selGlobeMask(){if(!world||selCell<0||l1Busy())return null;const key=selCell+":"+world.steps;if(selMaskKey===key)return selMask;selMaskKey=key;
-  const pick=L1.landmassAt(world,selCell);if(!pick)return selMask=null;const m=new Uint8Array(world.N);for(let h=0;h<pick.cells.length;h++)m[pick.cells[h]]=h<pick.land?2:1;return selMask=m;}
+function selGlobeMask(){if(!world||selCell<0||l1Busy())return null;const key=selCell+":"+world.steps+":"+l1Buf();if(selMaskKey===key)return selMask;selMaskKey=key;
+  const pick=L1.landmassAt(world,selCell,l1Buf());if(!pick)return selMask=null;const m=new Uint8Array(world.N);for(let h=0;h<pick.cells.length;h++)m[pick.cells[h]]=h<pick.land?2:1;return selMask=m;}
 // Selection drives the L1 panel: a landmass shows at once, as L0 has it now (refining replays from a window earlier).
 // A finished run stays while the selection is on its landmass.
 function l1Select(i,force){if(l1Busy()||!world)return;
   const S=l1St;if(!force&&S&&S.phase==="done"&&!S.stale&&S.pick.cells.indexOf(i)>=0&&S.pick.cells.indexOf(i)<S.pick.land){l1Status();return;}
-  const pick=L1.landmassAt(world,i);
+  const pick=L1.landmassAt(world,i,l1Buf());
   if(!pick){l1Reset();$("l1Info").innerHTML=`<div class="muted">The selected point is under the sea.</div>`;return;}
   l1Reset();l1St={phase:"picked",pick,cell:i,pv:l1MakePreview(pick)};l1Zoom=1;l1Pan=[0,0];l1View="terrain";
   $("l1stage").hidden=false;$("l1controls").hidden=false;l1SetViews();l1Legend();l1Status();l1Render();}
@@ -2018,19 +2055,22 @@ function l0Elev(x,y,z){const w=world,out=[0,0,0],nb=w.cube.nb;w.cube.lookupFrac(
 // status lines under the L1 button; the button refines the current selection when a saved state is old enough
 function l1Status(){const S=l1St,el=$("l1Info");if(!world||l1Busy())return;const win=+$("l1Win").value,entry=l1Entry(win);
   const pick=S&&S.pick;$("l1Run").disabled=!(pick&&entry&&selCell>=0);if(!pick)return;const a=pick.land*world.cellKm*world.cellKm;
-  let html=`<div><b>Landmass</b>: ${(a/1e6).toFixed(1)} M km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}.</div>`;
+  let html=`<div><b>Landmass</b>: ${(a/1e6).toFixed(1)} M km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}${pick.islands?`, with ${pick.islands} island${pick.islands>1?"s":""} within ${pick.bufferKm} km`:""}; with the buffer and enclosed seas, ${((pick.cells.length-pick.land)*world.cellKm*world.cellKm/1e6).toFixed(1)} M km² of sea and shelf.</div>`;
   if(S.phase==="picked")html+=`<div class="muted">${entry?`Showing L0 now; refining replays from ${fmtT(entry.t)} Myr.`:`No saved L0 state ${win} Myr back yet: run L0 longer or shorten the window.`}</div>`;
   else if(S.phase==="done")html+=`<div class="muted">Refined over ${fmtT(S.plan.window)} Myr from L0 at ${fmtT(S.entry.t)} Myr${S.stale?"; L0 has moved on since":""}.</div>`;
   el.innerHTML=html;}
+// the buffer changes which landmass is selected: the L0 highlight and an unrefined preview follow it
+function l1Buf(){return +$("l1Buf").value;}
+$("l1Buf").oninput=e=>{$("l1BufVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";if(l1Busy())return;selMaskKey="";if(selCell>=0&&(!l1St||l1St.phase==="picked"))l1Select(selCell,true);render();};
 $("l1Win").oninput=e=>{$("l1WinVal").textContent=e.target.value+" Myr";l1Status();};
 $("l1Ell").oninput=e=>$("l1EllVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";
 $("l1Run").onclick=()=>{if(l1Busy()||selCell<0)return;const win=+$("l1Win").value,entry=l1Entry(win);if(!entry)return;
-  const pick=l1St&&l1St.phase==="picked"?l1St.pick:L1.landmassAt(world,selCell);if(!pick)return;
+  const pick=l1St&&l1St.phase==="picked"?l1St.pick:L1.landmassAt(world,selCell,l1Buf());if(!pick)return;
   if(running)stopRun();$("l1Run").disabled=true;
   const o={h:+$("l1H").value,Ar:+$("l1Ar").value,ellKm:+$("l1Ell").value};let rp;
   try{rp=new L1.Replay(world,entry,win,pick);}catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not start: ${err.message}</div>`);return;}
   l1TileSel=-1;l1TileInfo();$("l1stats").innerHTML="";$("l1budget").innerHTML="";
-  l1St={phase:"replay",pick,cell:selCell,rp,entry,win,o,t0Wall:performance.now()};logAction({a:"refine",cell:selCell,entrySteps:entry.steps,windowMyr:win,sheet:o});l1Mask=null;$("exportBtn").disabled=true;
+  l1St={phase:"replay",pick,cell:selCell,rp,entry,win,o,t0Wall:performance.now()};logAction({a:"refine",cell:selCell,bufferKm:pick.bufferKm,entrySteps:entry.steps,windowMyr:win,sheet:o});l1Mask=null;$("exportBtn").disabled=true;
   $("l1Info").innerHTML=`<div class="muted" id="l1Prog">Replaying L0 to trace the landmass’s crust…</div>`;};
 function l1Prog(t){const el=$("l1Prog");if(el)el.textContent=t;}
 // one slice of work per animation frame: replay, replay again to the window's start, the sheet a step at a time, the basins
@@ -2195,9 +2235,9 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
     settings:{seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
-      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value}},
+      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
-      L1:S&&S.entry?{phase:S.phase,cell:S.cell,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null},
+      L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null},
     checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
       L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
         basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null},

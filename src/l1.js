@@ -102,16 +102,50 @@ function faceDir(f,a,b,t){let x,y,z;switch(f){case 0:x=1;y=a;z=b;break;case 1:x=
   const L=Math.hypot(x,y,z);t[0]=x/L;t[1]=y/L;t[2]=z/L;return t;}
 
 // ---------- the landmass: picked at the end, its history found by replay ----------
-// The object is one landmass at the present: the fixed-grid land cells connected to the picked one, plus a ring of
-// submerged continental crust around them (so the coast can move). Its crust is every parcel that ends up there.
-function landmassAt(world,cell){
-  const N=world.N,nb=world.cube.nb,E=world.elev,K=world.wK;if(E[cell]<=0)return null;
-  const inSet=new Uint8Array(N),q=[cell];inSet[cell]=1;
-  for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(!inSet[b]&&E[b]>0){inSet[b]=1;q.push(b);}}}
-  const land=q.length;for(let h=0;h<land;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(!inSet[b]&&K[b]){inSet[b]=2;q.push(b);}}}
-  const votes=new Map();for(let h=0;h<land;h++){const p=world.owner[q[h]];votes.set(p,(votes.get(p)||0)+1);}
+// The object is one landmass at the present. It is grown from the picked cell in four steps:
+// 1. Land: the fixed-grid land cells connected to it, corners included (two cells meeting only at a corner are one
+//    coast at L0's resolution).
+// 2. Buffer: the sea within bufferKm of that land's coast (great-circle distance to the nearest land cell, less a cell). An island with a
+//    cell in the buffer joins, and the buffer grows around it, until nothing more joins: islands are chained to the
+//    landmass by steps of at most bufferKm (single-linkage clustering of the land at that distance). The buffer is at
+//    least the ring of continental crust around the land, so the coast can move.
+// 3. Enclosed seas: water the region now surrounds (the pieces of the rest of the sphere other than the largest, the
+//    open ocean) joins, with any islands in it. A strait narrower than about twice the buffer is closed by the
+//    buffer, so its sea counts as enclosed.
+// 4. Crust: of the region's continental crust, only what is connected to the landmass's land through the region's
+//    continental crust is kept (a sliver of another continent's shelf that the buffer reaches stays out).
+// Cells: the land first (`land` of them), then the rest of the region. The sheet carries the continental crust of all
+// of it; the region's oceanic floor stays L0's. Its crust is every parcel that ends up there.
+const CORNER=[2,3,1,0];
+function landmassAt(world,cell,bufferKm=0){
+  const N=world.N,nb=world.cube.nb,E=world.elev,K=world.wK,pos=world.cube.pos;if(E[cell]<=0)return null;
+  const nb8=(a,f)=>{for(let k=0;k<4;k++){const b=nb[4*a+k];f(b);f(nb[4*b+CORNER[k]]);}};   // the 4 sides and the 4 corners (NE, SW, NW, SE)
+  const inL=new Uint8Array(N),landQ=[],dist=new Float64Array(N).fill(Infinity),src=new Int32Array(N).fill(-1),Q=[];
+  // distances are coast to coast: between cell centres, less one cell
+  const B=bufferKm>0?(bufferKm+world.cellKm)/R_KM:0,cosB=Math.cos(Math.min(Math.PI,B));
+  // add the land component containing c; its cells become buffer sources
+  const addLand=c=>{const q=[c];inL[c]=1;for(let h=0;h<q.length;h++){const a=q[h];landQ.push(a);dist[a]=0;src[a]=a;Q.push(a);nb8(a,b=>{if(!inL[b]&&E[b]>0){inL[b]=1;q.push(b);}});}};
+  addLand(cell);let islands=0;
+  // the buffer, by label-correcting search: each cell keeps its nearest land cell and the great-circle distance to it
+  for(let h=0;h<Q.length;h++){const a=Q[h],s=src[a];
+    nb8(a,b=>{const c=pos[3*b]*pos[3*s]+pos[3*b+1]*pos[3*s+1]+pos[3*b+2]*pos[3*s+2];if(c<cosB-1e-12)return;
+      const d=Math.acos(Math.min(1,c));if(d>=dist[b]-1e-12)return;
+      if(E[b]>0&&!inL[b]){islands++;addLand(b);return;}dist[b]=d;src[b]=s;Q.push(b);});}
+  const inR=new Uint8Array(N);for(let i=0;i<N;i++)if(dist[i]<Infinity)inR[i]=1;
+  for(const a of landQ)for(let k=0;k<4;k++){const b=nb[4*a+k];if(K[b])inR[b]=1;}
+  // enclosed seas: the pieces of the rest of the sphere, all but the largest
+  const piece=new Int32Array(N).fill(-1),pieces=[];
+  for(let i=0;i<N;i++){if(inR[i]||piece[i]>=0)continue;const q=[i];piece[i]=pieces.length;for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(!inR[b]&&piece[b]<0){piece[b]=pieces.length;q.push(b);}}}pieces.push(q);}
+  let open=-1;for(let p=0;p<pieces.length;p++)if(open<0||pieces[p].length>pieces[open].length)open=p;
+  let seaCells=0;for(let p=0;p<pieces.length;p++)if(p!==open){seaCells+=pieces[p].length;for(const c of pieces[p])inR[c]=1;}
+  for(let i=0;i<N;i++)if(inR[i]&&E[i]>0&&!inL[i]){islands++;addLand(i);}
+  // the region's continental crust connected to the land through continental crust in the region
+  const keep=new Uint8Array(N),q=[];for(const a of landQ){keep[a]=1;q.push(a);}
+  for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(inR[b]&&K[b]&&!keep[b]){keep[b]=1;q.push(b);}}}
+  const cells=landQ.slice();for(let i=0;i<N;i++)if(inR[i]&&!inL[i]&&(keep[i]||!K[i]))cells.push(i);
+  const land=landQ.length,votes=new Map();for(let h=0;h<land;h++){const p=world.owner[cells[h]];votes.set(p,(votes.get(p)||0)+1);}
   let ref=-1,bv=-1;for(const [p,v] of votes)if(v>bv){bv=v;ref=p;}
-  return{cells:Int32Array.from(q),land,ref};
+  return{cells:Int32Array.from(cells),land,ref,bufferKm,islands,seaCells};
 }
 // Pass 1: restore the snapshot, tag every parcel, replay to the present step and record where parcels are from
 // t0 = present - window on. At the end the object's parcels are read off the picked cells; the reference frame is
@@ -137,6 +171,8 @@ class Replay{
   static refAt(fr,chain){for(const p of chain)if(fr.Q.has(p))return p;return chain[chain.length-1];}
   finish(){const w=this.world,N=w.N,last=this.frames[this.frames.length-1],obj=new Uint8Array(this.idSpace);let nObj=0;
     for(const c of this.pick.cells){const id=last.id[c];if(id>=0&&!obj[id]){obj[id]=1;nObj++;}}
+    // plus the landmass's land on oceanic crust (islands built by arcs and hotspots), marked 2: the sheet carries it too
+    for(let h=0;h<this.pick.land;h++){const id=last.id[this.pick.cells[h]];if(id<-1&&!obj[-2-id]){obj[-2-id]=2;nObj++;}}
     // plus the crust it consumes: a continental parcel that touches the object's crust at some frame and is gone by
     // the end (overrun in a collision, or relabelled by L0) was squeezed into it, so it belongs to the sheet
     const atEnd=new Uint8Array(this.idSpace),nb=w.cube.nb;for(let i=0;i<N;i++){const v=last.id[i];if(v>=0)atEnd[v]=1;else if(v<-1)atEnd[-2-v]=1;}
@@ -155,7 +191,7 @@ class Replay{
     // footprint of the object's crust over the window
     let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;const xy=[0,0];
     for(const fr of this.frames){const Q=fr.Q.get(Replay.refAt(fr,chain));
-      for(let i=0;i<N;i++){const id=fr.id[i];if(id<0||!obj[id])continue;mtv(Q,pos[3*i],pos[3*i+1],pos[3*i+2],t);proj.fwd(t,xy);
+      for(let i=0;i<N;i++){const v=fr.id[i],id=v<-1?-2-v:v;if(id<0||!obj[id])continue;mtv(Q,pos[3*i],pos[3*i+1],pos[3*i+2],t);proj.fwd(t,xy);
         if(xy[0]<x0)x0=xy[0];if(xy[0]>x1)x1=xy[0];if(xy[1]<y0)y0=xy[1];if(xy[1]>y1)y1=xy[1];}}
     const t0Steps=this.frames[0].steps;
     // L0 is now back at the present (the replay reached it); the sheet's pass restores and replays again
@@ -257,7 +293,7 @@ class Sheet{
     // L0 relabels some parcels during the window (resampling copies a neighbour's identity), leaving pinholes in the
     // traced set: a continental parcel with at least three traced neighbours on its plate counts as traced too
     const take=new Map();
-    for(const P of w.plates){if(!P.alive||!P.pid)continue;const pid=P.pid,tk=new Uint8Array(N);for(let k=0;k<N;k++)if(pid[k]>=0&&obj[pid[k]]&&P.T[k]>0&&P.K[k])tk[k]=1;
+    for(const P of w.plates){if(!P.alive||!P.pid)continue;const pid=P.pid,tk=new Uint8Array(N);for(let k=0;k<N;k++)if(pid[k]>=0&&obj[pid[k]]&&P.T[k]>0&&(P.K[k]||obj[pid[k]]===2))tk[k]=1;
       for(let pass=0;pass<2;pass++){const add=[];for(let k=0;k<N;k++){if(tk[k]||!(P.T[k]>0)||!P.K[k])continue;let s=0;for(let d=0;d<4;d++)s+=tk[nb[4*k+d]];if(s>=3)add.push(k);}for(const k of add)tk[k]=1;}
       take.set(P.id,tk);}
     for(const P of w.plates){if(!P.alive||!P.pid)continue;const tk=take.get(P.id);

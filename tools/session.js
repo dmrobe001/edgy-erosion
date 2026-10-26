@@ -23,7 +23,7 @@ function reproduce(sess, SIM, L1, log = () => {}) {
   if (L) {
     to(L.entrySteps); const entry = { t: w.t, steps: w.steps, snap: w.snapshot() }; out.entry = entry; log(`L0 at the saved state: ${w.t.toFixed(2)} Myr, ${w.steps} steps`);
     if (L.presentSteps != null && L.phase !== "replay") {
-      to(L.presentSteps); const pick = L1.landmassAt(w, L.cell); log(`L1 present: ${w.t.toFixed(2)} Myr; landmass of ${pick.land} land cells`);
+      to(L.presentSteps); const pick = L1.landmassAt(w, L.cell, L.bufferKm || 0); log(`L1 present: ${w.t.toFixed(2)} Myr; landmass of ${pick.land} land cells`);
       const rp = new L1.Replay(w, entry, L.windowMyr, pick); while (!rp.advance(1e9)); const plan = rp.finish();
       w.restore(entry.snap); w.trackParcels(); to(plan.t0Steps);
       const sh = new L1.Sheet(w, plan, L.sheet); while (w.steps < plan.endSteps) sh.advance(); log(`sheet: ${sh.steps} steps over ${sh.t.toFixed(1)} Myr`);

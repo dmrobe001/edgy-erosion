@@ -103,6 +103,22 @@ while (w.t < T0) { const last = snaps[snaps.length - 1]; if (!last || w.t - last
 const hash = () => { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; }, before = hash();
 let cell = -1, bd = Infinity; { const seen = new Uint8Array(w.N);
   for (let i = 0; i < w.N; i++) { if (seen[i] || w.elev[i] <= 0) continue; const lm = L1.landmassAt(w, i); for (const c of lm.cells) seen[c] = 1; const d = Math.abs(lm.land - target); if (d < bd) { bd = d; cell = i; } } }
+// the selection rules: land first and all of it land; a wider buffer only adds; every island joined lies within the
+// buffer of land already in; no water piece but the open ocean is left outside
+{ const N = w.N, nb = w.cube.nb, pos = w.cube.pos; let prev = null, okSub = true, okLand = true, okChain = true, okSeas = true, line = [];
+  for (const b of [0, 200, 500]) { const p = L1.landmassAt(w, cell, b), inP = new Uint8Array(N); for (const c of p.cells) inP[c] = 1;
+    for (let h = 0; h < p.cells.length; h++) if ((w.elev[p.cells[h]] > 0) !== (h < p.land)) okLand = false;
+    if (prev) for (const c of prev.cells) if (!inP[c]) okSub = false;
+    // each land cell is within buffer + a cell of some other land cell of the pick, or touches one
+    const lc = Array.from(p.cells.slice(0, p.land)), lim = Math.cos((b + 1.5 * w.cellKm) / 6371);
+    if (p.land > 1) for (const a of lc) { let near = false; for (const c of lc) if (c !== a && pos[3 * a] * pos[3 * c] + pos[3 * a + 1] * pos[3 * c + 1] + pos[3 * a + 2] * pos[3 * c + 2] >= lim) { near = true; break; } if (!near) okChain = false; }
+    const piece = new Int32Array(N).fill(-1); let np = 0; for (let i = 0; i < N; i++) { if (inP[i] || piece[i] >= 0) continue; const q = [i]; piece[i] = np; for (let h = 0; h < q.length; h++) for (let k = 0; k < 4; k++) { const j = nb[4 * q[h] + k]; if (!inP[j] && piece[j] < 0) { piece[j] = np; q.push(j); } } np++; }
+    // pieces left outside: the open ocean (the largest), and otherwise only continental crust the shelf rule left out
+    const size = new Array(np).fill(0); for (let i = 0; i < N; i++) if (piece[i] >= 0) size[piece[i]]++; const open = size.indexOf(Math.max(...size));
+    for (let i = 0; i < N; i++) if (piece[i] >= 0 && piece[i] !== open && !w.wK[i]) okSeas = false;
+    line.push(`buffer ${b} km: ${p.land} land cells (${p.islands} islands), ${p.cells.length} in all, ${p.seaCells} enclosed sea, ${np} pieces outside`); prev = p; }
+  console.log("selection: " + line.join("; "));
+  check(okLand && okSub && okChain && okSeas, "selection: land first, wider buffers only add, islands chained within the buffer, no sea left enclosed"); }
 const pick = L1.landmassAt(w, cell), entry = [...snaps].reverse().find(s => s.t <= w.t - W - 1e-9);
 function run() {
   const rp = new L1.Replay(w, entry, W, pick); while (!rp.advance(1e9)); const plan = rp.finish(), back = hash() === before;
