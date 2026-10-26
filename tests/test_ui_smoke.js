@@ -30,8 +30,14 @@ new Function(code + `
   while (l1Busy()) l1Tick();
   if (!l1St || l1St.phase !== "done") throw new Error("L1 did not finish: " + document.getElementById("l1Info").innerHTML);
   if (world.t !== tNow) throw new Error("L0 did not come back to the present");
-  for (const v of ["terrain", "thick", "finite", "strain", "rock", "dyn", "rain", "basins"]) { l1View = v; l1Legend(); l1Pix = null; l1Render(); }
+  for (const v of ["terrain", "thick", "finite", "strain", "rock", "dyn", "rain", "basins", "tiles"]) { l1View = v; l1Legend(); l1Pix = null; l1Render(); }
   l1Zoom = 4; l1Pix = null; l1Render(); l1Inspect({ clientX: 200, clientY: 200 });
+  // the L2 handoff: tap a land pixel in the tiles view, then build both downloads' contents
+  l1View = "tiles"; l1Zoom = 1; l1Pix = null; l1Render(); { let q = -1; for (let k = 0; k < l1Pix.fine.length; k++) if (l1Pix.fine[k] >= 0 && l1St.bs.land[l1Pix.fine[k]]) { q = k; break; }
+    l1Inspect({ clientX: (q % l1PW + 0.5) / l1PW * 400, clientY: (Math.floor(q / l1PW) + 0.5) / l1PH * 400 }); }
+  if (l1TileSel < 0 || !document.getElementById("l1tile").innerHTML.includes("Tile " + l1TileSel)) throw new Error("tile not selected");
+  const tj = JSON.stringify(l1St.ho.tile(l1TileSel)), sj = JSON.stringify(l1St.ho.summary());
+  console.log("PASS ui smoke L2 handoff: " + l1St.ho.tiles.length + " tiles, summary " + (sj.length / 1e3).toFixed(0) + " kB, tile " + l1TileSel + " " + (tj.length / 1e3).toFixed(0) + " kB");
   if (!document.getElementById("l1budget").innerHTML.includes("Drainage basins")) throw new Error("L1 summary not rendered");
   const sh = l1St.sh, bal = sh.balance(); if (Math.abs(bal.error) > 1e-9) throw new Error("L1 crust budget does not close: " + bal.error);
   console.log("PASS ui smoke L1: " + sh.nx + "x" + sh.ny + " sheet, " + sh.nm + " markers, t=" + sh.t.toFixed(1) + " Myr, " + l1St.bs.nBasins + " basins, budget error " + bal.error.toExponential(1));

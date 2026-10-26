@@ -70,7 +70,7 @@ plates.html            the built single-file page (what the artifact serves)
 build.sh               rebuilds plates.html from src/
 src/head.html          markup, styles, explanatory notes; ends with an opening <script> tag
 src/sim.js             the simulation core: a self-contained SIM module, usable in browser and Node
-src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass (L1 module)
+src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff (L1 module)
 src/ui.js              rendering, controls, inspector, handoff panel, L1 panel
 tests/                 headless tests and benchmarks (see section 3.13)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
@@ -389,14 +389,81 @@ Measured on seed "genesis" in Node.js, unless stated:
 - **A thickness spike** in an early run (one marker at 431 km for one step) came from passing on L0's orogenic collapse as volcanism: L0 turns an ocean cell into 28 km of continent in one step, and that volume landed on the few markers in the cell. Only arcs and hotspots are passed on now, as thickness per marker.
 - **Cost in Chromium:** a 110 M km² supercontinent (365 × 366 sheet cells, 381k markers) took 5.9 s per step, about 2.5 minutes in all, with the drainage pass on 1825 × 1830 cells taking 8.8 s. Small landmasses take seconds.
 
-### 5.5 What it does not do yet
+### 5.5 The L2 handoff format
+
+`L1.handoff(sheet, basins)` cuts the landmass into tiles and packages what L2 needs to refine each tile on its own. The page's **L2 tiles** view shows the tiles and their divides; tapping one shows its summary, and two buttons download the landmass summary or that tile's fields as JSON.
+
+**Tiles.**
+- Each drainage basin of at least 10,000 km² is a tile.
+- Smaller basins (short coastal streams, small inland sinks) are grouped with their neighbours, breadth first, into tiles of about that size. A group boxed in below half that size joins the neighbouring tile it shares the longest boundary with. Isolated small islands stay as they are.
+- A union of whole basins is closed to water, so a river leaves a tile only at one of its outlets. This is tested.
+- Kinds: *drains to the sea*, *drains inland* (its largest outlet is a lake with no outlet or a river that runs dry), *coastal strip* and *inland group* (grouped small basins).
+
+**Divides: firm or contingent.** A tile edge is *firm* where its local relief exceeds the peak-to-peak amplitude of the synthetic fine relief, 2 × 0.15 × (1 + e) km. Local relief here is the height above the lowest land within one sheet cell. Elsewhere the edge is *contingent*, and L2 may move it. 18% of the length of divides between tiles is firm on the 1 Gyr landmass.
+
+How firm a divide is turns out to be graded, not sharp.
+- **Test.** On the 1 Gyr landmass, the synthetic relief is re-seeded (two seeds). The question is whether a divide still lies between two points 30 km either side of each original divide. The baseline is random pairs of points as far apart, which straddle some divide anyway, more often in rugged country.
+
+| Local relief (km) | Divides still there | Random pairs |
+|---|---|---|
+| 0–0.2 | 45% | 25% |
+| 0.2–0.4 | 54% | 38% |
+| 0.4–0.8 | 67% | 45% |
+| 0.8–1.6 | 76% | 50% |
+| over 1.6 | 90% | 62% |
+
+- **Result.** Firm divides persist 77% of the time, contingent ones 51–53%. The table travels with the handoff (`meta.dividePersistence`), so L2 can weigh it.
+- **Rejected predictors.**
+  - Crest height: high plateaus' divides were the least stable.
+  - The convexity of the sheet's smooth surface: weaker.
+  - Divides of the drainage routed over the smooth surface alone: worse than chance, because its near-flat lowlands are full of arbitrary divides.
+- **Escarpments.** Steep coastal escarpments count as relief, so the short divides between their parallel streams come out firm.
+
+**Fields at the resolution they were computed.**
+
+| Grid | Per cell |
+|---|---|
+| Fine (the drainage pass, 10 km) | `elevationM`; `receiver` (the steepest-descent direction; −1 marks a basin end); `areaKm2`; `dischargeM3s`; `lake` and `drainage` codes; `divide` (0 none, 1 contingent, 2 firm); `rainMmYr`; `evaporationMmYr`; `upliftMmYr` (present tectonic rate); `responseMyr` (below); `inTile` |
+| Coarse (the sheet, 50 km) | `thicknessKm`; `thickeningKm` in the window; finite strain (`shortening`, `stretch`, `shorteningAzimuthDeg` clockwise from north, `rotationDeg`); `strainRatePerMyr` now; `mantlePullKm`; `denudationKmPerMyr` (present); `arcAddedKm` in the window; `stacks` |
+
+`stacks` lists the L0 parcels present in each coarse cell, up to three, largest first. Each entry gives the parcel's share of the cell's crust, its thickness, and its units bottom to top as [rock, formed Ma, thickness km]. Parcels lie side by side, because the sheet does not stack crust vertically.
+
+**Imprints, oldest first.** Each imprint has a class, a start and end age (Ma, before the present), whether it is ongoing, what it leaves (structure, rock, relief, water) and the tiles it touches. L2 applies them in order, so younger structures cut older ones: Steno's and Hutton's cross-cutting principle, which is how geologists read the order of events from outcrops.
+- **Classes:**
+  - *fault* (L0's fault records: kind, slip, a trace in map km);
+  - *crumpling* (the sheet's finite strain over the window);
+  - *volcanism* (arc and hotspot rock added in the window);
+  - *mantle pull* (dynamic topography from slabs subducted over the last 250 Myr);
+  - *drainage* (the network the pass settled).
+- **Structure versus relief:** structural imprints (rock juxtaposed at a fault, strain fabric) last until erosion strips the rock carrying them. Topographic ones decay.
+
+**Lifetimes of topographic imprints, by erasure mechanism:**
+- **Hillslope blurring.** Width σ = √(2Dt), with D = 0.01 km²/Myr, which equals 0.01 m²/yr. This is a literature value, not simulated: soil-mantled slopes range about 0.001–0.05 m²/yr. A 100 m wide scarp lasts about 0.5 Myr, a 1 km wide feature about 50 Myr.
+- **Knickpoint sweep.** A change at an outlet (a fall in base level, a capture, a scarp across a river) travels up the network at K·A_w^m, where A_w is runoff-weighted drainage area. Celerities are 1 km/Myr at 100 km², 10 at 10,000 km² and 100 at 1 M km². A cell's response time, `responseMyr`, is the travel time from its outlet; a base-level change older than that has passed the cell. K = 0.1 is the drainage pass's own value, not calibrated to absolute rates, so these times are relative.
+- **Relief decay.** Half-life under L1's own denudation law:
+  - Wide relief, isostatically compensated: 95 Myr from 1 km, 61 Myr from 3 km.
+  - Narrow relief, flexurally supported: 15 and 10 Myr.
+- **Lake filling.** Each lake's volume over the sediment reaching it gives `fillMyr`.
+- **Stripping.** A surface unit lasts its thickness over `denudationKmPerMyr`.
+
+**Frame.** Map km, x east and y north at the projection centre, which is given in L0's present latitude and longitude. Outlets and tile centres also carry latitude and longitude.
+
+**Measured on the 1 Gyr landmass:**
+- **Tiles:** 646 in all, with a median of 15,800 km² and the largest 1.26 M km². 353 drain to the sea, 14 drain inland, 266 are coastal strips and 13 inland groups.
+- **Imprints:** 57, of which 53 are L0 faults. The oldest started at the start of L0's run.
+- **Response time:** a median of 54 Myr across the land; 90% of cells are under 206 Myr. Headwaters in desert, with almost no runoff, reach over 1,000 Myr.
+- **Sizes and cost:** the summary is 0.83 MB of JSON and the largest tile 1.7 MB. Building it all takes 0.8 s.
+
+### 5.6 What it does not do yet
 
 - **Coupling to L0 is one-way.** L0 does not see the sheet's deformation.
 - **Sutures stop the crumpling.** When L0 welds two plates, their markers get the same velocity, so a collision crumples the crust only until L0 welds it. That is L0's rule, and L1 inherits it.
 - **Crust created during the window is missing.** Arcs that become continent and shelves that emerge have no markers.
 - **Ocean is outside the sheet.** Continental crust is the only material.
 - **Erosion during the sheet** is a smooth function of elevation, and eroded rock leaves the system instead of filling basins.
-- **The drainage pass** has uniform rain and erodibility.
+- **The drainage pass** has uniform erodibility (by design: section 6, item 3).
+- **Fault traces in the handoff** are L0's, at 100 km cells, where L0's rigid plates put them. In crumple zones the sheet has moved the crust by up to the shortening.
+- **L0's event catalogue is not in the handoff.** Its locations are where events happened at the time, and the continents have moved since.
 - **Cost.** The conjugate-gradient solve is the cost: a multigrid preconditioner, or a Web Worker, would make large landmasses quicker.
 
 ## 6. Sketches of the levels below
@@ -432,13 +499,13 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 
 **B. The L1→L2 handoff**
 
-5. **Schema.** Passes are ordered by the age of the event they represent, oldest first. Every imprint carries its event class and age, plus a table of lifetimes by erasure mechanism (hillslope blurring, σ = √(2Dt); knickpoints sweeping up the network; lakes filling). Each basin tile carries:
+5. ~~**Schema.**~~ Done (section 5.5), without the glaciation record (item 4 is not built). Passes are ordered by the age of the event they represent, oldest first. Every imprint carries its event class and age, plus a table of lifetimes by erasure mechanism (hillslope blurring, σ = √(2Dt); knickpoints sweeping up the network; lakes filling). Each basin tile carries:
    - its outlet and drainage graph;
    - whether it drains inland or to the sea;
    - rock stacks;
    - finite strain and vergence in crumple zones;
    - its glaciation record, if any.
-6. **Export** and a basin-tile view in the page.
+6. ~~**Export** and a basin-tile view in the page.~~ Done: the **L2 tiles** view, a tile summary on tap, and downloads of the landmass summary and of one tile.
 
 **C. L0 additions (recording only)**
 

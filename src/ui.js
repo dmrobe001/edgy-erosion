@@ -312,7 +312,7 @@ const LUT_DYN=buildLut(DYN_STOPS,256,-1,0.6),RAIN_STOPS=[[-1.3,"#96703c"],[-0.7,
 const LUT_RAIN=buildLut(RAIN_STOPS,256,-1.3,0.5),LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
 function l1Reset(){l1Picking=false;l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
-  $("l1Info").innerHTML=`<div class="muted">No landmass picked yet.</div>`;}
+  $("l1Info").innerHTML=`<div class="muted">No landmass picked yet.</div>`;l1TileSel=-1;l1TileInfo();}
 // the newest saved state at least a window before the present
 const l1Entry=win=>{for(let k=snaps.length-1;k>=0;k--)if(snaps[k].t<=world.t-win-1e-9)return snaps[k];return null;};
 // a pick (or a finished run) belongs to this moment of L0; once L0 moves on, the pick is cleared and the result kept
@@ -356,9 +356,9 @@ function l1Tick(){const S=l1St,w=world;colorsDirty=true;
   if(S.phase==="basins"){l1Prog("Tectonics frozen: 5 Myr of erosion on a 10 km grid to settle the drainage basins…");
     // the frame draws the message first; the pass itself runs on the next one
     if(!S.basinsDue){S.basinsDue=true;return;}
-    const t0=performance.now();S.bs=L1.basins(S.sh);S.bsMs=performance.now()-t0;w.untrackParcels();
+    const t0=performance.now();S.bs=L1.basins(S.sh);S.bsMs=performance.now()-t0;S.ho=L1.handoff(S.sh,S.bs);S.hoMs=performance.now()-t0-S.bsMs;w.untrackParcels();l1TileSel=-1;l1TileInfo();
     S.phase="done";const el=$("l1Prog");if(el)el.remove();$("l1Pick").disabled=false;l1Mask=null;l1View="basins";l1SetViews();l1Pix=null;l1Legend();l1Render();l1Stats();updateUi();}}
-function l1SetViews(){const has=!!(l1St&&l1St.bs);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v==="basins"||x.dataset.v==="rain")x.disabled=!has;x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
+function l1SetViews(){const has=!!(l1St&&l1St.bs);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v==="basins"||x.dataset.v==="rain")x.disabled=!has;if(x.dataset.v==="tiles")x.disabled=!(l1St&&l1St.ho);x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
 // canvas geometry: the sheet's grid, zoomed and panned; per pixel its map-plane point
 function l1Size(){const sh=l1St.sh,wrap=$("l1wrap"),X0=sh.x0,X1=sh.x0+sh.nx*sh.o.h,Y0=sh.y0,Y1=sh.y0+sh.ny*sh.o.h,asp=Math.min(1.3,Math.max(0.45,(Y1-Y0)/(X1-X0)));
   wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp);
@@ -406,9 +406,15 @@ function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
         if(!col){const big=bsize.get(id)>=l1BasinMin(),u=(Math.imul(id+1,2654435761)>>>0)/4294967296;col=bs.closedB[f]===2?[226,208,164]:bs.closedB[f]?hsl(25+30*u,35,52+14*((u*13)%1)):big?hsl(u*360,45+20*((u*7)%1),58+12*((u*13)%1)):[205,200,188];bcol.set(id,col);}
         r=col[0]*sh_;g=col[1]*sh_;b=col[2]*sh_;}
       else{let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}}
+    // L2 tiles: one colour per tile (the selected one bright, the rest faded when one is selected); edges with another
+    // tile dark where the divide is firm (set by relief the sheet resolved), pale where it is contingent
+    else if(l1View==="tiles"){const ho=S.ho;if(f>=0&&bs.land[f]&&ho.tileOf[f]>=0){const k=ho.tileOf[f],u=(Math.imul(k+7,2654435761)>>>0)/4294967296;let col=hsl(u*360,40+20*((u*7)%1),60+12*((u*13)%1));
+        if(l1TileSel>=0&&k!==l1TileSel){const m=(col[0]+col[1]+col[2])/3;col=[0.3*col[0]+0.7*m,0.3*col[1]+0.7*m,0.3*col[2]+0.7*m];}
+        r=col[0]*sh_;g=col[1]*sh_;b=col[2]*sh_;const dv=ho.divide[f];if(dv===2){r=45;g=38;b=34;}else if(dv===1){r=0.45*r+140;g=0.45*g+140;b=0.45*b+140;}}
+      else{let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}}
     // rivers carrying what 20,000 km² of land at 0.3 m/yr of runoff would (the drainage pass draws them; the sheet
     // has none), and lakes: open (blue), closed (pale blue), dry lake floors (white)
-    if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins"||l1View==="rain")){const A=bs.climate?bs.Q[f]/0.3:bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
+    if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins"||l1View==="rain"||l1View==="tiles")){const A=bs.climate?bs.Q[f]/0.3:bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
       if(a>0){r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}}
     if(land&&f>=0&&bs.lake[f]&&l1View!=="thick"&&l1View!=="strain"&&l1View!=="finite"&&l1View!=="dyn"){const L=[null,[52,104,190],[120,196,214],[238,234,222],[214,178,112]][bs.lake[f]];r=L[0];g=L[1];b=L[2];}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
@@ -432,6 +438,7 @@ function l1Legend(){const L=$("l1legend");
   else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Topmost unit of the markers in each cell, by volume.</span>`;
   else if(l1View==="dyn")L.innerHTML=`<span class="num">−1 km</span><span class="bar" style="background:${gradCss(DYN_STOPS,-1,0.6)}"></span><span class="num">+0.6 km</span><span>Dynamic topography: slabs sinking into the mantle beneath recent subduction pull the surface down; return flow lifts it elsewhere. Included in the elevation.</span>`;
   else if(l1View==="rain")L.innerHTML=`<span class="num">50 mm</span><span class="bar" style="background:${gradCss(RAIN_STOPS,-1.3,0.5)}"></span><span class="num">3 m/yr</span><span>Yearly rain from a crude climate: latitude belts, zonal winds, moisture raining out inland and over relief (wet windward slopes, rain shadows).</span>`;
+  else if(l1View==="tiles")L.innerHTML=`<span><i class="swatch" style="background:#2d2622"></i>firm divide</span><span><i class="swatch" style="background:#d8d4cc"></i>contingent divide</span><span>The tiles L1 hands to L2: each drainage basin of at least 10,000 km², and smaller basins grouped with their neighbours into tiles of about that size. Water leaves a tile only at its outlets. A divide is firm where its relief exceeds what the stand-in fine relief could make: re-seeding that relief, 77% of firm divides stay within 30 km, against about half of the others, which L2 may move. Tap a tile for its summary and download.</span>`;
   else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast; basins that drain inland, to a lake with no outlet or where their river runs dry, are in muted earth tones, and desert whose water never reaches a river is sand-coloured. Smaller coastal basins are grey. Lakes: blue if they overflow, pale blue if they have no outlet, white for dry lake floors; tan dots where rivers run dry in the desert. These are the tiles for L2.</span>`;}
 function l1MaxShort(sh){const sf=sh.strainField();let m=0;for(let c=0;c<sf.lmin.length;c++)if(!isNaN(sf.lmin[c])&&1-sf.lmin[c]>m)m=1-sf.lmin[c];return Math.round(100*m);}
 function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[sh.history.length-1],h0=sh.history[0],b=sh.budget,bal=sh.balance(),M=v=>`${(v/1e6).toFixed(2)} M km³`;
@@ -458,8 +465,24 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
     if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr, mantle pull ${Math.round(sh.dyn[c]*1000)} m${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
     if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km² that ${["reaches the sea","drains inland","never reaches a river (desert)"][bs.closedB[f]]}`;if(bs.climate)t+=`; rain ${Math.round(bs.climate.P[f]*1000)} mm/yr, runoff ${Math.round(bs.climate.R[f]*1000)} mm/yr`;if(bs.lake[f])t+=["","; a lake that overflows","; a lake with no outlet","; a dry lake floor","; where a river runs dry"][bs.lake[f]];if(bs.inlandSea[f])t+=" (a sea cut off from the ocean)";}
+    if(l1View==="tiles"&&f>=0&&bs&&bs.land[f]&&l1St.ho){const k=l1St.ho.tileOf[f];if(k>=0&&k!==l1TileSel){l1TileSel=k;l1TileInfo();l1Render();}}
     box.textContent=t;}
   box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}
+// the L1 -> L2 handoff: the selected tile's summary, and downloads of the landmass summary and of one tile's fields
+let l1TileSel=-1;
+function l1TileInfo(){const box=$("l1tile"),dl=$("l1dl"),ho=l1St&&l1St.ho;if(!ho){box.hidden=true;dl.hidden=true;return;}
+  dl.hidden=false;$("l1DlTile").disabled=l1TileSel<0;box.hidden=false;
+  const nF=ho.tiles.length,firm=ho.tiles.reduce((a,T)=>a+T.divides.reduce((s,d)=>s+d.firmKm,0),0),all=ho.tiles.reduce((a,T)=>a+T.divides.reduce((s,d)=>s+d.lengthKm,0),0);
+  let html=`<div><b>L2 handoff</b>: ${nF} tiles, ${ho.imprints.length} imprints (oldest first: ${ho.imprints.slice(0,3).map(I=>(I.kind?I.kind+" ":"")+I.class+" from "+I.startMa+" Ma").join(", ")}…); ${all?Math.round(100*firm/all):0}% of the divides between tiles are firm. (${Math.round(l1St.hoMs)} ms.)</div>`;
+  if(l1TileSel>=0){const T=ho.tiles[l1TileSel],o=T.outlets,sea=o.filter(x=>x.kind==="sea"),inl=o.length-sea.length,fd=T.divides.reduce((s,d)=>s+d.firmKm,0),ad=T.divides.reduce((s,d)=>s+d.lengthKm,0),fmt=v=>v.toLocaleString("en-US");
+    html+=`<div><b>Tile ${T.id}</b>, ${T.kind}: ${fmt(T.areaKm2)} km², ${T.meanElevationM} m mean elevation (highest ${fmt(T.maxElevationM)} m)${T.meanRainMmYr!=null?`, ${T.meanRainMmYr} mm/yr of rain`:""}. ${sea.length?`${sea.length} outlet${sea.length>1?"s":""} to the sea (largest ${fmt(Math.round(sea[0].dischargeM3s))} m³/s)`:"No outlet to the sea"}${inl?`, ${inl} ending inland`:""}${T.lakes.length?`; ${T.lakes.length} lake${T.lakes.length>1?"s":""}`:""}. Divides with ${T.divides.length} tile${T.divides.length===1?"":"s"}, ${ad?Math.round(100*fd/ad):0}% firm. A change at the outlet takes a median ${T.responseMyr.median} Myr to reach a cell (at most ${T.responseMyr.max}). ${T.maxShortening>=0.05?`Shortened up to ${Math.round(100*T.maxShortening)}% in the window. `:""}${T.imprints.length} imprints: ${T.imprints.map(k=>{const I=ho.imprints[k];return(I.kind?I.kind+" ":"")+I.class+" "+I.startMa+"–"+I.endMa+" Ma";}).join("; ")}.</div>`;}
+  else html+=`<div class="muted">Open the L2 tiles view and tap a tile to see its summary and download it.</div>`;
+  box.innerHTML=html;}
+async function l1Save(kind){const d=await downloadsP,note=$("l1DlNote"),ho=l1St&&l1St.ho;if(!ho)return;if(!d){note.textContent="File downloads aren’t available in this view.";return;}
+  const base=`l1-${($("seed").value||"genesis").replace(/[^a-z0-9-]/gi,"_")}-${Math.round(ho.meta.presentMyr)}myr`,data=JSON.stringify(kind==="tile"?ho.tile(l1TileSel):ho.summary());
+  try{await d.save({filename:kind==="tile"?`${base}-tile${l1TileSel}.json`:`${base}-landmass.json`,data});note.textContent="Saved.";}
+  catch(err){note.textContent=err&&err.code==="declined"?"Download cancelled.":"The download didn’t go through.";}}
+$("l1DlTile").onclick=()=>{if(l1TileSel>=0)l1Save("tile");};$("l1DlAll").onclick=()=>l1Save("all");
 build();updateLegend();requestAnimationFrame(frame);
 </script>
 </body>

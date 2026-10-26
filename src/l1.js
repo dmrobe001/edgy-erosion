@@ -559,11 +559,11 @@ function basins(sheet,o){
   for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];if(!isLake(l))continue;exitOf[l]=r!==l&&isLake(r)?exitOf[r]:l;}
   for(let c=0;c<nc;c++)if(exitOf[c]>=0){const x=exitOf[c];lakeArea[x]+=h*h;lakeVol[x]+=Math.max(0,fl[c]-e[c])*h*h;if(cl)lakeLoss[x]+=(cl.E[c]-cl.P[c])*h*h;lake[c]=1;}
   // Down the network from the top: area, discharge (runoff, minus channel losses) and sediment
-  const filled=new Uint8Array(nc),qOut=new Float64Array(nc);
+  const filled=new Uint8Array(nc),qOut=new Float64Array(nc),sedIn=new Float64Array(nc);
   for(let q=stack.length-1;q>=0;q--){const l=stack[q];A[l]+=h*h;
     if(land[l]){if(cl)Q[l]+=cl.R[l]*h*h;sed[l]+=(ero[l]+o.bgDenudation*(cl?langbeinSchumm(cl.P[l]):1)*o.myr)*h*h;}
     let lk=lakeArea[l]>0&&rec[l]!==l;
-    if(lk){if(sed[l]>=lakeVol[l]&&!inlandSea[l]){sed[l]-=lakeVol[l];filled[l]=1;lk=false;}else sed[l]=0;}
+    if(lk){sedIn[l]=sed[l];if(sed[l]>=lakeVol[l]&&!inlandSea[l]){sed[l]-=lakeVol[l];filled[l]=1;lk=false;}else sed[l]=0;}
     if(lk&&cl&&Q[l]<=lakeLoss[l]){rec[l]=l;nClosed++;lake[l]=2;continue;}
     let qs=lk&&cl?Math.max(0,Q[l]-lakeLoss[l]):Q[l];
     // channel losses in dry country: flood pulses soak into beds and floodplains, about the same per km whatever the
@@ -588,8 +588,166 @@ function basins(sheet,o){
     for(let c=0;c<nc;c++){if(!land[c])continue;const t=basin[c];if(!out[t]&&lake[t]>=2)closedB[c]=1;else if(dead[c])closedB[c]=2;}}
   for(let c=0;c<nc;c++)if(land[c]){const id=basin[c];size.set(id,(size.get(id)||0)+1);}
   const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,areic=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;if(closedB[c]===2)areic++;}
-  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,rec,basin,lake,closedB,inlandSea,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
+  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,qOut,rec,basin,lake,closedB,inlandSea,exitOf,lakeVol,sedIn,K:o.K,m:o.m,myr:o.myr,relief:o.relief,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
+// ---------- the L1 -> L2 handoff ----------
+// L1 hands L2 its landmass cut into tiles, with what L2 needs to refine each tile on its own:
+// - Tiles are drainage basins, so water never crosses a tile edge except at an outlet. Each basin of at least tileKm2
+//   is a tile; smaller basins (coastal strips, small inland sinks) are grouped with their neighbours into tiles of
+//   about that size. A tile lists its outlets, lakes, and the divides it shares with each neighbouring tile.
+// - Fields come at the resolution they were computed: the drainage pass's fine grid (elevation, receivers,
+//   discharge, climate, uplift, knickpoint response time) and the sheet's coarse grid (thickness, finite strain,
+//   mantle pull, denudation, and the rock stacks of the L0 parcels present).
+// - Imprints: what happened to the landmass, each with its class and age (Ma, before the present), oldest first, so
+//   L2 can apply them in order (younger structures cut older ones). Structural imprints (rock juxtaposed at a fault,
+//   strain fabric) last until erosion strips the rock that carries them; topographic ones decay, at the rates in the
+//   lifetimes table.
+const LAT=(v)=>[Math.asin(Math.max(-1,Math.min(1,v[2])))*180/Math.PI,Math.atan2(v[1],v[0])*180/Math.PI];
+const D8=["E","W","N","S","NE","NW","SE","SW"],M3S=1e6/3.15576e7; // planarGrid's neighbour order; (m/yr x km^2) -> m^3/s
+function handoff(sheet,B,o){
+  o=Object.assign({tileKm2:1e4,D:0.01,parcels:3},o);
+  const w=sheet.world,{nx,ny,h,land,rec,basin,lake,closedB,e,Q}=B,nc=nx*ny,S=B.S,cl=B.climate,minCells=Math.round(o.tileKm2/(h*h)),f=Math.round(sheet.o.h/h);
+  const now=w.t,window=sheet.t,r1=v=>Math.round(v*10)/10,r2=v=>Math.round(v*100)/100,r3=v=>Math.round(v*1000)/1000;
+  // tiles: major basins, then minor basins grown over their neighbours (first cell order, breadth first) to minCells
+  const size=new Map(),first=[];for(let c=0;c<nc;c++)if(land[c]){const b=basin[c];if(!size.has(b)){size.set(b,0);first.push(b);}size.set(b,size.get(b)+1);}
+  const tOf=new Map(),tiles=[],minor=b=>size.get(b)<minCells,adj=new Map();
+  for(const b of first)if(!minor(b)){tOf.set(b,tiles.length);tiles.push({basins:[b],major:true,n:size.get(b)});}
+  // basin adjacency (8 neighbours; count of contacts), for growing groups and placing leftovers
+  const link=(a,b)=>{let m=adj.get(a);if(!m)adj.set(a,m=new Map());m.set(b,(m.get(b)||0)+1);};
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i;if(!land[c])continue;const a=basin[c];
+    for(const d of [i<nx-1?1:0,j<ny-1?nx:0,i<nx-1&&j<ny-1?nx+1:0,i>0&&j<ny-1?nx-1:0]){if(!d)continue;const b=basin[c+d];if(land[c+d]&&b!==a){link(a,b);link(b,a);}}}
+  const nbrs=b=>adj.has(b)?[...adj.get(b).keys()].sort((x,y)=>x-y):[];
+  for(const b of first){if(!minor(b)||tOf.has(b))continue;const id=tiles.length,T={basins:[b],major:false,n:size.get(b)};tOf.set(b,id);tiles.push(T);
+    for(let q=0;q<T.basins.length&&T.n<minCells;q++)for(const x of nbrs(T.basins[q])){if(tOf.has(x)||!minor(x))continue;tOf.set(x,id);T.basins.push(x);T.n+=size.get(x);if(T.n>=minCells)break;}}
+  // groups boxed in below half the size join the neighbouring tile they share the longest boundary with (a union of
+  // whole basins is still closed to water); isolated islands stay as they are
+  for(const T of tiles){if(T.major||T.n>=minCells/2||!T.basins.length)continue;const id=tOf.get(T.basins[0]),con=new Map();
+    for(const b of T.basins)if(adj.has(b))for(const [x,cnt] of adj.get(b)){const k=tOf.get(x);if(k!==id)con.set(k,(con.get(k)||0)+cnt);}
+    let best=-1,bc=0;for(const [k,cnt] of con)if(cnt>bc||cnt===bc&&k<best){bc=cnt;best=k;}
+    if(best>=0){for(const b of T.basins){tOf.set(b,best);tiles[best].basins.push(b);}tiles[best].n+=T.n;T.basins=[];T.n=0;}}
+  const keep=[],remap=new Int32Array(tiles.length).fill(-1);tiles.forEach((T,k)=>{if(T.basins.length){remap[k]=keep.length;keep.push(T);}});
+  const tileOf=new Int32Array(nc).fill(-1);for(let c=0;c<nc;c++)if(land[c])tileOf[c]=remap[tOf.get(basin[c])];
+  // knickpoint response time: the time a change in base level takes to travel up the network from the outlet, at the
+  // celerity of stream power with n = 1, K (A_w)^m, A_w the climate-weighted drainage area (as in the pass)
+  const Aw=new Float64Array(nc),tau=new Float64Array(nc),stack=S.stack.subarray(0,S.ns);let mr=1;
+  if(cl){let s=0,n=0;for(let c=0;c<nc;c++)if(land[c]){s+=cl.R[c];n++;}mr=s/(n||1)||1;}
+  for(let q=stack.length-1;q>=0;q--){const l=stack[q];Aw[l]+=h*h*(cl?cl.R[l]/mr:1);const r=rec[l];if(r!==l)Aw[r]+=Aw[l];}
+  for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];tau[l]=r===l||!land[l]?0:tau[r]+S.rdist[l]/(B.K*Math.pow(Math.max(Aw[l],1e-9),B.m));}
+  // the sheet's fields: finite strain, present denudation, and per sheet cell the L0 parcels present (by volume)
+  const sf=sheet.strainField(),{o:so}=sheet,snx=sheet.nx,sny=sheet.ny,H=so.h,snc=snx*sny,deno=new Float64Array(snc),arcWin=new Float64Array(snc);
+  for(let c=0;c<snc;c++)deno[c]=sheet.act[c]&&sheet.e[c]>0?so.ero5*Math.pow(sheet.e[c]/5,so.eroExp):0;
+  const cellP=new Array(snc),t0=sheet.t0;
+  for(let k=0;k<sheet.nm;k++){if(!sheet.mIn[k])continue;const i=Math.floor((sheet.mx[k]-sheet.x0)/H),j=Math.floor((sheet.my[k]-sheet.y0)/H),c=j*snx+i,v=sheet.mS[k]*sheet.mA[k],pid=sheet.mPid[k];
+    let m=cellP[c];if(!m)m=cellP[c]=new Map();const p=m.get(pid);if(!p)m.set(pid,{v,best:k,bv:v,S:v*sheet.mS[k]});else{p.v+=v;p.S+=v*sheet.mS[k];if(v>p.bv){p.bv=v;p.best=k;}}
+    for(const u of sheet.mCol[k])if(u[0]===SIM.ROCK.ARC&&u[1]>=t0-1e-9)arcWin[c]+=u[2]*v/(H*H);}
+  const stacksAt=c=>{const m=cellP[c];if(!m)return[];let tot=0;for(const p of m.values())tot+=p.v;
+    return [...m.entries()].sort((a,b)=>b[1].v-a[1].v||a[0]-b[0]).slice(0,o.parcels).map(([pid,p])=>{const S0=p.S/p.v;
+      return{parcel:pid,share:r3(p.v/tot),thicknessKm:r1(S0),units:sheet.mCol[p.best].map(u=>[SIM.ROCK_NAMES[u[0]],r1(now-u[1]),r2(u[2]*S0)])};});};
+  // map plane <-> the present world frame (L0's): world = Qref . inv(x, y)
+  const Qr=sheet.Qref,b=[0,0,0],t3=[0,0,0],toLL=(x,y)=>{sheet.proj.inv(x,y,b);mv(Qr,b[0],b[1],b[2],t3);const ll=LAT(t3);return[r2(ll[0]),r2(ll[1])];};
+  const fineAt=(x,y)=>{const i=Math.floor((x-B.x0)/h),j=Math.floor((y-B.y0)/h);return i<0||j<0||i>=nx||j>=ny?-1:j*nx+i;};
+  // Divides: a tile edge is firm where its local relief (height above the lowest land within one sheet cell) exceeds
+  // the peak-to-peak amplitude of the drainage pass's synthetic relief, 2 (relief + relief e); elsewhere contingent,
+  // and L2 may move it. How firm is graded, not sharp: re-seeding that relief on the 1 Gyr test landmass, a divide
+  // still lies between points 30 km either side of it 77% of the time where firm, 51-53% where contingent, and two
+  // random points as far apart straddle some divide 35% of the time (meta.dividePersistence has it by relief).
+  const Rw=Math.max(1,Math.round(H/h)),mn1=new Float64Array(nc),rel=new Float64Array(nc),divide=new Uint8Array(nc);
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let m=Infinity;for(let k=-Rw;k<=Rw;k++){const ii=i+k;if(ii<0||ii>=nx)continue;const c=j*nx+ii;if(land[c]&&e[c]<m)m=e[c];}mn1[j*nx+i]=m;}
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let m=Infinity;for(let k=-Rw;k<=Rw;k++){const jj=j+k;if(jj<0||jj>=ny)continue;m=Math.min(m,mn1[jj*nx+i]);}const c=j*nx+i;rel[c]=land[c]?e[c]-m:0;}
+  const firmAt=(a,c)=>{const r=Math.max(rel[a],rel[c]),ec=Math.max(0,e[a],e[c]);return r>2*B.relief*(1+ec);};
+  // per tile: extent, area, outlets, lakes, divides, summaries
+  const R=keep.map((T,id)=>({id,kind:"",major:T.major,cells:0,i0:nx,j0:ny,i1:-1,j1:-1,sx:0,sy:0,eMax:-1e9,eSum:0,rain:0,inland:0,areic:0,tauMax:0,tauL:[],shorten:0,arc:0,dynMin:1e9,dynMax:-1e9,coast:0,div:new Map(),outlets:[],lakes:[],imprints:[]}));
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i,k=tileOf[c];if(k<0)continue;const T=R[k];T.cells++;T.i0=Math.min(T.i0,i);T.j0=Math.min(T.j0,j);T.i1=Math.max(T.i1,i);T.j1=Math.max(T.j1,j);
+    T.sx+=i;T.sy+=j;T.eMax=Math.max(T.eMax,e[c]);T.eSum+=e[c];if(cl)T.rain+=cl.P[c];if(closedB[c])T.inland++;if(closedB[c]===2)T.areic++;T.tauMax=Math.max(T.tauMax,tau[c]);T.tauL.push(tau[c]);
+    const sc=Math.floor(j/f)*snx+Math.floor(i/f);if(!isNaN(sf.lmin[sc]))T.shorten=Math.max(T.shorten,1-sf.lmin[sc]);T.arc=Math.max(T.arc,arcWin[sc]);if(sheet.act[sc]){T.dynMin=Math.min(T.dynMin,sheet.dyn[sc]);T.dynMax=Math.max(T.dynMax,sheet.dyn[sc]);}
+    for(const d of [i<nx-1?1:0,j<ny-1?nx:0,i>0?-1:0,j>0?-nx:0]){if(!d)continue;const n2=c+d;if(!land[n2]){T.coast+=h;continue;}const k2=tileOf[n2];if(k2===k)continue;
+      const p=Math.max(e[c],e[n2]),fm=firmAt(c,n2),dv=T.div.get(k2);divide[c]=Math.max(divide[c],fm?2:1);if(!dv)T.div.set(k2,{len:h,pass:p,firm:fm?h:0});else{dv.len+=h;dv.pass=Math.min(dv.pass,p);if(fm)dv.firm+=h;}}}
+  const xKm=i=>B.x0+(i+.5)*h,yKm=j=>B.y0+(j+.5)*h;
+  for(const T of R){const K=keep[T.id];
+    for(const bId of K.basins){const r=bId,ri=r%nx,rj=(r/nx)|0,kind=!land[r]?"sea":lake[r]===2?"closed lake":lake[r]===4?"river runs dry":S.sink&&S.sink[r]?"enclosed sink":"sea";
+      T.outlets.push({kind,xKm:r1(xKm(ri)),yKm:r1(yKm(rj)),latLon:toLL(xKm(ri),yKm(rj)),areaKm2:Math.round(size.get(bId)*h*h),dischargeM3s:r2(Q[r]*M3S)});}
+    T.outlets.sort((a,b2)=>b2.areaKm2-a.areaKm2);
+    T.kind=T.major?(T.outlets[0].kind==="sea"?"drains to the sea":"drains inland"):T.outlets.some(x=>x.kind==="sea")?"coastal strip":"inland group";}
+  // lakes: connected water (open, closed, or the dry floor of a shrunk lake), with their fill time by the sediment
+  // reaching them (river erosion and background denudation over the pass)
+  {const seen=new Uint8Array(nc);for(let c=0;c<nc;c++){if(seen[c]||!(lake[c]>=1&&lake[c]<=3)||tileOf[c]<0)continue;const q=[c];seen[c]=1;let water=0,playa=0,closed=false,x=-1;
+      for(let k=0;k<q.length;k++){const a=q[k];if(lake[a]===3)playa++;else water++;if(lake[a]===2)closed=true;if(B.exitOf[a]>=0)x=B.exitOf[a];const ai=a%nx,aj=(a/nx)|0;
+        for(const d of [ai>0?-1:0,ai<nx-1?1:0,aj>0?-nx:0,aj<ny-1?nx:0])if(d&&!seen[a+d]&&lake[a+d]>=1&&lake[a+d]<=3){seen[a+d]=1;q.push(a+d);}}
+      const vol=x>=0?B.lakeVol[x]:0,rate=x>=0?B.sedIn[x]/B.myr:0,T=R[tileOf[c]];
+      T.lakes.push({kind:closed?"no outlet":"open",inlandSea:!!B.inlandSea[c],waterKm2:water*h*h,dryFloorKm2:playa*h*h,volumeKm3:r1(vol),fillMyr:rate>0?r1(vol/rate):null,xKm:r1(xKm(c%nx)),yKm:r1(yKm((c/nx)|0))});}}
+  // imprints, oldest first
+  const imprints=[],add=(I,ts)=>{I.id=imprints.length;I.tiles=[...ts].sort((a,b2)=>a-b2);imprints.push(I);for(const k of I.tiles)R[k].imprints.push(I.id);};
+  {const hf=w.extractFaults(),xy=[0,0];
+    for(const F of hf.faults){const pts=F.trace.map(v=>{mtv(Qr,v[0],v[1],v[2],b);sheet.proj.fwd(b,xy);return[xy[0],xy[1]];}),ts=new Set();
+      for(let q=0;q+1<pts.length;q++){const [ax,ay]=pts[q],[bx,by]=pts[q+1],n=Math.max(1,Math.ceil(Math.hypot(bx-ax,by-ay)/(h/2)));
+        for(let s=0;s<=n;s++){const c=fineAt(ax+(bx-ax)*s/n,ay+(by-ay)*s/n);if(c>=0&&tileOf[c]>=0)ts.add(tileOf[c]);}}
+      if(!ts.size)continue;
+      add({class:"fault",startMa:r1(F.startMa),endMa:r1(F.endMa),ongoing:F.active,leaves:["structure","relief"],kind:F.kindName,sense:F.sense,slipAcrossKm:r1(F.slipAcrossKm),slipAlongKm:r1(F.slipAlongKm),
+        traceKm:pts.map(p=>[r1(p[0]),r1(p[1])])},ts);}}
+  const tsWhere=fn=>R.filter(fn).map(T=>T.id),ongoingStrain=(()=>{let m=0;for(let c=0;c<snc;c++)if(sheet.act[c])m=Math.max(m,sheet.eps[c]);return m>0.05*sheet.e0;})();
+  add({class:"crumpling",startMa:r1(window),endMa:0,ongoing:ongoingStrain,leaves:["structure","relief"],note:"finite strain of the sheet over L1's window: coarse fields shortening, stretch, direction, rotation"},tsWhere(T=>T.shorten>0.1));
+  add({class:"volcanism",startMa:r1(window),endMa:0,ongoing:true,leaves:["rock","relief"],note:"arc and hotspot rock added during the window: coarse field arcAddedKm, and the top units of the stacks"},tsWhere(T=>T.arc>0.1));
+  add({class:"mantle pull",startMa:r1(SIM.C.SLAB_BINS*SIM.C.SLAB_DT),endMa:0,ongoing:true,leaves:["relief"],note:"dynamic topography from slabs subducted over this span; already in the elevations; coarse field mantlePullKm"},tsWhere(()=>true));
+  add({class:"drainage",startMa:r1(B.myr),endMa:0,ongoing:true,leaves:["relief","water"],note:"the river network, lakes and inland drainage settled by the drainage pass"},tsWhere(()=>true));
+  imprints.sort((a,b2)=>b2.startMa-a.startMa||b2.endMa-a.endMa);const reid=new Map();imprints.forEach((I,k)=>{reid.set(I.id,k);I.id=k;});for(const T of R)T.imprints=T.imprints.map(x=>reid.get(x)).sort((a,b2)=>a-b2);
+  // lifetimes of topographic imprints, by erasure mechanism
+  const p=so.eroExp,a5=so.ero5/Math.pow(5,p),half=(k,e0)=>r1(Math.pow(e0,1-p)*(Math.pow(2,p-1)-1)/(k*a5*(p-1)));
+  const lifetimes=[
+    {mechanism:"hillslope blurring",appliesTo:"features narrower than a valley: scarps, small cones, terrace risers",law:"a feature blurs over a width sigma = sqrt(2 D t), so a feature of width w lasts about w^2 / (2 D)",
+      params:{D_km2PerMyr:o.D,note:"D in km^2/Myr equals D in m^2/yr; soil-mantled hillslopes range about 0.001-0.05 (literature value, not simulated)"},
+      examples:[0.1,0.3,1].map(wk=>({widthKm:wk,lifetimeMyr:r1(wk*wk/(2*o.D))}))},
+    {mechanism:"knickpoint sweep",appliesTo:"a change at the outlet (base level, capture, a fault scarp crossing a river): it travels up the network and is gone below the knickpoint",
+      law:"celerity K A_w^m (stream power with n = 1); a cell's response time is the integral of distance / celerity from its outlet: fine field responseMyr",
+      params:{K:B.K,m:B.m,note:"A_w is drainage area weighted by runoff relative to the land mean, km^2; K is L1's drainage-pass value, not calibrated to absolute rates"},
+      examples:[100,1e4,1e6].map(A=>({areaKm2:A,celerityKmPerMyr:r1(B.K*Math.pow(A,B.m))}))},
+    {mechanism:"relief decay",appliesTo:"mountains and plateaus as a whole",law:"L1's denudation law, rate = ero5 (e / 5 km)^p of rock; wide relief is isostatically compensated (the surface drops (1 - root share) of what is eroded), narrow relief is not; half-life from elevation e0",
+      params:{ero5KmPerMyr:so.ero5,p,rootShare:r2(ROOT)},
+      examples:[0.5,1,3].map(e0=>({elevationKm:e0,halfLifeWideMyr:half(1-ROOT,e0),halfLifeNarrowMyr:half(1,e0)}))},
+    {mechanism:"lake filling",appliesTo:"lakes and enclosed seas",law:"volume / sediment supply (river erosion plus background denudation in the catchment): per lake, fillMyr",params:{}},
+    {mechanism:"stripping",appliesTo:"rock units at the surface",law:"a unit of thickness d at the surface lasts about d / denudation: coarse field denudationKmPerMyr",params:{}}];
+  const ref=toLL(0,0),north=toLL(0,100);
+  const meta={generator:"L1 landmass (thin viscous sheet and drainage pass)",seed:w.opts.seed,presentMyr:r1(now),windowMyr:r1(window),
+    units:{distance:"km",age:"Ma, million years before the present",elevation:"m on the fine grid, km on the coarse grid",discharge:"m^3/s",rain:"mm/yr",rate:"mm/yr = km/Myr"},
+    frame:{projection:"azimuthal equidistant, co-moving with the landmass's reference plate",centreLatLon:ref,pointNorthOfCentre:north,
+      note:"x east, y north at the centre (km). Latitude and longitude are in L0's present frame (lat = asin z, lon = atan2(y, x))."},
+    grids:{fine:{cellKm:h,nx,ny,x0Km:B.x0,y0Km:B.y0,note:"cell (i, j) is centred at x0 + (i + 0.5) h, y0 + (j + 0.5) h"},coarse:{cellKm:H,nx:snx,ny:sny,x0Km:sheet.x0,y0Km:sheet.y0}},
+    tiles:`drainage basins of at least ${o.tileKm2} km^2; smaller basins grouped with neighbours into tiles of about that size`,
+    order:"imprints are listed oldest first (by start); L2 applies them in that order, so younger structures cut older ones",
+    permanence:"structure (rock juxtaposed at faults, strain fabric) lasts until the rock carrying it is eroded; relief decays as in lifetimes",
+    receivers:`receiver codes are the direction of steepest descent, ${D8.map((d,k)=>k+" "+d).join(", ")}; -1 is a basin end (lake with no outlet, river that runs dry, enclosed sink)`,
+    divides:"a divide is firm where its local relief (height above the lowest land within one coarse cell) exceeds the peak-to-peak amplitude of the synthetic fine relief, 2 x "+B.relief+" x (1 + elevation in km); elsewhere it is contingent and L2 may move it. firmKm is the firm length of each shared divide. Firmness is graded, not sharp: see dividePersistence",
+    dividePersistence:{test:"re-seeding the synthetic fine relief (two seeds) on the 1 Gyr test landmass: share of point pairs 30 km either side of a divide that still straddle a divide, against random pairs as far apart",
+      firm:0.77,contingent:0.52,byLocalReliefKm:[["0-0.2",0.45,0.25],["0.2-0.4",0.54,0.38],["0.4-0.8",0.67,0.45],["0.8-1.6",0.76,0.5],[">1.6",0.9,0.62]],columns:["relief","divides","random pairs"]},
+    caveats:["Which outlet a lowland cell reaches is contingent on relief the sheet cannot resolve (re-seeding that relief moves outlets a median 110-130 km); coasts and outlets to within a few hundred km are what L1 determines, and divides more firmly the more relief they have.",
+      "Fault traces are L0's (100 km cells), placed where L0's rigid plates put them; in crumple zones the sheet has moved the crust by up to the shortening.",
+      "Parcels in a coarse cell lie side by side (the sheet does not stack crust vertically); share is their share of the cell's volume."]};
+  const outTiles=R.map(T=>{const tl=T.tauL.sort((a,b2)=>a-b2);return{id:T.id,kind:T.kind,areaKm2:T.cells*h*h,
+    fine:{i0:T.i0,j0:T.j0,nx:T.i1-T.i0+1,ny:T.j1-T.j0+1},centreKm:[r1(xKm(T.sx/T.cells)),r1(yKm(T.sy/T.cells))],centreLatLon:toLL(xKm(T.sx/T.cells),yKm(T.sy/T.cells)),
+    maxElevationM:Math.round(T.eMax*1000),meanElevationM:Math.round(T.eSum/T.cells*1000),meanRainMmYr:cl?Math.round(T.rain/T.cells*1000):null,
+    inlandShare:r3(T.inland/T.cells),areicShare:r3(T.areic/T.cells),maxShortening:r2(T.shorten),arcAddedKm:r1(T.arc),mantlePullKm:[r2(T.dynMin),r2(T.dynMax)],
+    responseMyr:{median:r1(tl[tl.length>>1]||0),max:r1(T.tauMax)},coastKm:T.coast,
+    outlets:T.outlets,lakes:T.lakes,divides:[...T.div.entries()].sort((a,b2)=>a[0]-b2[0]).map(([k,d])=>({tile:k,lengthKm:d.len,firmKm:d.firm,passElevationM:Math.round(d.pass*1000)})),imprints:T.imprints};});
+  // one tile's fields: the fine window over its extent and the coarse cells under it
+  function tile(id){const T=outTiles[id],{i0,j0,nx:tx,ny:ty}=T.fine,n=tx*ty,F={inTile:new Array(n),elevationM:new Array(n),receiver:new Array(n),areaKm2:new Array(n),dischargeM3s:new Array(n),
+      lake:new Array(n),drainage:new Array(n),divide:new Array(n),rainMmYr:new Array(n),evaporationMmYr:new Array(n),upliftMmYr:new Array(n),responseMyr:new Array(n)};
+    for(let j=0;j<ty;j++)for(let i=0;i<tx;i++){const c=(j0+j)*nx+i0+i,q=j*tx+i,r=rec[c];let code=-1;
+      if(r!==c){const dx=r%nx-c%nx,dy=((r/nx)|0)-((c/nx)|0);code=D8.indexOf((dy>0?"N":dy<0?"S":"")+(dx>0?"E":dx<0?"W":""));}
+      F.inTile[q]=tileOf[c]===id?1:0;F.elevationM[q]=Math.round(e[c]*1000);F.receiver[q]=land[c]?code:-1;F.areaKm2[q]=Math.round(B.A[c]);F.dischargeM3s[q]=r3((land[c]?B.qOut[c]:Q[c])*M3S);
+      F.lake[q]=lake[c];F.drainage[q]=closedB[c];F.divide[q]=divide[c];F.rainMmYr[q]=cl?Math.round(cl.P[c]*1000):null;F.evaporationMmYr[q]=cl?Math.round(cl.E[c]*1000):null;F.upliftMmYr[q]=r3(B.U[c]);F.responseMyr[q]=r1(tau[c]);}
+    const si0=Math.floor(i0/f),sj0=Math.floor(j0/f),si1=Math.floor((i0+tx-1)/f),sj1=Math.floor((j0+ty-1)/f),cx=si1-si0+1,cy=sj1-sj0+1,G={i0:si0,j0:sj0,nx:cx,ny:cy,
+      crust:[],thicknessKm:[],thickeningKm:[],shortening:[],stretch:[],shorteningAzimuthDeg:[],rotationDeg:[],strainRatePerMyr:[],mantlePullKm:[],denudationKmPerMyr:[],arcAddedKm:[],stacks:[]};
+    for(let j=sj0;j<=sj1;j++)for(let i=si0;i<=si1;i++){const c=j*snx+i,a=sheet.act[c];G.crust.push(a);
+      G.thicknessKm.push(a?r1(sheet.S[c]):null);G.thickeningKm.push(a?r1(sheet.dS[c]):null);G.shortening.push(isNaN(sf.lmin[c])?null:r3(1-sf.lmin[c]));G.stretch.push(isNaN(sf.lmax[c])?null:r3(sf.lmax[c]-1));
+      // azimuth of the shortening direction, degrees clockwise from map north (0-180)
+      G.shorteningAzimuthDeg.push(isNaN(sf.lmin[c])?null:Math.round(((90-sf.dir[c]*180/Math.PI)%180+180)%180));G.rotationDeg.push(isNaN(sf.lmin[c])?null:r1(sf.rot[c]*180/Math.PI));
+      G.strainRatePerMyr.push(a?r3(sheet.eps[c]):null);G.mantlePullKm.push(a?r2(sheet.dyn[c]):null);G.denudationKmPerMyr.push(a?r3(deno[c]):null);G.arcAddedKm.push(a?r2(arcWin[c]):null);G.stacks.push(stacksAt(c));}
+    return{meta:{generator:meta.generator,seed:meta.seed,presentMyr:meta.presentMyr,tile:id,units:meta.units,frame:meta.frame,receivers:meta.receivers,
+        stacks:"per coarse cell, the L0 parcels present (largest first, up to "+o.parcels+"): share of the cell's crust, thickness, and units bottom to top as [rock, formed Ma, thickness km]",
+        drainage:"drainage: 0 reaches the sea, 1 ends inland (lake with no outlet or a river that runs dry), 2 areic (no water reaches a river); lake: 1 open, 2 no outlet, 3 dry floor of a shrunk lake, 4 where a river runs dry; divide: 1 a contingent edge with another tile (L2 may move it), 2 a firm one"},
+      tile:T,imprints:T.imprints.map(k=>imprints[k]),lifetimes,
+      fine:Object.assign({cellKm:h,i0,j0,nx:tx,ny:ty,x0Km:B.x0+i0*h,y0Km:B.y0+j0*h},F),coarse:Object.assign({cellKm:H,x0Km:sheet.x0+si0*H,y0Km:sheet.y0+sj0*H},G)};}
+  return{meta,lifetimes,imprints,tiles:outTiles,tileOf,divide,responseMyr:tau,tile,summary:()=>({meta,lifetimes,imprints,tiles:outTiles})};
+}
+return {Replay,Sheet,Projection,landmassAt,basins,handoff,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
 })();
 // ===== L1-END =====

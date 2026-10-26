@@ -195,6 +195,7 @@ button:disabled{opacity:.5;cursor:default}
         <button data-v="dyn" aria-pressed="false">Mantle pull</button>
         <button data-v="rain" aria-pressed="false" disabled>Rainfall</button>
         <button data-v="basins" aria-pressed="false" disabled>Drainage basins</button>
+        <button data-v="tiles" aria-pressed="false" disabled>L2 tiles</button>
       </div>
       <label><input type="checkbox" id="l1Rivers" checked> Rivers</label>
       <div class="seg" role="group" aria-label="Zoom" id="l1zoom">
@@ -204,6 +205,12 @@ button:disabled{opacity:.5;cursor:default}
     <div class="legend" id="l1legend"></div>
     <div class="stats" id="l1stats"></div>
     <div class="summary" id="l1budget"></div>
+    <div class="summary" id="l1tile" hidden></div>
+    <div class="row" id="l1dl" hidden>
+      <button id="l1DlTile" disabled>Download this tile</button>
+      <button id="l1DlAll">Download landmass summary</button>
+      <span class="muted" id="l1DlNote"></span>
+    </div>
   </section>
 
   <div class="cols">

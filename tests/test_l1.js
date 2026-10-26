@@ -135,5 +135,17 @@ check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "
   const Lup = new Float64Array(bs.land.length); for (let q = S.ns - 1; q >= 0; q--) { const l = S.stack[q], rc = S.rec[l]; if (rc !== l) Lup[rc] = Math.max(Lup[rc], Lup[l] + S.rdist[l]); }
   let n2 = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; const amin = 20 * bs.h * bs.h;
   for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l] || S.A[l] < amin || Lup[l] <= 0) continue; const X = Math.log(S.A[l]), Y = Math.log(Lup[l]); n2++; sx += X; sy += Y; sxx += X * X; sxy += X * Y; }
-  console.log(`Hack's law: length ~ area^${((n2 * sxy - sx * sy) / (n2 * sxx - sx * sx)).toFixed(2)} over ${n2} cells (Earth's rivers: roughly 0.5-0.6)`); }
+  console.log(`Hack's law: length ~ area^${((n2 * sxy - sx * sy) / (n2 * sxx - sx * sx)).toFixed(2)} over ${n2} cells (Earth's rivers: roughly 0.5-0.6)`);
+  // the L1 -> L2 handoff: tiles partition the land into whole basins (no receiver crosses a tile edge), each with an
+  // outlet; imprints come oldest first; response time grows up the network; tile fields fill their windows
+  const HO = L1.handoff(sh, bs), nT = HO.tiles.length; let unassigned = 0, cross = 0, area = 0, upOk = true;
+  for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l]) continue; if (HO.tileOf[l] < 0) unassigned++; const r = bs.rec[l]; if (r !== l && bs.land[r] && HO.tileOf[r] !== HO.tileOf[l]) cross++; if (r !== l && bs.land[r] && !(HO.responseMyr[l] > HO.responseMyr[r])) upOk = false; }
+  for (const T of HO.tiles) area += T.areaKm2;
+  const sorted = HO.imprints.every((I, k) => k === 0 || HO.imprints[k - 1].startMa >= I.startMa), outlets = HO.tiles.every(T => T.outlets.length > 0);
+  const td = HO.tile(0), sizes = Object.entries(td.fine).filter(([k, v]) => Array.isArray(v)).every(([k, v]) => v.length === td.fine.nx * td.fine.ny) && td.coarse.stacks.length === td.coarse.nx * td.coarse.ny;
+  const same = JSON.stringify(L1.handoff(sh, bs).summary()) === JSON.stringify(HO.summary()), small = HO.tiles.filter(T => T.areaKm2 < 5000).length;
+  const kinds = {}; for (const T of HO.tiles) kinds[T.kind] = (kinds[T.kind] || 0) + 1;
+  console.log(`L2 handoff: ${nT} tiles (${Object.entries(kinds).map(([k, v]) => v + " " + k).join(", ")}; ${small} under 5,000 km^2), ${HO.imprints.length} imprints; ${unassigned} land cells without a tile, ${cross} receivers crossing a tile edge; summary ${(JSON.stringify(HO.summary()).length / 1e3).toFixed(0)} kB`);
+  check(unassigned === 0 && cross === 0 && area === bs.landCells * bs.h * bs.h, "tiles partition the land into whole basins");
+  check(outlets && sorted && upOk && sizes && same, "handoff: outlets, imprint order, response time, field sizes, determinism"); }
 console.log(ok ? "PASS L1" : "FAIL L1"); process.exitCode = ok ? 0 : 1;
