@@ -387,6 +387,16 @@ These are design sketches, not implementations (L1 above is partly built; its sk
 
 Built so far: section 5. The current plan, organised around the L1→L2 handoff (each item either feeds it, decides whether something belongs in it, or is parked):
 
+**A0. Inland drainage (next)**
+
+Roughly a fifth of Earth's land drains inland, much of it without any depression. L1 currently produces very little.
+- **a. Rivers that dry up.** Channels in dry country lose water to evaporation and infiltration, at evaporation minus rain over the channel's area. Channel width scales with the square root of discharge. Where discharge reaches zero the basin ends, at a terminal fan or inland delta.
+- **b. Enclosed seas.** Water below sea level that is cut off from the open ocean (a Caspian), or a depression below sea level (a Dead Sea), is a lake with a water balance, not an ocean outlet.
+- **c. Present rates in the drainage pass.** Instead of freezing tectonics, the pass applies the sheet's present-day rate of elevation change. A depression stays closed if it subsides faster than its catchment's sediment fills it, and if its rim rises faster than the outlet river can cut it down.
+- **d. Mantle-driven topography from L0's subduction history.** A separate piece of L0 and L1 work. Slabs sinking under continents pull the surface down by up to about 1 km over 1,000–3,000 km: sag basins and continent-wide tilts. L0 records subducted volume per mantle-frame location, as recording only, and L1 applies the smooth field. It should also make major basins depend more on simulated history and less on unresolved relief, which the relief re-seed test can measure.
+
+Measure each step by the inland share in dry belts, the major-basin re-seed score, and the bowl and enclosed-sea tests.
+
 **A. L1 work, in order**
 1. ~~**Finite strain per marker.**~~ Done (section 5.2): total horizontal shortening, its direction and vertical-axis rotation, with a map view.
 2. ~~**Closed basins.**~~ Done (section 5.3). A water balance on the depressions the drainage pass finds, with a crude aridity field (latitude belts plus a rain shadow from the sheet's topography and a prevailing wind): a hollow overflows only if inflow beats evaporation over its lake. This decides basins that drain inland versus to the sea.
