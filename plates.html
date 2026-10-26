@@ -251,7 +251,7 @@ button:disabled{opacity:.5;cursor:default}
   </section>
 </main>
 <script>
-const BUILD_ID="a8f209ac2560";
+const BUILD_ID="3f2f9dee06be";
 // ===== SIM-START =====
 const SIM = (() => {
 const R_KM=6371, U=8, FS=15;
@@ -1798,8 +1798,11 @@ function render(){
     for(let q=0;q<n;q++){const i=pixIdx[q],o=4*q;if(i<0){d[o+3]=0;continue;}const l=pixLimb[q];
       d[o]=cellRGB[3*i]*l>>8;d[o+1]=cellRGB[3*i+1]*l>>8;d[o+2]=cellRGB[3*i+2]*l>>8;d[o+3]=255;}}
   const mask=selGlobeMask();
-  if(mask){for(let q=0;q<n;q++){const i=pixIdx[q];if(i<0||!mask[i])continue;const o=4*q,a=mask[i]===2?0.38:0.18;
-    d[o]=d[o]*(1-a)+255*a;d[o+1]=d[o+1]*(1-a)+214*a;d[o+2]=d[o+2]*(1-a)+90*a;}}
+  // the selected landmass: everything else dimmed, its submerged rim slightly less, its land outlined in white
+  if(mask){const W=pixW,H=pixH,inL=q=>pixIdx[q]>=0&&mask[pixIdx[q]]===2;
+    for(let q=0;q<n;q++){const i=pixIdx[q];if(i<0)continue;const m=mask[i],o=4*q;
+      if(m===2){const x=q%W,y=(q/W)|0;if(x>0&&!inL(q-1)||x<W-1&&!inL(q+1)||y>0&&!inL(q-W)||y<H-1&&!inL(q+W)){d[o]=d[o+1]=d[o+2]=255;}continue;}
+      const f=m===1?0.7:0.45;d[o]*=f;d[o+1]*=f;d[o+2]*=f;}}
   const ctx=canvas.getContext("2d");ctx.clearRect(0,0,pixW,pixH);ctx.putImageData(imgData,0,0);
   const dpr=pixW/wrap.clientWidth;
   const marks=$("marks").checked;
@@ -1918,7 +1921,7 @@ gestures(wrap,{
 function inspect(e){
   const r=canvas.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*pixW),py=Math.floor((e.clientY-r.top)/r.height*pixH);
   if(px<0||py<0||px>=pixW||py>=pixH)return;const i=pixIdx[py*pixW+px];if(i<0)return;
-  selCell=i;selMask=null;showColumn();l1Select(i);logAction({a:"select",cell:i});
+  selCell=i;selMask=null;showColumn();l1Select(i);logAction({a:"select",cell:i});render();
   const w=world,e2=w.elev[i],box=$("inspect");box.style.display="block";
   box.textContent=`${cellLoc(i)}: ${e2>=0?"elevation":"depth"} ${Math.abs(e2).toFixed(1)} km`;l0LastInspect={cell:i,text:box.textContent};
   clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",3000);
