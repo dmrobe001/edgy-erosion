@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>L0 plate tectonics sandbox</title>
+<title>L0 plates, L1 continents</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap" rel="stylesheet">
@@ -92,12 +92,20 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
 .summary div{margin:2px 0}
 .notes p{margin:0 0 8px;max-width:72ch}
 .notes .tag{font-weight:600}
+.l1panel{margin-top:14px}
+.l1panel > p{margin:0 0 10px;font-size:14px;max-width:80ch}
+.l1stage{margin-top:12px}
+.l1wrap{position:relative;width:100%;touch-action:none;cursor:grab}
+.l1wrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.l1panel .row.l1controls{margin-top:10px;padding-top:0;border-top:0}
+button:disabled{opacity:.5;cursor:default}
+.pick .mapwrap{cursor:crosshair}
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>L0 plate tectonics sandbox</h1>
+    <h1>L0 plates, L1 continents</h1>
     <div class="clock num" id="clock">0<small>million years</small></div>
   </header>
 
@@ -161,6 +169,38 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
     </div>
   </div>
 
+  <section class="panel l1panel" id="l1panel">
+    <h2>L1 continent</h2>
+    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window.</p>
+    <div class="row">
+      <button id="l1Pick">Pick a continent</button>
+      <label><span class="field-label">Cell size</span><select id="l1Ref"><option value="4">4× finer</option><option value="8" selected>8× finer</option><option value="16">16× finer</option></select></label>
+      <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="150" step="10" value="100"><span class="num" id="l1WinVal">100 Myr</span></label>
+      <label><span class="field-label">Erodibility K</span><input type="range" id="l1K" min="-2" max="0" step="0.25" value="-1"><span class="num" id="l1KVal">0.10</span></label>
+      <button class="primary" id="l1Run" disabled>Run L1</button>
+    </div>
+    <div class="summary" id="l1Info"><div class="muted">No continent picked yet.</div></div>
+    <div class="stage l1stage" id="l1stage" hidden><div class="l1wrap" id="l1wrap">
+      <canvas id="l1map" aria-label="L1 continent map"></canvas>
+      <div class="inspect num" id="l1inspect"></div>
+    </div></div>
+    <div class="row l1controls" id="l1controls" hidden>
+      <div class="seg" role="group" aria-label="L1 view" id="l1views">
+        <button data-v="terrain" aria-pressed="true">Terrain</button>
+        <button data-v="erosion" aria-pressed="false">Erosion</button>
+        <button data-v="uplift" aria-pressed="false">Uplift</button>
+        <button data-v="basins" aria-pressed="false">Drainage basins</button>
+      </div>
+      <label><input type="checkbox" id="l1Rivers" checked> Rivers</label>
+      <div class="seg" role="group" aria-label="Zoom" id="l1zoom">
+        <button data-z="1" aria-pressed="true">1×</button><button data-z="2" aria-pressed="false">2×</button><button data-z="4" aria-pressed="false">4×</button><button data-z="8" aria-pressed="false">8×</button>
+      </div>
+    </div>
+    <div class="legend" id="l1legend"></div>
+    <div class="stats" id="l1stats"></div>
+    <div class="summary" id="l1budget"></div>
+  </section>
+
   <div class="cols">
     <section class="panel handoff">
       <h2>L1 handoff</h2>
@@ -186,6 +226,7 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
       <p><span class="tag">Faults.</span> At every plate-boundary cell, the relative motion is split into an across-boundary part (convergence or extension) and an along-boundary part. Those slips accumulate in the parcel’s fault record, along with the boundary’s strike, stored in the plate’s own frame so dead faults ride along with the crust. A record keeps the current and previous episode; a new one starts after 10 million years of quiet or of a different style. Continental collisions now thicken crust in proportion to the across-boundary share of motion, so oblique collisions build less relief.</p>
       <p><span class="tag">Formations and domains.</span> At handoff, units in neighbouring continental columns are linked when their rock type and origin plate match and their ages agree (within 40 million years, or 10% of their age for old rock), walking both stacks bottom to top so order is preserved. Linked units become formations. Neighbours on the same plate whose stacks share at least 40% of their thickness by matched units form a domain; slivers under eight columns join a neighbouring domain.</p>
       <p><span class="tag">L1 preview.</span> Elevation is smoothed over about three cells and interpolated bilinearly on the cube grid; the coast is its zero contour. Formation thicknesses are averaged over neighbours in the same domain (absent counts as zero, so isolated specks fade and edges pinch out) and interpolated per pixel without crossing domain boundaries. A ridged noise field stands in for L1 relief: valleys cut deeper into the formation stack and expose older units. The noise is a placeholder for a real L1 terrain model.</p>
+      <p><span class="tag">L1 continent.</span> The picked continent’s connected crust on its plate, plus three L0 cells of margin, is refined on the same cube-sphere (each L0 cell split 4–16 ways, so every fine cell has exactly one parent) and followed in the plate’s body frame. Parcels are tracked through rifts (they keep their body index on the split-off plate) and welds (mapped into the survivor’s frame); consumed parcels leave the domain, and cells along a rift become sea. Each step L0 runs once and records its tectonic thickening; L1 applies it, spreads thick crust sideways as lower-crustal flow (faster for thicker crust, acting only at long wavelengths), and computes elevation as the inherited elevation plus the thickness change minus a flexural root (Gaussian approximation, 40 km flexural length, with the plate yielding beyond 3 km of departure from local balance). Rivers follow steepest descent after depressions are filled (Priority-Flood) and incise by the stream-power law, solved implicitly. All eroded rock is exported to the sea for now; erodibility is uniform; rain is uniform. A volume budget tracks every source and sink of crust and closes to rounding error.</p>
       <p><span class="tag">Handoff.</span> Extraction groups continental cells with at least 60 km of recorded slip and similar strike, then traces each group into polylines. Its kind is thrust, normal or strike-slip from the summed slip. Rock columns and faults are copied when crust is copied, and orphaned records are garbage-collected.</p>
       <p><span class="tag">Elevation.</span> Derived, not stored: Airy isostasy for continents, square-root-of-age cooling for seafloor. Hotspots are fixed in the mantle frame, so moving plates drag curved island chains off them.</p>
       <p><span class="tag">Surface and budget.</span> Continental crust diffuses and erodes; sediment builds shelves. A feedback term speeds margin growth when continental area is below the chosen target and makes drowned margins founder back to seafloor when it’s above. The Continental crust slider sets both the starting fraction and that target. Land above sea is roughly half of it in the long run, because erosion wears continents toward sea level; Earth has about 40% continental crust (including shelves) and 29% land. This thermostat is a deliberate fudge to keep the crust budget stable, not physics.</p>

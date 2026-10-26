@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>L0 plate tectonics sandbox</title>
+<title>L0 plates, L1 continents</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@500;600&display=swap" rel="stylesheet">
@@ -92,12 +92,20 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
 .summary div{margin:2px 0}
 .notes p{margin:0 0 8px;max-width:72ch}
 .notes .tag{font-weight:600}
+.l1panel{margin-top:14px}
+.l1panel > p{margin:0 0 10px;font-size:14px;max-width:80ch}
+.l1stage{margin-top:12px}
+.l1wrap{position:relative;width:100%;touch-action:none;cursor:grab}
+.l1wrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.l1panel .row.l1controls{margin-top:10px;padding-top:0;border-top:0}
+button:disabled{opacity:.5;cursor:default}
+.pick .mapwrap{cursor:crosshair}
 </style>
 </head>
 <body>
 <main>
   <header>
-    <h1>L0 plate tectonics sandbox</h1>
+    <h1>L0 plates, L1 continents</h1>
     <div class="clock num" id="clock">0<small>million years</small></div>
   </header>
 
@@ -161,6 +169,38 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
     </div>
   </div>
 
+  <section class="panel l1panel" id="l1panel">
+    <h2>L1 continent</h2>
+    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window.</p>
+    <div class="row">
+      <button id="l1Pick">Pick a continent</button>
+      <label><span class="field-label">Cell size</span><select id="l1Ref"><option value="4">4× finer</option><option value="8" selected>8× finer</option><option value="16">16× finer</option></select></label>
+      <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="150" step="10" value="100"><span class="num" id="l1WinVal">100 Myr</span></label>
+      <label><span class="field-label">Erodibility K</span><input type="range" id="l1K" min="-2" max="0" step="0.25" value="-1"><span class="num" id="l1KVal">0.10</span></label>
+      <button class="primary" id="l1Run" disabled>Run L1</button>
+    </div>
+    <div class="summary" id="l1Info"><div class="muted">No continent picked yet.</div></div>
+    <div class="stage l1stage" id="l1stage" hidden><div class="l1wrap" id="l1wrap">
+      <canvas id="l1map" aria-label="L1 continent map"></canvas>
+      <div class="inspect num" id="l1inspect"></div>
+    </div></div>
+    <div class="row l1controls" id="l1controls" hidden>
+      <div class="seg" role="group" aria-label="L1 view" id="l1views">
+        <button data-v="terrain" aria-pressed="true">Terrain</button>
+        <button data-v="erosion" aria-pressed="false">Erosion</button>
+        <button data-v="uplift" aria-pressed="false">Uplift</button>
+        <button data-v="basins" aria-pressed="false">Drainage basins</button>
+      </div>
+      <label><input type="checkbox" id="l1Rivers" checked> Rivers</label>
+      <div class="seg" role="group" aria-label="Zoom" id="l1zoom">
+        <button data-z="1" aria-pressed="true">1×</button><button data-z="2" aria-pressed="false">2×</button><button data-z="4" aria-pressed="false">4×</button><button data-z="8" aria-pressed="false">8×</button>
+      </div>
+    </div>
+    <div class="legend" id="l1legend"></div>
+    <div class="stats" id="l1stats"></div>
+    <div class="summary" id="l1budget"></div>
+  </section>
+
   <div class="cols">
     <section class="panel handoff">
       <h2>L1 handoff</h2>
@@ -186,6 +226,7 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
       <p><span class="tag">Faults.</span> At every plate-boundary cell, the relative motion is split into an across-boundary part (convergence or extension) and an along-boundary part. Those slips accumulate in the parcel’s fault record, along with the boundary’s strike, stored in the plate’s own frame so dead faults ride along with the crust. A record keeps the current and previous episode; a new one starts after 10 million years of quiet or of a different style. Continental collisions now thicken crust in proportion to the across-boundary share of motion, so oblique collisions build less relief.</p>
       <p><span class="tag">Formations and domains.</span> At handoff, units in neighbouring continental columns are linked when their rock type and origin plate match and their ages agree (within 40 million years, or 10% of their age for old rock), walking both stacks bottom to top so order is preserved. Linked units become formations. Neighbours on the same plate whose stacks share at least 40% of their thickness by matched units form a domain; slivers under eight columns join a neighbouring domain.</p>
       <p><span class="tag">L1 preview.</span> Elevation is smoothed over about three cells and interpolated bilinearly on the cube grid; the coast is its zero contour. Formation thicknesses are averaged over neighbours in the same domain (absent counts as zero, so isolated specks fade and edges pinch out) and interpolated per pixel without crossing domain boundaries. A ridged noise field stands in for L1 relief: valleys cut deeper into the formation stack and expose older units. The noise is a placeholder for a real L1 terrain model.</p>
+      <p><span class="tag">L1 continent.</span> The picked continent’s connected crust on its plate, plus three L0 cells of margin, is refined on the same cube-sphere (each L0 cell split 4–16 ways, so every fine cell has exactly one parent) and followed in the plate’s body frame. Parcels are tracked through rifts (they keep their body index on the split-off plate) and welds (mapped into the survivor’s frame); consumed parcels leave the domain, and cells along a rift become sea. Each step L0 runs once and records its tectonic thickening; L1 applies it, spreads thick crust sideways as lower-crustal flow (faster for thicker crust, acting only at long wavelengths), and computes elevation as the inherited elevation plus the thickness change minus a flexural root (Gaussian approximation, 40 km flexural length, with the plate yielding beyond 3 km of departure from local balance). Rivers follow steepest descent after depressions are filled (Priority-Flood) and incise by the stream-power law, solved implicitly. All eroded rock is exported to the sea for now; erodibility is uniform; rain is uniform. A volume budget tracks every source and sink of crust and closes to rounding error.</p>
       <p><span class="tag">Handoff.</span> Extraction groups continental cells with at least 60 km of recorded slip and similar strike, then traces each group into polylines. Its kind is thrust, normal or strike-slip from the summed slip. Rock columns and faults are copied when crust is copied, and orphaned records are garbage-collected.</p>
       <p><span class="tag">Elevation.</span> Derived, not stored: Airy isostasy for continents, square-root-of-age cooling for seafloor. Hotspots are fixed in the mantle frame, so moving plates drag curved island chains off them.</p>
       <p><span class="tag">Surface and budget.</span> Continental crust diffuses and erodes; sediment builds shelves. A feedback term speeds margin growth when continental area is below the chosen target and makes drowned margins founder back to seafloor when it’s above. The Continental crust slider sets both the starting fraction and that target. Land above sea is roughly half of it in the long run, because erosion wears continents toward sea level; Earth has about 40% continental crust (including shelves) and 29% land. This thermostat is a deliberate fudge to keep the crust budget stable, not physics.</p>
@@ -212,6 +253,7 @@ function norm3(v){const l=Math.hypot(v[0],v[1],v[2])||1;return[v[0]/l,v[1]/l,v[2
 function cross(a,b){return[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
 function latlon(x,y,z){return[Math.asin(Math.max(-1,Math.min(1,z)))*180/Math.PI,Math.atan2(y,x)*180/Math.PI];}
 function loc(x,y,z){const [lat,lon]=latlon(x,y,z);return `${Math.abs(lat).toFixed(0)}°${lat>=0?"N":"S"} ${Math.abs(lon).toFixed(0)}°${lon>=0?"E":"W"}`;}
+function elevOf(K,T,B,S,t){if(K)return C.ISO*(T-C.CONT_BASE);const e=-2.6-0.33*Math.sqrt(Math.max(0,t-B))+0.5*(T-C.OCEAN_T)+0.3*S;return e<-7?-7:e;}
 function kindOf(X,S){if(Math.abs(S)>2*Math.abs(X))return FK.STRIKE;return X>=0?FK.THRUST:FK.NORMAL;}
 
 function makeNoise3(seed){
@@ -460,16 +502,18 @@ class World{
     // 4. surface processes on the fixed grid; rock units are pushed or eroded as they happen
     this.gather();
     const {wT,wB,wS,wK,wCol,dT,arcAdd,arcPlate,collAdd,collPlate,trench,pool}=this,t=this.t,r=this.rand;
+    // optional record of tectonic thickening per fixed cell (arcs, collisions, hotspots, collapse), read by L1
+    const rec=this.tecRec||null;
     for(let i=0;i<N;i++){
-      const a=arcAdd[i];if(a>0&&arcPlate[i]===O[i]){wT[i]+=a;if(wK[i]?a>0.25:wT[i]>C.OCEAN_T+4)pool.push(wCol[i],ROCK.ARC,t,a,O[i]);}
-      const c=collAdd[i];if(c>0&&collPlate[i]===O[i]){wT[i]+=c;if(!wK[i]&&wT[i]>C.ARC_CONV)wK[i]=1; // continental slices pushed onto seafloor accrete as continent
+      const a=arcAdd[i];if(a>0&&arcPlate[i]===O[i]){wT[i]+=a;if(rec)rec[i]+=a;if(wK[i]?a>0.25:wT[i]>C.OCEAN_T+4)pool.push(wCol[i],ROCK.ARC,t,a,O[i]);}
+      const c=collAdd[i];if(c>0&&collPlate[i]===O[i]){wT[i]+=c;if(rec)rec[i]+=c;if(!wK[i]&&wT[i]>C.ARC_CONV)wK[i]=1; // continental slices pushed onto seafloor accrete as continent
         if(c>0.4)pool.push(wCol[i],ROCK.OROGEN,t,c*0.4,O[i]);}
       trench[i]*=0.85;
     }
     for(const h of this.hotspots){const i=h.i;
-      if(wK[i]){wT[i]+=0.1*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,0.1*dt,O[i]);}
-      else{wT[i]+=C.HOT*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,C.HOT*dt,O[i]);
-        for(let k=0;k<4;k++){const j=nb[4*i+k];if(!wK[j]){wT[j]+=0.3*C.HOT*dt;pool.push(wCol[j],ROCK.HOTSPOT,t,0.3*C.HOT*dt,O[j]);}}}
+      if(wK[i]){wT[i]+=0.1*dt;if(rec)rec[i]+=0.1*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,0.1*dt,O[i]);}
+      else{wT[i]+=C.HOT*dt;if(rec)rec[i]+=C.HOT*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,C.HOT*dt,O[i]);
+        for(let k=0;k<4;k++){const j=nb[4*i+k];if(!wK[j]){wT[j]+=0.3*C.HOT*dt;if(rec)rec[j]+=0.3*C.HOT*dt;pool.push(wCol[j],ROCK.HOTSPOT,t,0.3*C.HOT*dt,O[j]);}}}
     }
     this.computeElev();
     const fb=Math.pow((this.contFrac||this.contTarget)/this.contTarget,6),sedConv=C.SED_CONV*fb,collapseP=0.05*dt/fb;
@@ -496,7 +540,7 @@ class World{
     for(let i=0;i<N;i++){
       if(!wK[i]||wT[i]<C.COLLAPSE||r()>collapseP)continue;
       const c=nb[4*i+Math.floor(r()*4)];
-      if(!wK[c]&&O[c]===O[i]){const base=pool.R[wCol[i]*U];wK[c]=1;wT[c]=28;wS[c]=0;wCol[c]=pool.make(base,t,26,O[i]);pool.push(wCol[c],ROCK.CLASTIC,t,2,O[i]);wT[i]-=8;}
+      if(!wK[c]&&O[c]===O[i]){const base=pool.R[wCol[i]*U];if(rec){rec[i]-=8;rec[c]+=28-wT[c];}wK[c]=1;wT[c]=28;wS[c]=0;wCol[c]=pool.make(base,t,26,O[i]);pool.push(wCol[c],ROCK.CLASTIC,t,2,O[i]);wT[i]-=8;}
     }
     if(fb>1){const pz=0.1*dt*(fb-1);
       for(let i=0;i<N;i++){if(!wK[i]||E[i]>0.3||r()>pz)continue;let coast=false;for(let k=0;k<4;k++)if(!wK[nb[4*i+k]])coast=true;
@@ -575,9 +619,7 @@ class World{
     for(let c=0;c<pool.cap;c++){if(!pool.used[c])continue;if(!pool.mark[c]){const f=pool.flt[c];pool.release(c);if(f>=0){fpool.release(f);pool.flt[c]=-1;}}else if(pool.flt[c]>=0)fpool.mark[pool.flt[c]]=1;}
     for(let f=0;f<fpool.cap;f++)if(fpool.used[f]&&!fpool.mark[f])fpool.release(f);
   }
-  computeElev(){const {N,wT,wK,wB,wS,elev:E,t}=this;
-    for(let i=0;i<N;i++){if(wK[i])E[i]=C.ISO*(wT[i]-C.CONT_BASE);
-      else{let e=-2.6-0.33*Math.sqrt(Math.max(0,t-wB[i]))+0.5*(wT[i]-C.OCEAN_T)+0.3*wS[i];E[i]=e<-7?-7:e;}}}
+  computeElev(){const {N,wT,wK,wB,wS,elev:E,t}=this;for(let i=0;i<N;i++)E[i]=elevOf(wK[i],wT[i],wB[i],wS[i],t);}
   updateStats(centroids){
     const {N,plates,owner,wK,wB,wCol,pool,elev:E,t}=this,p=this.cube.pos;
     for(const P of plates){P.area=0;P.contArea=0;P._c=[0,0,0];}
@@ -634,12 +676,12 @@ class World{
     const tot=Wn.area+L.area;for(let k=0;k<3;k++)Wn.W[k]=(Wn.W[k]*Wn.area+L.W[k]*L.area)/tot;
     Wn.area=tot;Wn.contArea+=L.contArea;
     this.log("suture",`Plates ${Wn.id} and ${L.id} weld into one along a suture`,Wn.c);
-    this.kill(L);purge();this.gather();this.gc();
+    L.mergedInto=Wn.id;this.kill(L);purge();this.gather();this.gc();
   }
   split(P){
     const {N,owner,bodyIdx,rand:r,noise:nz}=this,p=this.cube.pos;
     const c=P.c;let n=randUnit(r);const d=n[0]*c[0]+n[1]*c[1]+n[2]*c[2];n=norm3([n[0]-d*c[0],n[1]-d*c[1],n[2]-d*c[2]]);
-    const a=norm3(cross(c,n));const Qp=this.addPlate(P.W);Qp.Q.set(P.Q);const Q=P.Q;
+    const a=norm3(cross(c,n));const Qp=this.addPlate(P.W);Qp.Q.set(P.Q);Qp.parent=P.id;const Q=P.Q;
     const moved=[];let contA=0,contB=0;
     for(let k=0;k<N;k++){if(P.T[k]<=0)continue;const bx=p[3*k],by=p[3*k+1],bz=p[3*k+2];
       const x=Q[0]*bx+Q[1]*by+Q[2]*bz,y=Q[3]*bx+Q[4]*by+Q[5]*bz,z=Q[6]*bx+Q[7]*by+Q[8]*bz;
@@ -803,9 +845,337 @@ class World{
     };
   }
 }
-return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3};
+return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3,makeLookup,elevOf,hashStr};
 })();
 // ===== SIM-END =====
+// ===== L1-START =====
+// L1: one continent, refined from L0 and evolved forward in its own body frame while L0 keeps running.
+// L0 supplies tectonic thickening (arcs, collisions, hotspots, collapse); L1 replaces L0's surface processes
+// with stream-power river erosion, and derives elevation from crust thickness through flexural isostasy.
+const L1 = (() => {
+const {R_KM,C,makeLookup,elevOf,makeNoise3,hashStr}=SIM;
+const ROOT=1-C.ISO, EPS=1e-6; // share of a thickness change taken by the root under full isostasy; priority-flood step (km)
+
+// ---------- generic graph tools (also used on a planar grid by the tests) ----------
+function Heap(cap){this.k=new Float64Array(cap);this.v=new Int32Array(cap);this.n=0;}
+Heap.prototype.push=function(v,key){const K=this.k,V=this.v;let i=this.n++;while(i>0){const p=(i-1)>>1;if(K[p]<=key)break;K[i]=K[p];V[i]=V[p];i=p;}K[i]=key;V[i]=v;};
+Heap.prototype.pop=function(){const K=this.k,V=this.v,top=V[0],n=--this.n;
+  if(n>0){const key=K[n],v=V[n];let i=0;for(;;){let c=2*i+1;if(c>=n)break;if(c+1<n&&K[c+1]<K[c])c++;if(K[c]>=key)break;K[i]=K[c];V[i]=V[c];i=c;}K[i]=key;V[i]=v;}
+  return top;};
+function scratch(nC){return{f:new Float64Array(nC),closed:new Uint8Array(nC),rec:new Int32Array(nC),rdist:new Float32Array(nC),stack:new Int32Array(nC),
+  ndon:new Int32Array(nC+1),don:new Int32Array(nC),A:new Float64Array(nC),hN:new Float64Array(nC),heap:new Heap(nC),pit:new Int32Array(nC),ns:0};}
+// Route flow over a graph with 8 neighbour slots per cell (-1 = none). Outlets are fixed base level.
+// Depressions are filled with an epsilon gradient (Barnes et al. 2014, Priority-Flood+epsilon) so every
+// cell drains to an outlet; receivers are steepest descent on the filled surface; area accumulates down the tree.
+function route(G,e,alive,outlet,S,precip){
+  const {nC,nbr,dist,area}=G,{f,closed,rec,rdist,stack,ndon,don,A,heap,pit}=S;
+  heap.n=0;let ph=0,pt=0;
+  for(let l=0;l<nC;l++){closed[l]=0;if(!alive[l]){closed[l]=1;rec[l]=-1;}else if(outlet[l]){closed[l]=1;f[l]=e[l];}}
+  for(let l=0;l<nC;l++){if(!alive[l]||!outlet[l])continue;
+    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j>=0&&alive[j]&&!outlet[j]){heap.push(l,f[l]);break;}}}
+  // Zhou et al. (2016) variant: a cell strictly higher than a finalized neighbour is final at its own height,
+  // so whole hillslopes are swept uphill with a plain queue; only cells that still have lower, unresolved
+  // neighbours wait in the heap. Same filled surface as the plain algorithm, far fewer heap operations.
+  const up=S.up||(S.up=new Int32Array(nC));
+  const flood=()=>{while(ph<pt||heap.n>0){const c=ph<pt?pit[ph++]:heap.pop(),fc=f[c];
+    for(let k=0;k<8;k++){const j=nbr[8*c+k];if(j<0||closed[j])continue;closed[j]=1;
+      if(e[j]<=fc){f[j]=fc+EPS;pit[pt++]=j;continue;}
+      f[j]=e[j];let uh=0,ut=0;up[ut++]=j;
+      while(uh<ut){const a=up[uh++],fa=f[a];let defer=false;
+        for(let q=0;q<8;q++){const b=nbr[8*a+q];if(b<0||closed[b])continue;
+          if(e[b]>fa){closed[b]=1;f[b]=e[b];up[ut++]=b;}else defer=true;}
+        if(defer)heap.push(a,fa);}}}};
+  flood();
+  // land the flood never reached is cut off from the sea (e.g. enclosed by consumed parcels): each such piece
+  // becomes an inland basin draining to its lowest cell
+  const sink=S.sink||(S.sink=new Uint8Array(nC));sink.fill(0);S.sinks=0;
+  for(;;){let lo=-1;for(let l=0;l<nC;l++)if(!closed[l]&&(lo<0||e[l]<e[lo]))lo=l;if(lo<0)break;
+    closed[lo]=1;sink[lo]=1;f[lo]=e[lo];heap.push(lo,f[lo]);S.sinks++;flood();}
+  for(let l=0;l<nC;l++){if(!alive[l])continue;
+    if(outlet[l]||sink[l]){rec[l]=l;rdist[l]=0;continue;}
+    let best=l,bs=0,bd=0;
+    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j])continue;const d=dist[8*l+k],s=(f[l]-f[j])/d;if(s>bs){bs=s;best=j;bd=d;}}
+    rec[l]=best;rdist[l]=bd;}
+  // stack: receivers before donors (breadth-first from each outlet)
+  ndon.fill(0);for(let l=0;l<nC;l++){const r=rec[l];if(r>=0&&r!==l)ndon[r+1]++;}
+  for(let l=0;l<nC;l++)ndon[l+1]+=ndon[l];
+  const fill=S.fillp||(S.fillp=new Int32Array(nC));fill.set(ndon.subarray(0,nC));
+  for(let l=0;l<nC;l++){const r=rec[l];if(r>=0&&r!==l)don[fill[r]++]=l;}
+  let ns=0;for(let l=0;l<nC;l++)if(rec[l]===l)stack[ns++]=l;
+  for(let h=0;h<ns;h++){const c=stack[h];for(let q=ndon[c];q<ndon[c+1];q++)stack[ns++]=don[q];}
+  S.ns=ns;
+  for(let h=0;h<ns;h++){const l=stack[h];A[l]=area[l]*(precip?precip[l]:1);}
+  for(let h=ns-1;h>=0;h--){const l=stack[h],r=rec[l];if(r!==l)A[r]+=A[l];}
+  return S;
+}
+// Implicit stream-power incision, n = 1 (Braun & Willett 2013): dh/dt = -K A^m S. Units: km, Myr, A in km^2.
+// Outlets hold base level max(e, 0): sea level, or their own height for a land cell no outlet could reach.
+// A cell lower than its receiver's new height (a filled depression) is left alone. Returns hN, the new heights.
+function streamPower(e,S,K,m,dt){
+  const {rec,rdist,stack,A,hN,ns}=S;
+  for(let h=0;h<ns;h++){const l=stack[h],r=rec[l];
+    if(r===l){hN[l]=e[l]>0?e[l]:0;continue;}
+    const hb=hN[r];if(e[l]<=hb){hN[l]=e[l];continue;}
+    const F=(typeof K==="number"?K:K[l])*dt*Math.pow(A[l],m)/rdist[l];hN[l]=(e[l]+F*hb)/(1+F);}
+  return hN;
+}
+function planarGrid(nx,ny,dx){const nC=nx*ny,nbr=new Int32Array(8*nC),dist=new Float32Array(8*nC),area=new Float32Array(nC).fill(dx*dx);
+  const D=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
+  for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const l=y*nx+x;for(let k=0;k<8;k++){const X=x+D[k][0],Y=y+D[k][1];
+    nbr[8*l+k]=X<0||Y<0||X>=nx||Y>=ny?-1:Y*nx+X;dist[8*l+k]=dx*Math.hypot(D[k][0],D[k][1]);}}
+  return{nC,nbr,dist,area};}
+
+// ---------- refined cube-sphere over a set of L0 cells ----------
+// Each L0 cell c in the domain gets a slot s; its r x r children have local index s*r*r + jj*r + ii.
+// Equal-angle subdivision nests exactly, so every fine cell has one parent and positions are analytic.
+const D8=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]]; // E W N S NE NW SE SW
+function faceDir(f,a,b,t){let x,y,z;switch(f){case 0:x=1;y=a;z=b;break;case 1:x=-1;y=a;z=b;break;case 2:x=a;y=1;z=b;break;case 3:x=a;y=-1;z=b;break;case 4:x=a;y=b;z=1;break;default:x=a;y=b;z=-1;}
+  const L=Math.hypot(x,y,z);t[0]=x/L;t[1]=y/L;t[2]=z/L;return t;}
+function buildGrid(n,slots,slotOf,r){
+  const nS=slots.length,rr=r*r,nC=nS*rr,NR=n*r,nn=n*n,q=Math.PI/4,lk=makeLookup(NR),t=[0,0,0];
+  const pos=new Float32Array(3*nC),area=new Float32Array(nC),nbr=new Int32Array(8*nC),dist=new Float32Array(8*nC),gid=new Int32Array(nC);
+  const dA=(Math.PI/2/NR)**2*R_KM*R_KM,ang=v=>Math.tan(((v+.5)/NR*2-1)*q);
+  const localOf=g=>{const f=(g/(NR*NR))|0,rem=g-f*NR*NR,J=(rem/NR)|0,I=rem-J*NR,s=slotOf[f*nn+((J/r)|0)*n+((I/r)|0)];return s<0?-1:s*rr+(J%r)*r+(I%r);};
+  for(let s=0;s<nS;s++){const c=slots[s],f=(c/nn)|0,j=((c-f*nn)/n)|0,i=c-f*nn-j*n;
+    for(let jj=0;jj<r;jj++)for(let ii=0;ii<r;ii++){const l=s*rr+jj*r+ii,I=i*r+ii,J=j*r+jj,a=ang(I),b=ang(J);gid[l]=f*NR*NR+J*NR+I;
+      faceDir(f,a,b,t);pos[3*l]=t[0];pos[3*l+1]=t[1];pos[3*l+2]=t[2];area[l]=(1+a*a)*(1+b*b)/Math.pow(1+a*a+b*b,1.5)*dA;
+      for(let k=0;k<8;k++){const I2=I+D8[k][0],J2=J+D8[k][1];let m;
+        if(I2>=0&&J2>=0&&I2<NR&&J2<NR){const s2=slotOf[f*nn+((J2/r)|0)*n+((I2/r)|0)];m=s2<0?-1:s2*rr+(J2%r)*r+(I2%r);}
+        else{faceDir(f,ang(I2),ang(J2),t);m=localOf(lk(t[0],t[1],t[2]));if(m===l)m=-1;}
+        nbr[8*l+k]=m;}}}
+  for(let l=0;l<nC;l++)for(let k=0;k<8;k++){const m=nbr[8*l+k];if(m<0)continue;
+    dist[8*l+k]=Math.hypot(pos[3*l]-pos[3*m],pos[3*l+1]-pos[3*m+1],pos[3*l+2]-pos[3*m+2])*R_KM;}
+  return{n,r,rr,nS,nC,NR,pos,area,nbr,dist,gid,lookup:lk,localOf};
+}
+
+// ---------- continent selection ----------
+// The connected continental crust of the clicked cell's plate, in that plate's body frame, plus every body
+// cell of the same plate within `margin` L0 cells of it (the ocean margin is base level for the rivers).
+function select(world,cell,margin){
+  const P=world.plates[world.owner[cell]],k0=world.bodyIdx[cell],N=world.N,nb=world.cube.nb;
+  if(!P||!P.alive||!P.K[k0]||P.T[k0]<=0)return null;
+  const d=new Int8Array(N).fill(-1),q=[k0];d[k0]=0;
+  for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(d[b]<0&&P.K[b]&&P.T[b]>0){d[b]=0;q.push(b);}}}
+  const nCont=q.length;
+  for(let h=0;h<q.length;h++){const a=q[h];if(d[a]>=margin)continue;for(let k=0;k<4;k++){const b=nb[4*a+k];if(d[b]<0&&P.T[b]>0){d[b]=d[a]+1;q.push(b);}}}
+  const slots=Int32Array.from(q).sort();
+  return{plate:P.id,k0,slots,nCont,dist:d};
+}
+
+class Region{
+  constructor(world,o){
+    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,window:100},o);this.o=o;this.world=world;
+    const sel=select(world,o.cell,o.margin);if(!sel)throw new Error("not a continental cell");
+    const n=world.n,N=world.N,cube=world.cube,nb=cube.nb,P=world.plates[sel.plate],t0=world.t;
+    this.t0=t0;this.t=0;this.steps=0;this.plate0=P.id;this.Q0=Float64Array.from(P.Q);
+    const slots=this.slots=sel.slots,nS=slots.length,slotOf=this.slotOf=new Int32Array(N).fill(-1);
+    for(let s=0;s<nS;s++)slotOf[slots[s]]=s;
+    this.nCont=sel.nCont;this.slotCont=new Uint8Array(nS);for(let s=0;s<nS;s++)this.slotCont[s]=sel.dist[slots[s]]===0?1:0;
+    // slot lineage: which plate and body cell holds each parcel now
+    this.platesSeen=world.plates.length;this.slotPlate=new Int32Array(nS).fill(P.id);this.slotBody=Int32Array.from(slots);this.slotAlive=new Uint8Array(nS).fill(1);
+    this.slotNb=new Int32Array(4*nS);for(let s=0;s<nS;s++)for(let k=0;k<4;k++)this.slotNb[4*s+k]=slotOf[nb[4*slots[s]+k]];
+    // bilinear stencils: for each slot and quadrant, the three other parents (as slots, -1 outside the domain)
+    this.quad=new Int32Array(12*nS);
+    for(let s=0;s<nS;s++){const c=slots[s];for(let qd=0;qd<4;qd++){const cB=nb[4*c+(qd&1?1:0)],cC=nb[4*c+(qd&2?3:2)],cD=nb[4*cB+(qd&2?3:2)];
+      this.quad[12*s+3*qd]=slotOf[cB];this.quad[12*s+3*qd+1]=slotOf[cC];this.quad[12*s+3*qd+2]=slotOf[cD];}}
+    const r=o.r,G=this.G=buildGrid(n,slots,slotOf,r),nC=G.nC,rr=r*r;
+    this.subQ=new Uint8Array(rr);this.subW=new Float32Array(2*rr);
+    for(let jj=0;jj<r;jj++)for(let ii=0;ii<r;ii++){const tx=(ii+.5)/r-.5,ty=(jj+.5)/r-.5,sb=jj*r+ii;this.subQ[sb]=(tx<0?1:0)+(ty<0?2:0);this.subW[2*sb]=Math.abs(tx);this.subW[2*sb+1]=Math.abs(ty);}
+    // flexure and crustal flow run on a coarser nested grid (b x b fine cells per mid cell), then are interpolated back
+    const sigma=1.18*o.flexKm,cellKm=world.cellKm;let rf=1;for(let d=r;d>=1;d--)if(r%d===0&&cellKm/d>=sigma/2.5){rf=d;break;}
+    this.rf=rf;this.Gm=buildGrid(n,slots,slotOf,rf);this.buildMidMaps();this.flexPasses=Math.max(1,Math.round(sigma*sigma/(0.4*(cellKm/rf)**2)));
+    // initial state from L0: elevation smoothed over the domain (three passes), interpolated, inverted through Airy isostasy
+    const e0=new Float64Array(nS),kf=new Float64Array(nS);
+    for(let s=0;s<nS;s++){const k=slots[s];e0[s]=elevOf(P.K[k],P.T[k],P.B[k],P.S[k],t0);kf[s]=P.K[k];}
+    let es=e0,tmp=new Float64Array(nS);
+    for(let pass=0;pass<3;pass++){for(let s=0;s<nS;s++){let v=es[s],w=1;for(let k=0;k<4;k++){const u=this.slotNb[4*s+k];if(u>=0){v+=es[u];w++;}}tmp[s]=v/w;}[es,tmp]=[tmp,es];}
+    this.T=new Float64Array(nC);this.e=new Float64Array(nC);this.cont=new Uint8Array(nC);this.alive=new Uint8Array(nC).fill(1);this.eOcean=new Float32Array(nC);
+    this.T0=new Float64Array(nC);this.e0=new Float32Array(nC);this.eroded=new Float32Array(nC);this.uplifted=new Float32Array(nC);this.outlet=new Uint8Array(nC);this.root=new Float64Array(nC);
+    const ei=this.interp(es),ki=this.interp(kf);
+    // Relief L0 cannot resolve: fractal noise from 1.5 L0 cells down to 2 L1 cells (50 m in lowlands, more in highlands),
+    // fixed in the body frame so the same continent looks alike at every L1 resolution. It is elevation only (no
+    // thickness), and gives erosion something to organize; on a bilinear surface D8 routing makes parallel streams.
+    const nz=makeNoise3(hashStr(String(world.opts.seed)+"|L1")|0),f0=R_KM/(1.5*world.cellKm),oct=Math.max(1,Math.ceil(Math.log2(1.5*r/2))+1);
+    for(let l=0;l<nC;l++){
+      if(ki[l]>=0.5||ei[l]>0){const p=G.pos,amp=0.05+0.05*Math.max(0,ei[l]),v=nz(p[3*l],p[3*l+1],p[3*l+2],f0,oct);
+        this.cont[l]=1;this.T[l]=this.T0[l]=C.CONT_BASE+ei[l]/C.ISO;this.e0[l]=ei[l]+amp*2*(v-0.5)*2;}else{this.eOcean[l]=ei[l];}}
+    this.S=scratch(nC);this.rate=new Float64Array(nS);this.rec0=new Float32Array(N);this.slotAt=new Map();this.touched=[];
+    this.precip=null;this.K=o.K;
+    this.budget={initial:this.volume(),tectonicL0:0,tectonicApplied:0,unappliedOcean:0,eroded:0,capped:0,consumed:0,rifted:0,flowResidual:0};
+    this.history=[];this.flexure();this.classify();route(G,this.e,this.alive,this.outlet,this.S,this.precip);this.stats(0,0);
+    // map orientation: the continent's centroid, and world north at t0, in body coordinates
+    let cx=0,cy=0,cz=0;for(let s=0;s<nS;s++){if(!this.slotCont[s])continue;const c=slots[s];cx+=cube.pos[3*c];cy+=cube.pos[3*c+1];cz+=cube.pos[3*c+2];}
+    const cl=Math.hypot(cx,cy,cz);this.center=[cx/cl,cy/cl,cz/cl];const Q=this.Q0;this.northB=[Q[6],Q[7],Q[8]];
+  }
+  // bilinear interpolation of a per-slot field onto fine cells (parents outside the domain, or dead, are skipped)
+  interp(field,out,mask){const {G,quad,subQ,subW}=this,rr=G.rr,nC=G.nC;out=out||new Float64Array(nC);
+    for(let l=0;l<nC;l++){const s=(l/rr)|0,sb=l-s*rr,qd=subQ[sb],wx=subW[2*sb],wy=subW[2*sb+1];
+      const sB=quad[12*s+3*qd],sC=quad[12*s+3*qd+1],sD=quad[12*s+3*qd+2];
+      let v=0,w=0,ww;
+      ww=(1-wx)*(1-wy);if(!mask||mask[s]){v+=ww*field[s];w+=ww;}
+      ww=wx*(1-wy);if(sB>=0&&(!mask||mask[sB])){v+=ww*field[sB];w+=ww;}
+      ww=(1-wx)*wy;if(sC>=0&&(!mask||mask[sC])){v+=ww*field[sC];w+=ww;}
+      ww=wx*wy;if(sD>=0&&(!mask||mask[sD])){v+=ww*field[sD];w+=ww;}
+      out[l]=w>0?v/w:0;}
+    return out;}
+  volume(){const {T,cont,alive,G}=this;let v=0;for(let l=0;l<G.nC;l++)if(cont[l]&&alive[l])v+=T[l]*G.area[l];return v;}
+  // ---- the coarser nested grid used for long-wavelength processes (flexure, lower-crustal flow) ----
+  // Per fine cell: its mid cell, and a bilinear stencil (three neighbouring mid cells + weights) from a table.
+  buildMidMaps(){const G=this.G,Gm=this.Gm,nC=G.nC,r=G.r,rr=G.rr,rf=Gm.r,b=r/rf,nb=Gm.nbr,mC=Gm.nC;
+    this.mid=new Int32Array(nC);this.midQ=new Uint8Array(nC);this.midS=new Uint16Array(nC);
+    this.mq=new Int32Array(12*mC);for(let m=0;m<mC;m++)for(let qd=0;qd<4;qd++){const sx=qd&1,sy=qd&2;
+      this.mq[12*m+3*qd]=nb[8*m+(sx?1:0)];this.mq[12*m+3*qd+1]=nb[8*m+(sy?3:2)];this.mq[12*m+3*qd+2]=nb[8*m+(sx?(sy?7:5):(sy?6:4))];}
+    this.mw=new Float32Array(2*b*b);
+    for(let y=0;y<b;y++)for(let x=0;x<b;x++){const tx=(x+.5)/b-.5,ty=(y+.5)/b-.5;this.mw[2*(y*b+x)]=Math.abs(tx);this.mw[2*(y*b+x)+1]=Math.abs(ty);}
+    for(let l=0;l<nC;l++){const s=(l/rr)|0,sb=l-s*rr,jj=(sb/r)|0,ii=sb-jj*r,x=ii%b,y=jj%b;
+      this.mid[l]=s*rf*rf+((jj/b)|0)*rf+((ii/b)|0);this.midQ[l]=((x+.5)/b-.5<0?1:0)+((y+.5)/b-.5<0?2:0);this.midS[l]=y*b+x;}}
+  // area-weighted mean of fine values src over cells with use[l] set; W gets the contributing area
+  toMid(src,use,X,W){const {G,mid}=this,nC=G.nC,area=G.area;X.fill(0);W.fill(0);
+    for(let l=0;l<nC;l++){if(!use[l])continue;const m=mid[l],a=area[l];X[m]+=a*src[l];W[m]+=a;}
+    for(let m=0;m<X.length;m++)if(W[m]>0)X[m]/=W[m];}
+  // bilinear interpolation of a mid-grid field back to every fine cell with use[l] set (mid cells with W = 0 are skipped)
+  fromMid(A,W,use,out){const {G,mid,midQ,midS,mq,mw}=this,nC=G.nC;
+    for(let l=0;l<nC;l++){if(!use[l])continue;const m=mid[l],o=12*m+3*midQ[l],wx=mw[2*midS[l]],wy=mw[2*midS[l]+1],mB=mq[o],mC=mq[o+1],mD=mq[o+2];
+      let v=0,w=0,ww=(1-wx)*(1-wy);if(W[m]>0){v+=ww*A[m];w+=ww;}
+      ww=wx*(1-wy);if(mB>=0&&W[mB]>0){v+=ww*A[mB];w+=ww;}
+      ww=(1-wx)*wy;if(mC>=0&&W[mC]>0){v+=ww*A[mC];w+=ww;}
+      ww=wx*wy;if(mD>=0&&W[mD]>0){v+=ww*A[mD];w+=ww;}
+      out[l]=w>0?v/w:0;}
+    return out;}
+  fineBuf(name){return this[name]||(this[name]=new Float64Array(this.G.nC));}
+  midBuf(name){return this[name]||(this[name]=new Float64Array(this.Gm.nC));}
+  // Flexural isostasy, approximated, applied to changes since the start (the inherited state is taken as in
+  // equilibrium): e = e0 + dT - (1 - ISO) * F[dT], where F is a Gaussian of width 1.18 x flexural length
+  // (the half-power point of the plate's response 1/(1+(k*alpha)^4)). Long wavelengths follow L0's Airy
+  // isostasy; loads narrower than the flexural length are held up by the plate's strength, up to a limit.
+  flexure(){
+    const {G,T,T0,e0,cont,alive,eOcean,root,e}=this,nC=G.nC,X=this.midBuf("_X"),W=this.midBuf("_W"),Y=this.midBuf("_Y"),nb=this.Gm.nbr,mC=X.length;
+    const dT=this.fineBuf("_dT");for(let l=0;l<nC;l++)dT[l]=cont[l]?T[l]-T0[l]:0;
+    this.toMid(dT,alive,X,W);
+    let A=X,B=Y;
+    for(let p=0;p<this.flexPasses;p++){for(let m=0;m<mC;m++){if(!(W[m]>0)){B[m]=0;continue;}let v=A[m],w=1;
+        for(let k=0;k<4;k++){const j=nb[8*m+k];if(j>=0&&W[j]>0){v+=A[j];w++;}}B[m]=v/w;}[A,B]=[B,A];}
+    // the plate yields rather than hold more than strengthKm of topography away from local (Airy) balance
+    const lim=this.o.strengthKm;
+    const F=this.fromMid(A,W,alive,this.fineBuf("_F"));
+    for(let l=0;l<nC;l++){if(!alive[l])continue;let rt=ROOT*F[l];
+      const air=ROOT*dT[l];if(rt<air-lim)rt=air-lim;else if(rt>air+lim)rt=air+lim;root[l]=rt;e[l]=cont[l]?e0[l]+dT[l]-rt:eOcean[l];}
+  }
+  // Lower-crustal flow: thick crust spreads sideways. At L0's scale its thickness diffusion stands in for this;
+  // here it acts only at long wavelengths (on the mid grid), so it relaxes collision piles without filling valleys.
+  // Fluxes between mid cells are symmetric (volume-conserving); interpolating the change back to fine cells is
+  // not exactly so, and that residue is booked as budget.flowResidual.
+  crustFlow(dt){
+    const kappa=this.o.flowKm2PerMyr;if(!(kappa>0))return;
+    const {G,T,cont,alive}=this,nC=G.nC,X=this.midBuf("_FX"),W=this.midBuf("_FW"),V=this.midBuf("_FV"),nb=this.Gm.nbr,mC=X.length,dx=this.world.cellKm/this.rf;
+    const use=this._cu||(this._cu=new Uint8Array(nC));for(let l=0;l<nC;l++)use[l]=alive[l]&&cont[l]?1:0;
+    this.toMid(T,use,X,W);const X0=this.midBuf("_FX0");X0.set(X);
+    // channel flux grows with the cube of channel thickness (Poiseuille flow), so hot thick crust spreads much faster;
+    // edge coefficients are fixed for the step (thickness barely changes within it), then explicit substeps
+    const eI=this._eI||(this._eI=new Int32Array(4*mC)),eJ=this._eJ||(this._eJ=new Int32Array(4*mC)),eC=this._eC||(this._eC=new Float64Array(4*mC));
+    let ne=0,cmax=0;
+    for(let m=0;m<mC;m++){if(!(W[m]>0))continue;for(let k=0;k<4;k++){const j=nb[8*m+k];if(j<=m||!(W[j]>0))continue;
+      const t=(X[m]+X[j])/(2*C.CONT_BASE),c=kappa*t*t*t;eI[ne]=m;eJ[ne]=j;eC[ne]=c*Math.min(W[m],W[j]);ne++;
+      if(c>cmax)cmax=c;}}
+    const D=cmax*dt/(dx*dx),nsub=Math.max(1,Math.ceil(D/0.2)),h=dt/nsub/(dx*dx);
+    for(let it=0;it<nsub;it++){V.fill(0);
+      for(let q=0;q<ne;q++){const m=eI[q],j=eJ[q],f=h*eC[q]*(X[j]-X[m]);V[m]+=f;V[j]-=f;}
+      for(let m=0;m<mC;m++)if(W[m]>0)X[m]+=V[m]/W[m];}
+    for(let m=0;m<mC;m++)X[m]-=X0[m];
+    const dT=this.fromMid(X,W,use,this.fineBuf("_F"));let res=0;for(let l=0;l<nC;l++){if(!use[l])continue;T[l]+=dT[l];res+=dT[l]*G.area[l];}
+    this.budget.flowResidual+=res;
+  }
+  // Outlets are sea: ocean cells and drowned continental cells. A land edge of the domain (consumed parcels, or crust
+  // beyond the margin) is a closed boundary, a drainage divide, so rivers there drain back into the domain.
+  classify(){const {G,cont,alive,e,outlet}=this,nC=G.nC;for(let l=0;l<nC;l++)outlet[l]=alive[l]&&(!cont[l]||e[l]<=0)?1:0;}
+  // Follow each parcel through welds (mapped into the survivor's frame) and splits. A split is caught in the step
+  // it happens: the new plate holds exactly the parcels that moved, at their old body indices. (Searching older
+  // descendants later is wrong: their grids refill those indices with unrelated crust.) A parcel whose body cell
+  // is empty afterwards has been consumed.
+  updateLineage(){
+    const w=this.world,plates=w.plates,pos=w.cube.pos,lk=w.cube.lookup,{slotPlate,slotBody,slotAlive}=this,nS=this.slots.length;
+    for(let s=0;s<nS;s++){if(!slotAlive[s])continue;let P=plates[slotPlate[s]],k=slotBody[s];
+      for(let g=0;g<16&&!P.alive&&P.mergedInto!==undefined;g++){const Q=P.Q,bx=pos[3*k],by=pos[3*k+1],bz=pos[3*k+2];
+        const x=Q[0]*bx+Q[1]*by+Q[2]*bz,y=Q[3]*bx+Q[4]*by+Q[5]*bz,z=Q[6]*bx+Q[7]*by+Q[8]*bz,Wn=plates[P.mergedInto],QW=Wn.Q;
+        k=lk(QW[0]*x+QW[3]*y+QW[6]*z,QW[1]*x+QW[4]*y+QW[7]*z,QW[2]*x+QW[5]*y+QW[8]*z);P=Wn;}
+      slotPlate[s]=P.id;slotBody[s]=k;}
+    for(let id=this.platesSeen;id<plates.length;id++){const Cp=plates[id];if(!Cp.alive||Cp.parent===undefined)continue;
+      for(let s=0;s<nS;s++)if(slotAlive[s]&&slotPlate[s]===Cp.parent&&Cp.T[slotBody[s]]>0)slotPlate[s]=id;}
+    this.platesSeen=plates.length;
+    const died=[];
+    for(let s=0;s<nS;s++){if(!slotAlive[s])continue;const P=plates[slotPlate[s]];if(!P.alive||P.T[slotBody[s]]<=0){slotAlive[s]=0;died.push(s);}}
+    if(died.length){const {G,T,cont,alive}=this,rr=G.rr;
+      for(const s of died)for(let l=s*rr;l<(s+1)*rr;l++){if(alive[l]&&cont[l])this.budget.consumed+=T[l]*G.area[l];alive[l]=0;}}
+  }
+  // tectonic thickening recorded by L0 this step, mapped onto slots, smoothed once (volume-conserving) against resampling noise
+  collectForcing(dt){
+    const w=this.world,N=w.N,rec=this.rec0,{slotPlate,slotBody,slotAlive,slotNb,rate}=this,nS=this.slots.length;
+    for(const [arr,k] of this.touched)arr[k]=-1;this.touched.length=0;
+    for(let s=0;s<nS;s++){if(!slotAlive[s])continue;const p=slotPlate[s];let arr=this.slotAt.get(p);if(!arr){arr=new Int32Array(N).fill(-1);this.slotAt.set(p,arr);}
+      arr[slotBody[s]]=s;this.touched.push([arr,slotBody[s]]);}
+    const raw=this._raw||(this._raw=new Float64Array(nS));raw.fill(0);
+    const own=w.owner,bi=w.bodyIdx,areaC=w.cube.area,kmA=R_KM*R_KM;let tot=0;
+    for(let i=0;i<N;i++){const v=rec[i];if(v===0)continue;const arr=this.slotAt.get(own[i]);if(!arr)continue;const s=arr[bi[i]];if(s<0)continue;raw[s]+=v;tot+=v*areaC[i]*kmA;}
+    this.budget.tectonicL0+=tot;
+    rate.fill(0);
+    for(let s=0;s<nS;s++){if(!slotAlive[s]||raw[s]===0)continue;let c=0;for(let k=0;k<4;k++){const u=slotNb[4*s+k];if(u>=0&&slotAlive[u])c++;}
+      rate[s]+=raw[s]*(1-0.125*c);for(let k=0;k<4;k++){const u=slotNb[4*s+k];if(u>=0&&slotAlive[u])rate[u]+=raw[s]*0.125;}}
+    for(let s=0;s<nS;s++)rate[s]/=dt;
+  }
+  // one coupled step: L0 advances (recording its tectonics), then L1 applies that forcing and erodes
+  advance(){
+    const w=this.world;this.rec0.fill(0);w.tecRec=this.rec0;w.step();w.tecRec=null;const dt=w.dt;
+    this.updateLineage();this.collectForcing(dt);this.step(dt);this.t+=dt;this.steps++;
+  }
+  step(dt){
+    const {G,T,cont,alive,eroded,uplifted,S,budget}=this,nC=G.nC,nbr=G.nbr,rr=G.rr,area=G.area;
+    const u=this.interp(this.rate,this._u||(this._u=new Float64Array(nC)),this.slotAlive);
+    let up=0;
+    for(let l=0;l<nC;l++){if(!alive[l]||u[l]===0)continue;const d=u[l]*dt;
+      if(cont[l]){T[l]+=d;uplifted[l]+=d;up+=d*area[l];}else if(d>0)budget.unappliedOcean+=d*area[l];}
+    budget.tectonicApplied+=up;
+    // parcels now on different plates have rifted apart: the cells along the break become sea. Single parcels that
+    // flip plate are L0 resampling noise near a boundary, so the break is judged on a majority-filtered plate map.
+    const sp=this.coherentPlates();
+    for(let l=0;l<nC;l++){if(!alive[l]||!cont[l])continue;const p=sp[(l/rr)|0];
+      for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j>=0&&alive[j]&&sp[(j/rr)|0]!==p){budget.rifted+=T[l]*area[l];cont[l]=0;this.eOcean[l]=-0.3;break;}}}
+    this.crustFlow(dt);
+    let cap=0;for(let l=0;l<nC;l++)if(alive[l]&&cont[l]&&T[l]>C.CAP){cap+=(T[l]-C.CAP)*area[l];T[l]=C.CAP;}
+    budget.capped+=cap;
+    this.flexure();this.classify();
+    route(G,this.e,alive,this.outlet,S,this.precip);
+    const hN=streamPower(this.e,S,this.K,this.o.m,dt),e=this.e,outlet=this.outlet;
+    let ero=0;
+    for(let l=0;l<nC;l++){if(!alive[l]||!cont[l]||outlet[l])continue;const d=e[l]-hN[l];if(d<=0)continue;
+      T[l]-=d;eroded[l]+=d;ero+=d*area[l];e[l]=hN[l];}
+    budget.eroded+=ero;
+    this.stats(ero/dt,up/dt);
+  }
+  coherentPlates(){const {slotPlate,slotAlive,slotNb}=this,nS=slotPlate.length,out=this._cp||(this._cp=new Int32Array(nS));
+    for(let s=0;s<nS;s++){out[s]=slotPlate[s];if(!slotAlive[s])continue;let same=0,n=0,alt=-1,altc=0;
+      for(let k=0;k<4;k++){const u=slotNb[4*s+k];if(u<0||!slotAlive[u])continue;n++;if(slotPlate[u]===slotPlate[s])same++;
+        else{let c=0;for(let q=0;q<4;q++){const v=slotNb[4*s+q];if(v>=0&&slotAlive[v]&&slotPlate[v]===slotPlate[u])c++;}if(c>altc){altc=c;alt=slotPlate[u];}}}
+      if(n>=2&&altc>same&&altc*2>n)out[s]=alt;}
+    return out;}
+  stats(ero,up){const {G,e,cont,alive}=this,nC=G.nC;let nl=0,se=0,mx=-1e9,al=0;
+    for(let l=0;l<nC;l++){if(!alive[l]||!cont[l]||e[l]<=0)continue;nl++;se+=e[l]*G.area[l];al+=G.area[l];if(e[l]>mx)mx=e[l];}
+    this.history.push({t:this.t,landKm2:al,meanElevKm:al?se/al:0,maxElevKm:nl?mx:0,erosionKm3PerMyr:ero,upliftKm3PerMyr:up,erosionRateKmPerMyr:al?ero/al:0,upliftRateKmPerMyr:al?up/al:0});}
+  // crust volume: what is there now, against what the bookkeeping says should be there
+  balance(){const b=this.budget,now=this.volume(),expect=b.initial+b.tectonicApplied+b.flowResidual-b.eroded-b.capped-b.consumed-b.rifted;return{now,expect,error:(now-expect)/b.initial};}
+  // coarse-grained L1 thickness against L0's own thickness, over parcels that are continental in both
+  divergence(){const w=this.world,{G,T,cont,alive}=this,rr=G.rr,nS=this.slots.length;let n=0,s1=0,s2=0,e1=0,e2=0;
+    for(let s=0;s<nS;s++){if(!this.slotAlive[s])continue;const P=w.plates[this.slotPlate[s]],k=this.slotBody[s];if(!P.K[k])continue;
+      let v=0,a=0,ok=true;for(let l=s*rr;l<(s+1)*rr;l++){if(!alive[l]||!cont[l]){ok=false;break;}v+=T[l]*G.area[l];a+=G.area[l];}if(!ok)continue;
+      const d=v/a-P.T[k],de=C.ISO*d;n++;s1+=d;s2+=d*d;e1+=de;e2+=de*de;}
+    return{parcels:n,meanThicknessDiffKm:n?s1/n:0,rmsThicknessDiffKm:n?Math.sqrt(s2/n):0,rmsElevationDiffKm:n?Math.sqrt(e2/n):0};}
+  // body-frame direction -> fine cell (or -1)
+  localAt(x,y,z){return this.G.localOf(this.G.lookup(x,y,z));}
+  basins(){const {S,G}=this,out=this._basin||(this._basin=new Int32Array(G.nC).fill(-1));out.fill(-1);
+    for(let h=0;h<S.ns;h++){const l=S.stack[h],r=S.rec[l];out[l]=r===l?l:out[r];}return out;}
+}
+return {Region,select,buildGrid,route,streamPower,planarGrid,scratch,Heap};
+})();
+// ===== L1-END =====
 // ---------- rendering ----------
 const {ROCK,R_KM}=SIM;
 function hexToRgb(h){const n=parseInt(h.slice(1),16);return[(n>>16)&255,(n>>8)&255,n&255];}
@@ -941,6 +1311,9 @@ function render(){
   else{if(colorsDirty)computeColors();
     for(let q=0;q<n;q++){const i=pixIdx[q],o=4*q;if(i<0){d[o+3]=0;continue;}const l=pixLimb[q];
       d[o]=cellRGB[3*i]*l>>8;d[o+1]=cellRGB[3*i+1]*l>>8;d[o+2]=cellRGB[3*i+2]*l>>8;d[o+3]=255;}}
+  const mask=l1GlobeMask();
+  if(mask){for(let q=0;q<n;q++){const i=pixIdx[q];if(i<0||!mask[i])continue;const o=4*q,a=mask[i]===2?0.38:0.18;
+    d[o]=d[o]*(1-a)+255*a;d[o+1]=d[o+1]*(1-a)+214*a;d[o+2]=d[o+2]*(1-a)+90*a;}}
   const ctx=canvas.getContext("2d");ctx.clearRect(0,0,pixW,pixH);ctx.putImageData(imgData,0,0);
   const dpr=pixW/wrap.clientWidth;
   if($("hots").checked){for(const h of world.hotspots){const p=project(h.v);if(!p)continue;const rad=Math.max(4,5*dpr);
@@ -982,7 +1355,7 @@ function drawArrow(ctx,x0,y0,x1,y1,dpr){
 const EMPTY_LOG='<li class="empty" style="border:0">Events appear here as the world evolves: rifts, collisions, sutures, consumed plates, hotspot islands.</li>';
 function build(){
   world=new SIM.World({n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:$("nnr").checked,contTarget:+$("contT").value/100});
-  lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();
+  l1Reset();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();
 }
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
@@ -1018,12 +1391,13 @@ function frame(now){
   if(running){const n=+$("speed").value,t0=performance.now();for(let k=0;k<n;k++)world.step();
     const ms=(performance.now()-t0)/n;msEma=msEma?msEma*0.9+ms*0.1:ms;
     const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=n*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
-    colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();}
+    colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();l1WorldMoved();}
+  if(l1Running){l1Tick();need=true;}
   if(proj==="globe"&&$("spin").checked&&!dragging){yaw+=0.0035;camDirty=true;need=true;}
   if(need)render();lastFrame=now;requestAnimationFrame(frame);
 }
-$("play").onclick=()=>{running=!running;$("play").textContent=running?"Pause":"Run";};
-$("stepBtn").onclick=()=>{const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
+$("play").onclick=()=>{if(l1Running)return;running=!running;$("play").textContent=running?"Pause":"Run";};
+$("stepBtn").onclick=()=>{if(l1Running)return;l1WorldMoved();const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
 $("speed").oninput=e=>$("speedVal").textContent=e.target.value;
 $("nPlates").oninput=e=>$("nPlatesVal").textContent=e.target.value;
 $("contT").oninput=e=>$("contTVal").textContent=e.target.value+"%";
@@ -1051,6 +1425,7 @@ wrap.addEventListener("pointercancel",()=>{dragging=false;});
 function inspect(e){
   const r=canvas.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*pixW),py=Math.floor((e.clientY-r.top)/r.height*pixH);
   if(px<0||py<0||px>=pixW||py>=pixH)return;const i=pixIdx[py*pixW+px];if(i<0)return;
+  if(l1Picking){l1PickAt(i);return;}
   selCell=i;showColumn();
   const w=world,e2=w.elev[i],box=$("inspect");box.style.display="block";
   box.textContent=`${cellLoc(i)}: ${e2>=0?"elevation":"depth"} ${Math.abs(e2).toFixed(1)} km. Column shown below the map.`;
@@ -1099,7 +1474,119 @@ $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
   try{await d.save({filename:name,data});$("dlNote").textContent="Saved.";}
   catch(err){$("dlNote").textContent=err&&err.code==="declined"?"Download cancelled.":"The download didn’t go through.";}};
 downloadsP=(window.claude&&typeof window.claude.use==="function")?window.claude.use("downloads").catch(()=>null):Promise.resolve(null);
-window.addEventListener("resize",()=>{pixIdx=null;render();});
+window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(region)l1Render();});
+// ---------- L1 continent ----------
+let l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
+const L1_ERO_STOPS=[[0,"#f3efe2"],[0.5,"#e7cf8e"],[2,"#d39a4f"],[5,"#a85a2c"],[10,"#5e2a17"]];
+const L1_UP_STOPS=[[0,"#eef1f3"],[2,"#c7d9e8"],[10,"#7f9fd0"],[30,"#7a55b0"],[80,"#3d1859"]];
+const LUT_ERO=buildLut(L1_ERO_STOPS,256,0,10),LUT_UP=buildLut(L1_UP_STOPS,256,0,80);
+const l1Km=()=>world.cellKm/+$("l1Ref").value;
+function l1Labels(){const o=$("l1Ref").options;for(const op of o)op.textContent=`~${(world.cellKm/+op.value).toFixed(world.cellKm/+op.value<10?1:0)} km`;}
+function l1Reset(){l1Picking=false;l1Sel=null;region=null;l1Running=false;l1Stale=false;l1Mask=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
+  document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
+  $("l1Info").innerHTML=`<div class="muted">No continent picked yet.</div>`;if(world)l1Labels();}
+// a picked continent is tied to this moment of L0; once L0 moves on without L1, the pick (or the L1 result) goes stale
+function l1WorldMoved(){if(l1Sel&&!region){l1Sel=null;l1Mask=null;$("l1Run").disabled=true;$("l1Info").innerHTML=`<div class="muted">L0 moved on, so the pick was cleared. Pick again.</div>`;}
+  else if(region&&!l1Running&&!l1Stale){l1Stale=true;l1Mask=null;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">L0 has moved on since this L1 run; the map still shows the continent at ${fmtT(region.t0+region.t)} Myr.</div>`);}}
+function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world)return null;const N=world.N;
+  if(region&&!l1Stale){const m=new Uint8Array(N),own=world.owner,bi=world.bodyIdx;
+    for(let i=0;i<N;i++){const arr=region.slotAt.get(own[i]);if(!arr)continue;const s=arr[bi[i]];if(s>=0&&region.slotAlive[s])m[i]=region.slotCont[s]?2:1;}return l1Mask=m;}
+  if(l1Sel){const m=new Uint8Array(N),{plate,dist}=l1Sel.sel;for(let i=0;i<N;i++)if(world.owner[i]===plate&&dist[world.bodyIdx[i]]>=0)m[i]=dist[world.bodyIdx[i]]===0?2:1;return l1Mask=m;}
+  return null;}
+$("l1Pick").onclick=()=>{if(l1Running)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
+  $("l1Info").innerHTML=`<div>Tap a continent on the map above.</div>`;$("hint").textContent="Tap a continent to pick it for L1.";};
+function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("hint").textContent=proj==="globe"?"Drag to turn the globe. Tap a spot to inspect it.":"Tap a spot to inspect it.";
+  const sel=L1.select(world,i,3);if(!sel){$("l1Info").innerHTML=`<div class="muted">That spot is oceanic crust. Pick again and tap a continent.</div>`;return;}
+  region=null;l1Stale=false;l1Sel={cell:i,sel};l1Mask=null;$("l1Run").disabled=false;
+  const r=+$("l1Ref").value,cells=sel.slots.length*r*r,a=sel.nCont*world.cellKm*world.cellKm;
+  $("l1Info").innerHTML=`<div><b>Continent on plate ${sel.plate}</b>, about ${(a/1e6).toFixed(1)} million km² of continental crust (${sel.nCont.toLocaleString("en-US")} L0 cells), with ${(sel.slots.length-sel.nCont).toLocaleString("en-US")} cells of margin.</div>
+    <div class="muted">At ~${l1Km().toFixed(1)} km cells that is ${(cells/1e6).toFixed(2)} million L1 cells${cells>2.5e6?"; expect a slow, memory-hungry run":""}.</div>`;render();}
+$("l1Ref").onchange=()=>{if(l1Sel&&!region)l1PickAt(l1Sel.cell);};
+$("l1Win").oninput=e=>$("l1WinVal").textContent=e.target.value+" Myr";
+$("l1K").oninput=e=>$("l1KVal").textContent=Math.pow(10,+e.target.value).toFixed(e.target.value<-1.5?3:2);
+$("l1Run").onclick=()=>{if(!l1Sel||l1Running)return;if(running){running=false;$("play").textContent="Run";}
+  $("l1Run").disabled=true;$("l1Pick").disabled=true;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
+  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value});}
+    catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not build L1: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
+    const b=$("l1Building");if(b)b.remove();
+    $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">${region.G.nC.toLocaleString("en-US")} L1 cells of ~${l1Km().toFixed(1)} km; flexure and crustal flow on a ${(world.cellKm/region.rf).toFixed(0)} km grid.</div>`);
+    l1Running=true;l1Mask=null;l1Zoom=1;l1Pan=[0,0];l1Pix=null;$("l1stage").hidden=false;$("l1controls").hidden=false;
+    document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x.dataset.z==="1"?"true":"false"));l1Legend();l1Render();l1Stats();},30);};
+function l1Tick(){const t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
+  l1Mask=null;colorsDirty=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();
+  l1Render();l1Stats();
+  if(region.t>=region.o.window-1e-9){l1Running=false;$("l1Pick").disabled=false;l1Stats(true);}}
+// map: orthographic projection about the continent's centroid, north up as it was at the start, in body coordinates
+function l1Frame(){const c=region.center,nB=region.northB,d=nB[0]*c[0]+nB[1]*c[1]+nB[2]*c[2];let nr=[nB[0]-d*c[0],nB[1]-d*c[1],nB[2]-d*c[2]];const L=Math.hypot(...nr)||1;nr=nr.map(v=>v/L);
+  const ea=[nr[1]*c[2]-nr[2]*c[1],nr[2]*c[0]-nr[0]*c[2],nr[0]*c[1]-nr[1]*c[0]];
+  if(!region._ext){const p=world.cube.pos;let x0=1,x1=-1,y0=1,y1=-1;for(const k of region.slots){const v=[p[3*k],p[3*k+1],p[3*k+2]];
+      const x=v[0]*ea[0]+v[1]*ea[1]+v[2]*ea[2],y=v[0]*nr[0]+v[1]*nr[1]+v[2]*nr[2];x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
+    const pad=world.cellRad;region._ext=[x0-pad,x1+pad,y0-pad,y1+pad];}
+  return{c,ea,nr,ext:region._ext};}
+function l1Size(){const wrap=$("l1wrap"),f=l1Frame(),[x0,x1,y0,y1]=f.ext,asp=Math.min(1.3,Math.max(0.45,(y1-y0)/(x1-x0)));
+  wrap.style.aspectRatio=`${1/asp}`;const dpr=window.devicePixelRatio||1,W=Math.min(1200,Math.round((wrap.clientWidth||600)*dpr)),H=Math.round(W*asp);
+  if(W!==l1PW||H!==l1PH||!l1Pix){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
+  if(!l1Pix){l1Pix=new Int32Array(W*H);const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
+    for(let py=0;py<H;py++){const Y=cy+(H/2-py-0.5)*s;for(let px=0;px<W;px++){const X=cx+(px+0.5-W/2)*s,z2=1-X*X-Y*Y;
+      if(z2<=0){l1Pix[py*W+px]=-1;continue;}const z=Math.sqrt(z2);
+      l1Pix[py*W+px]=region.localAt(f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,f.c[2]*z+f.ea[2]*X+f.nr[2]*Y);}}}}
+function l1Render(){if(!region)return;l1Size();
+  const W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,{e,cont,alive,eroded,uplifted,S}=region,A=S.A;
+  const rivers=$("l1Rivers").checked,cellA=region.G.area[0],Amin=Math.max(2000,10*cellA),bas=l1View==="basins"?region.basins():null,out=region.outlet;
+  const shade=l1Shade();
+  for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,l=P[q];
+    if(l<0||!alive[l]){d[o]=d[o+1]=d[o+2]=l<0?24:60;d[o+3]=255;continue;}
+    const h=e[l],land=cont[l]&&h>0,sh=shade[l];
+    let r,g,b;
+    if(!land){let k=Math.round((Math.min(h,-0.01)+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}
+    else if(l1View==="terrain"){let k=Math.round((h+8)/16*1023);k=k>1023?1023:k;r=LUT_E[k*3]*sh;g=LUT_E[k*3+1]*sh;b=LUT_E[k*3+2]*sh;}
+    else if(l1View==="erosion"){let k=Math.round(eroded[l]/10*255);k=k>255?255:k;const f=0.75+0.25*sh;r=LUT_ERO[k*3]*f;g=LUT_ERO[k*3+1]*f;b=LUT_ERO[k*3+2]*f;}
+    else if(l1View==="uplift"){let k=Math.round(uplifted[l]/80*255);k=k>255?255:k<0?0:k;const f=0.75+0.25*sh;r=LUT_UP[k*3]*f;g=LUT_UP[k*3+1]*f;b=LUT_UP[k*3+2]*f;}
+    else{const id=bas[l];let hh=Math.imul(id^(id>>>16),0x45d9f3b);hh^=hh>>>13;const c=hsl((hh>>>0)%360,45,62),f=0.7+0.3*sh;r=c[0]*f;g=c[1]*f;b=c[2]*f;}
+    if(rivers&&land&&A[l]>=Amin&&(l1View==="terrain"||l1View==="basins")){const a=Math.min(0.9,0.35+0.18*Math.log10(A[l]/Amin)*2);r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}
+    d[o]=r>255?255:r;d[o+1]=g>255?255:g;d[o+2]=b>255?255:b;d[o+3]=255;}
+  $("l1map").getContext("2d").putImageData(l1Img,0,0);}
+// hillshade per cell (light from the northwest, 6x exaggeration): the slope is a least-squares plane through the
+// land neighbours, in the map's east/north frame, so it is the same at every zoom and continuous across cube faces
+function l1Shade(){const {G,e,cont,alive}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,f=l1Frame(),ea=f.ea,nr=f.nr,out=region._shade||(region._shade=new Float32Array(nC));
+  const Lx=-0.55,Ly=0.55,Lz=0.63;
+  for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;
+    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0)continue;
+      const dx=pos[3*j]-pos[3*l],dy=pos[3*j+1]-pos[3*l+1],dz=pos[3*j+2]-pos[3*l+2],x=(dx*ea[0]+dy*ea[1]+dz*ea[2])*R_KM,y=(dx*nr[0]+dy*nr[1]+dz*nr[2])*R_KM,de=e[j]-e[l];
+      a+=x*x;b+=x*y;c+=y*y;u+=x*de;v+=y*de;}
+    const det=a*c-b*b;if(!(det>1e-9))continue;const gx=6*(c*u-b*v)/det,gy=6*(a*v-b*u)/det;
+    out[l]=Math.max(0.35,Math.min(1.35,(Lx*gx+Ly*gy+Lz)/Math.sqrt(gx*gx+gy*gy+1)/Lz));}
+  return out;}
+function l1Legend(){const L=$("l1legend");
+  if(l1View==="terrain")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span><span>Shaded relief, 6× vertical exaggeration. Blue lines drain more than ${Math.round(Math.max(2000,10*region.G.area[0])).toLocaleString("en-US")} km².</span>`;
+  else if(l1View==="erosion")L.innerHTML=`<span class="num">0</span><span class="bar" style="background:${gradCss(L1_ERO_STOPS,0,10)}"></span><span class="num">10 km</span><span>Rock removed by rivers since the start.</span>`;
+  else if(l1View==="uplift")L.innerHTML=`<span class="num">0</span><span class="bar" style="background:${gradCss(L1_UP_STOPS,0,80)}"></span><span class="num">80 km</span><span>Crust added by L0’s tectonics since the start (thickness, before isostasy).</span>`;
+  else L.innerHTML=`<span>Each colour drains to one outlet on the coast.</span>`;}
+function l1Stats(final){if(!region)return;const h=region.history[region.history.length-1],h0=region.history[0],b=region.budget,bal=region.balance();
+  $("l1stats").innerHTML=`<div>L1 time<b class="num">${fmtT(region.t)} / ${region.o.window} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
+    <div>Mean elevation<b class="num">${h.meanElevKm.toFixed(2)} km</b></div><div>Highest point<b class="num">${h.maxElevKm.toFixed(1)} km</b></div>
+    <div>Mean erosion<b class="num">${Math.round(h.erosionRateKmPerMyr*1000)} m/Myr</b></div><div>Mean tectonic input<b class="num">${Math.round(h.upliftRateKmPerMyr*1000)} m/Myr</b></div>
+    <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>`;
+  const M=v=>(v/1e6).toFixed(2)+" M km³";
+  let html=`<div><b>Crust budget</b> (continental crust in the domain): started ${M(b.initial)}; L0 tectonics added ${M(b.tectonicApplied)} (${M(b.unappliedOcean)} more fell on static ocean); rivers removed ${M(b.eroded)}; ${M(b.capped)} lost to the 75 km thickness cap; ${M(b.consumed)} consumed at plate boundaries; ${M(b.rifted)} turned to sea along rifts. Now ${M(bal.now)}, bookkeeping error ${Math.abs(bal.error)<1e-9?"below 10⁻⁹":bal.error.toExponential(1)}.</div>`;
+  if(final){const dv=region.divergence();html+=`<div><b>L0 against L1</b> on ${dv.parcels.toLocaleString("en-US")} parcels continental in both: L1’s crust is ${dv.meanThicknessDiffKm>=0?"thicker":"thinner"} by ${Math.abs(dv.meanThicknessDiffKm).toFixed(1)} km on average (root-mean-square difference ${dv.rmsThicknessDiffKm.toFixed(1)} km, or ${dv.rmsElevationDiffKm.toFixed(2)} km of Airy elevation). L0 keeps its own crude erosion; this is how far the two levels drifted apart.</div>`;}
+  $("l1budget").innerHTML=html;}
+document.querySelectorAll("#l1views button").forEach(b=>b.onclick=()=>{l1View=b.dataset.v;
+  document.querySelectorAll("#l1views button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));l1Legend();l1Render();});
+document.querySelectorAll("#l1zoom button").forEach(b=>b.onclick=()=>{l1Zoom=+b.dataset.z;if(l1Zoom===1)l1Pan=[0,0];l1Pix=null;
+  document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));l1Render();});
+$("l1Rivers").onchange=()=>l1Render();
+{const wrap=$("l1wrap");let drag=false,dx0=0,dy0=0,lx=0,ly=0,mv=false;
+  wrap.addEventListener("pointerdown",e=>{if(!region)return;drag=true;mv=false;dx0=lx=e.clientX;dy0=ly=e.clientY;wrap.setPointerCapture(e.pointerId);});
+  wrap.addEventListener("pointermove",e=>{if(!drag)return;if(Math.abs(e.clientX-dx0)+Math.abs(e.clientY-dy0)>5)mv=true;if(!mv||l1Zoom===1)return;
+    const k=l1Geo.s*l1PW/wrap.clientWidth;l1Pan[0]-=(e.clientX-lx)*k;l1Pan[1]+=(e.clientY-ly)*k;lx=e.clientX;ly=e.clientY;l1Pix=null;l1Render();});
+  wrap.addEventListener("pointerup",e=>{drag=false;if(!mv)l1Inspect(e);});wrap.addEventListener("pointercancel",()=>{drag=false;});}
+function l1Inspect(e){if(!region||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
+  if(px<0||py<0||px>=l1PW||py>=l1PH)return;const l=l1Pix[py*l1PW+px],box=$("l1inspect");if(l<0||!region.alive[l])return;
+  const h=region.e[l];box.style.display="block";
+  box.textContent=region.cont[l]?`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km, crust ${region.T[l].toFixed(1)} km, eroded ${region.eroded[l].toFixed(2)} km, tectonic input ${region.uplifted[l].toFixed(1)} km, drains ${Math.round(region.S.A[l]).toLocaleString("en-US")} km²`:`Ocean, depth ${Math.abs(h).toFixed(1)} km (held fixed)`;
+  clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",4000);}
+
 build();updateLegend();requestAnimationFrame(frame);
 </script>
 </body>

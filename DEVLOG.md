@@ -1,6 +1,6 @@
 # Development log
 
-How L0 got to its current form: what was tried, what broke, how it was diagnosed, and what fixed it. Snapshots of the simulation core at each milestone are in `history/`. Numbers are from headless Node.js runs unless stated otherwise.
+How L0 and L1 got to their current form: what was tried, what broke, how it was diagnosed, and what fixed it. Snapshots of the simulation core at each milestone are in `history/`. Numbers are from headless Node.js runs unless stated otherwise.
 
 A recurring lesson: **measure before tuning.** Several problems had a different cause than the first guess, and two "obvious" fixes would not have worked. Most diagnoses came from instrumenting a copy of the simulation and budgeting a quantity (crust area, crust volume, flicker events) by cause.
 
@@ -91,6 +91,23 @@ A recurring lesson: **measure before tuning.** Several problems had a different 
 - Peaks stay at 7–8 km, and continental crust holds within about 4 points of target.
 
 **Known follow-up:** the volume test now shows the 75 km thickness cap as the dominant sink (about 280k cell-km deleted over 400 Myr), with continental volume still down about 17% over that window. Routing excess sideways instead of deleting it is the obvious next step.
+
+## L1 v1 (`src/l1.js`): one continent, coupled to L0
+
+**Design decision:** instead of holding a refined continent to L0's final elevation, start from L0 at t0 and run both forward, L0 supplying only tectonic thickening and L1 replacing L0's surface processes. Consistency between levels became a crust-volume budget rather than an elevation constraint. Rationale and time scales are in README section 5.
+
+**L0 changes, all pure recording:** an optional per-step tectonic-thickening record (arcs, collisions, hotspots, collapse), a `parent` on split-off plates and `mergedInto` on welded ones, and elevation pulled out as a pure function `elevOf` shared by both levels. A run with the recorder on is bit-identical to the previous commit's simulation (checked by hashing elevation and plate ownership at 500 Myr).
+
+**What went wrong first, and the fixes:**
+- **22 km peaks along consumed parcels.** Land cells on the domain edge were treated as fixed base level, so they never eroded while collision forcing piled crust onto them. A land edge is now a closed boundary (a drainage divide).
+- **Spikes up to 55 km after flexure.** Elevation came from the total thickness anomaly, with ocean cells entered as a "negative crust" load, which boosted land next to deep ocean as soon as coasts sharpened. Flexure now acts only on changes since t0; the inherited state counts as already in equilibrium.
+- **40 km piles on narrow arc peninsulas.** Linear elastic support held up ~140 km of accumulated L0 thickening on a strip two cells wide, surrounded by static ocean. Three changes: thickness-dependent lower-crustal flow (∝ T³), a 3 km strength limit on departures from local balance, and applying the 75 km cap *before* computing elevation rather than after (the cap had been running after elevation within the step). Peaks now stay under ~10 km.
+- **Calibrating K:** see the README table. K = 1 (low end of field estimates for m = 0.5) flattened the continent to near sea level within 75 Myr and left L1's crust 4–6 km thinner than L0's. K = 0.1 tracks L0 and gives tens of m/Myr of mean continental erosion. This anchors L1 to L0's own crude erosion rate, which is itself a choice; it is exposed as a slider.
+- **Parallel rivers.** D8 routing on a bilinear surface draws parallel streams: the inherited slope drops ~13 m per cell, against 1 m of symmetry-breaking jitter. Fractal relief in L1's own band (from 1.5 L0 cells down to 2 L1 cells) gave dendritic networks; Hack's exponent stayed at 0.53–0.54.
+- **A checkerboard of tiny seas.** A parcel momentarily absent from its plate was searched for on every descendant plate, including ones split off long before t0, whose grids had refilled the same body index with unrelated crust. Parcels jumped plates and every jump opened a "rift". Splits are now caught in the step they happen. (A majority filter tried first could not fix a checkerboard: it just inverted it.)
+- **Terraced shading when zoomed.** Pixel-space differences over nearest-sampled cells step at every cell edge. Shading is now per cell, from a least-squares plane through the land neighbours.
+
+**Speed:** the first version took ~430 ms per coupled step at 483k cells. Per-cell closures in the coarse↔fine transfers (flexure, crustal flow) were replaced by precomputed stencils, crustal-flow edge coefficients are computed once per step, and Priority-Flood uses the Zhou et al. (2016) variant (bit-identical filled surface, receivers and areas compared with the plain algorithm). Now ~250 ms in Chromium.
 
 ---
 

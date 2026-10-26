@@ -15,6 +15,7 @@ function norm3(v){const l=Math.hypot(v[0],v[1],v[2])||1;return[v[0]/l,v[1]/l,v[2
 function cross(a,b){return[a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];}
 function latlon(x,y,z){return[Math.asin(Math.max(-1,Math.min(1,z)))*180/Math.PI,Math.atan2(y,x)*180/Math.PI];}
 function loc(x,y,z){const [lat,lon]=latlon(x,y,z);return `${Math.abs(lat).toFixed(0)}°${lat>=0?"N":"S"} ${Math.abs(lon).toFixed(0)}°${lon>=0?"E":"W"}`;}
+function elevOf(K,T,B,S,t){if(K)return C.ISO*(T-C.CONT_BASE);const e=-2.6-0.33*Math.sqrt(Math.max(0,t-B))+0.5*(T-C.OCEAN_T)+0.3*S;return e<-7?-7:e;}
 function kindOf(X,S){if(Math.abs(S)>2*Math.abs(X))return FK.STRIKE;return X>=0?FK.THRUST:FK.NORMAL;}
 
 function makeNoise3(seed){
@@ -263,16 +264,18 @@ class World{
     // 4. surface processes on the fixed grid; rock units are pushed or eroded as they happen
     this.gather();
     const {wT,wB,wS,wK,wCol,dT,arcAdd,arcPlate,collAdd,collPlate,trench,pool}=this,t=this.t,r=this.rand;
+    // optional record of tectonic thickening per fixed cell (arcs, collisions, hotspots, collapse), read by L1
+    const rec=this.tecRec||null;
     for(let i=0;i<N;i++){
-      const a=arcAdd[i];if(a>0&&arcPlate[i]===O[i]){wT[i]+=a;if(wK[i]?a>0.25:wT[i]>C.OCEAN_T+4)pool.push(wCol[i],ROCK.ARC,t,a,O[i]);}
-      const c=collAdd[i];if(c>0&&collPlate[i]===O[i]){wT[i]+=c;if(!wK[i]&&wT[i]>C.ARC_CONV)wK[i]=1; // continental slices pushed onto seafloor accrete as continent
+      const a=arcAdd[i];if(a>0&&arcPlate[i]===O[i]){wT[i]+=a;if(rec)rec[i]+=a;if(wK[i]?a>0.25:wT[i]>C.OCEAN_T+4)pool.push(wCol[i],ROCK.ARC,t,a,O[i]);}
+      const c=collAdd[i];if(c>0&&collPlate[i]===O[i]){wT[i]+=c;if(rec)rec[i]+=c;if(!wK[i]&&wT[i]>C.ARC_CONV)wK[i]=1; // continental slices pushed onto seafloor accrete as continent
         if(c>0.4)pool.push(wCol[i],ROCK.OROGEN,t,c*0.4,O[i]);}
       trench[i]*=0.85;
     }
     for(const h of this.hotspots){const i=h.i;
-      if(wK[i]){wT[i]+=0.1*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,0.1*dt,O[i]);}
-      else{wT[i]+=C.HOT*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,C.HOT*dt,O[i]);
-        for(let k=0;k<4;k++){const j=nb[4*i+k];if(!wK[j]){wT[j]+=0.3*C.HOT*dt;pool.push(wCol[j],ROCK.HOTSPOT,t,0.3*C.HOT*dt,O[j]);}}}
+      if(wK[i]){wT[i]+=0.1*dt;if(rec)rec[i]+=0.1*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,0.1*dt,O[i]);}
+      else{wT[i]+=C.HOT*dt;if(rec)rec[i]+=C.HOT*dt;pool.push(wCol[i],ROCK.HOTSPOT,t,C.HOT*dt,O[i]);
+        for(let k=0;k<4;k++){const j=nb[4*i+k];if(!wK[j]){wT[j]+=0.3*C.HOT*dt;if(rec)rec[j]+=0.3*C.HOT*dt;pool.push(wCol[j],ROCK.HOTSPOT,t,0.3*C.HOT*dt,O[j]);}}}
     }
     this.computeElev();
     const fb=Math.pow((this.contFrac||this.contTarget)/this.contTarget,6),sedConv=C.SED_CONV*fb,collapseP=0.05*dt/fb;
@@ -299,7 +302,7 @@ class World{
     for(let i=0;i<N;i++){
       if(!wK[i]||wT[i]<C.COLLAPSE||r()>collapseP)continue;
       const c=nb[4*i+Math.floor(r()*4)];
-      if(!wK[c]&&O[c]===O[i]){const base=pool.R[wCol[i]*U];wK[c]=1;wT[c]=28;wS[c]=0;wCol[c]=pool.make(base,t,26,O[i]);pool.push(wCol[c],ROCK.CLASTIC,t,2,O[i]);wT[i]-=8;}
+      if(!wK[c]&&O[c]===O[i]){const base=pool.R[wCol[i]*U];if(rec){rec[i]-=8;rec[c]+=28-wT[c];}wK[c]=1;wT[c]=28;wS[c]=0;wCol[c]=pool.make(base,t,26,O[i]);pool.push(wCol[c],ROCK.CLASTIC,t,2,O[i]);wT[i]-=8;}
     }
     if(fb>1){const pz=0.1*dt*(fb-1);
       for(let i=0;i<N;i++){if(!wK[i]||E[i]>0.3||r()>pz)continue;let coast=false;for(let k=0;k<4;k++)if(!wK[nb[4*i+k]])coast=true;
@@ -378,9 +381,7 @@ class World{
     for(let c=0;c<pool.cap;c++){if(!pool.used[c])continue;if(!pool.mark[c]){const f=pool.flt[c];pool.release(c);if(f>=0){fpool.release(f);pool.flt[c]=-1;}}else if(pool.flt[c]>=0)fpool.mark[pool.flt[c]]=1;}
     for(let f=0;f<fpool.cap;f++)if(fpool.used[f]&&!fpool.mark[f])fpool.release(f);
   }
-  computeElev(){const {N,wT,wK,wB,wS,elev:E,t}=this;
-    for(let i=0;i<N;i++){if(wK[i])E[i]=C.ISO*(wT[i]-C.CONT_BASE);
-      else{let e=-2.6-0.33*Math.sqrt(Math.max(0,t-wB[i]))+0.5*(wT[i]-C.OCEAN_T)+0.3*wS[i];E[i]=e<-7?-7:e;}}}
+  computeElev(){const {N,wT,wK,wB,wS,elev:E,t}=this;for(let i=0;i<N;i++)E[i]=elevOf(wK[i],wT[i],wB[i],wS[i],t);}
   updateStats(centroids){
     const {N,plates,owner,wK,wB,wCol,pool,elev:E,t}=this,p=this.cube.pos;
     for(const P of plates){P.area=0;P.contArea=0;P._c=[0,0,0];}
@@ -437,12 +438,12 @@ class World{
     const tot=Wn.area+L.area;for(let k=0;k<3;k++)Wn.W[k]=(Wn.W[k]*Wn.area+L.W[k]*L.area)/tot;
     Wn.area=tot;Wn.contArea+=L.contArea;
     this.log("suture",`Plates ${Wn.id} and ${L.id} weld into one along a suture`,Wn.c);
-    this.kill(L);purge();this.gather();this.gc();
+    L.mergedInto=Wn.id;this.kill(L);purge();this.gather();this.gc();
   }
   split(P){
     const {N,owner,bodyIdx,rand:r,noise:nz}=this,p=this.cube.pos;
     const c=P.c;let n=randUnit(r);const d=n[0]*c[0]+n[1]*c[1]+n[2]*c[2];n=norm3([n[0]-d*c[0],n[1]-d*c[1],n[2]-d*c[2]]);
-    const a=norm3(cross(c,n));const Qp=this.addPlate(P.W);Qp.Q.set(P.Q);const Q=P.Q;
+    const a=norm3(cross(c,n));const Qp=this.addPlate(P.W);Qp.Q.set(P.Q);Qp.parent=P.id;const Q=P.Q;
     const moved=[];let contA=0,contB=0;
     for(let k=0;k<N;k++){if(P.T[k]<=0)continue;const bx=p[3*k],by=p[3*k+1],bz=p[3*k+2];
       const x=Q[0]*bx+Q[1]*by+Q[2]*bz,y=Q[3]*bx+Q[4]*by+Q[5]*bz,z=Q[6]*bx+Q[7]*by+Q[8]*bz;
@@ -606,6 +607,6 @@ class World{
     };
   }
 }
-return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3};
+return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3,makeLookup,elevOf,hashStr};
 })();
 // ===== SIM-END =====
