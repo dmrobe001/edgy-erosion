@@ -123,8 +123,11 @@ class World{
   addPlate(W){const N=this.N,id=this.plates.length;
     const P={id,Q:new Float64Array([1,0,0,0,1,0,0,0,1]),W:W.slice(),T:new Float32Array(N),B:new Float32Array(N),S:new Float32Array(N),K:new Uint8Array(N),
       col:new Int32Array(N).fill(-1),clr:new Int32Array(N).fill(-10),seen:new Int32Array(N).fill(-1),w0:Math.max(this.wmin*3,Math.min(this.wmax*0.75,Math.hypot(W[0],W[1],W[2]))),area:0,contArea:0,maxArea:0,c:[1,0,0],alive:true,hue:(id*137.508+20)%360};
-    this.plates.push(P);return P;}
-  kill(P){P.alive=false;P.T=P.B=P.S=P.K=P.col=P.clr=P.seen=null;P.area=0;}
+    if(this.tracking)P.pid=new Int32Array(N).fill(-1);this.plates.push(P);return P;}
+  kill(P){P.alive=false;P.T=P.B=P.S=P.K=P.col=P.clr=P.seen=P.pid=null;P.area=0;}
+  // Optional parcel identities for L1 (recording only): every crust cell present now gets id = plate*N + body cell,
+  // carried wherever L0 moves crust (splits, welds, hole fills) and cleared where new crust forms.
+  trackParcels(){const N=this.N;this.tracking=true;for(const P of this.plates){if(!P.alive)continue;P.pid=new Int32Array(N).fill(-1);for(let k=0;k<N;k++)if(P.T[k]>0)P.pid[k]=P.id*N+k;}}
   log(type,text,v){this.nEvents++;const ll=v?latlon(v[0],v[1],v[2]):null;
     this.events.push({n:this.nEvents,t:this.t,type,text,where:v?loc(v[0],v[1],v[2]):"",lat:ll?+ll[0].toFixed(2):null,lon:ll?+ll[1].toFixed(2):null});
     if(this.events.length>400)this.events.shift();}
@@ -174,8 +177,8 @@ class World{
       if(M){const D=this.fpool.D;for(const o of [g*FS+5,g*FS+12]){const x=D[o],y=D[o+1],z=D[o+2];if(isNaN(x))continue;
         D[o]=M[0]*x+M[1]*y+M[2]*z;D[o+1]=M[3]*x+M[4]*y+M[5]*z;D[o+2]=M[6]*x+M[7]*y+M[8]*z;}}}
     return d;}
-  copyCell(Ps,ks,Pd,kd,M){Pd.T[kd]=Ps.T[ks];Pd.B[kd]=Ps.B[ks];Pd.S[kd]=Ps.S[ks];Pd.K[kd]=Ps.K[ks];Pd.col[kd]=this.cloneCol(Ps.col[ks],M);}
-  newOcean(P,k){P.T[k]=C.OCEAN_T;P.B[k]=this.t;P.S[k]=0;P.K[k]=0;P.col[k]=this.pool.make(ROCK.OCEAN,this.t,C.OCEAN_T,P.id);}
+  copyCell(Ps,ks,Pd,kd,M){Pd.T[kd]=Ps.T[ks];Pd.B[kd]=Ps.B[ks];Pd.S[kd]=Ps.S[ks];Pd.K[kd]=Ps.K[ks];Pd.col[kd]=this.cloneCol(Ps.col[ks],M);if(Pd.pid)Pd.pid[kd]=Ps.pid?Ps.pid[ks]:-1;}
+  newOcean(P,k){if(P.pid)P.pid[k]=-1;P.T[k]=C.OCEAN_T;P.B[k]=this.t;P.S[k]=0;P.K[k]=0;P.col[k]=this.pool.make(ROCK.OCEAN,this.t,C.OCEAN_T,P.id);}
   deposit(arr,parr,plate,x,y,z,ux,uy,uz,amt,W,k0){
     const d=this.cellRad,lk=this.cube.lookup;
     for(let k=k0;k<W.length;k++){const c=lk(x+ux*d*k,y+uy*d*k,z+uz*d*k);arr[c]+=amt*W[k];parr[c]=plate;}
@@ -451,10 +454,10 @@ class World{
     for(let k=0;k<N;k++){if(P.T[k]<=0)continue;const bx=p[3*k],by=p[3*k+1],bz=p[3*k+2];
       const x=Q[0]*bx+Q[1]*by+Q[2]*bz,y=Q[3]*bx+Q[4]*by+Q[5]*bz,z=Q[6]*bx+Q[7]*by+Q[8]*bz;
       const s=x*n[0]+y*n[1]+z*n[2]+(nz(x+40,y,z,2.2,4)-0.5)*0.5;
-      if(s>0){Qp.T[k]=P.T[k];Qp.B[k]=P.B[k];Qp.S[k]=P.S[k];Qp.K[k]=P.K[k];Qp.col[k]=P.col[k];P.T[k]=0;P.col[k]=-1;moved.push(k);if(Qp.K[k])contB++;}
+      if(s>0){Qp.T[k]=P.T[k];Qp.B[k]=P.B[k];Qp.S[k]=P.S[k];Qp.K[k]=P.K[k];Qp.col[k]=P.col[k];if(P.pid){Qp.pid[k]=P.pid[k];P.pid[k]=-1;}P.T[k]=0;P.col[k]=-1;moved.push(k);if(Qp.K[k])contB++;}
       else if(P.K[k])contA++;}
     let nNew=0;for(let i=0;i<N;i++)if(owner[i]===P.id&&Qp.T[bodyIdx[i]]>0)nNew++;
-    if(nNew<60||P.area-nNew<60){for(const k of moved){P.T[k]=Qp.T[k];P.B[k]=Qp.B[k];P.S[k]=Qp.S[k];P.K[k]=Qp.K[k];P.col[k]=Qp.col[k];}this.kill(Qp);return;}
+    if(nNew<60||P.area-nNew<60){for(const k of moved){P.T[k]=Qp.T[k];P.B[k]=Qp.B[k];P.S[k]=Qp.S[k];P.K[k]=Qp.K[k];P.col[k]=Qp.col[k];if(P.pid)P.pid[k]=Qp.pid[k];}this.kill(Qp);return;}
     for(let i=0;i<N;i++)if(owner[i]===P.id&&Qp.T[bodyIdx[i]]>0)owner[i]=Qp.id;
     const s=(1.5+2.5*r())*10/R_KM;for(let k=0;k<3;k++){Qp.W[k]=P.W[k]+a[k]*s/2;P.W[k]-=a[k]*s/2;}
     this.log("rift",`${contA>40&&contB>40?"Continental rift":"Rift"}: plate ${P.id} splits and plate ${Qp.id} drifts away`,c);

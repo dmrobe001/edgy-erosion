@@ -3,7 +3,7 @@
 const fs = require("fs"), path = require("path");
 const html = fs.readFileSync(path.join(__dirname, "..", "plates.html"), "utf8");
 const code = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
-const defaults = { grid: "64", seed: "genesis", nPlates: "10", mode: "scatter", speed: "3", contT: "50", l1Ref: "2", l1Win: "6", l1K: "-1" }, els = {};
+const defaults = { grid: "64", seed: "genesis", nPlates: "10", mode: "scatter", speed: "3", contT: "50", l1Ref: "2", l1Win: "6", l1K: "-1", l1Reach: "1200" }, els = {};
 function el(id) { return els[id] || (els[id] = { id, value: defaults[id] || "", checked: true, hidden: false, textContent: "", innerHTML: "", style: {}, className: "", dataset: {},
   clientWidth: 400, clientHeight: 400, width: 0, height: 0, children: [], options: id === "l1Ref" ? [{ value: "2" }, { value: "4" }] : [], disabled: false,
   addEventListener() {}, setAttribute() {}, setPointerCapture() {}, insertAdjacentHTML(_, h) { this.innerHTML += h; }, remove() {}, prepend(c) { this.children.unshift(c); },

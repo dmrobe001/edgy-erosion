@@ -299,7 +299,7 @@ $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
 downloadsP=(window.claude&&typeof window.claude.use==="function")?window.claude.use("downloads").catch(()=>null):Promise.resolve(null);
 window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(region)l1Render();});
 // ---------- L1 continent ----------
-let l1Look=null,l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
+let l1Look=null,l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1Back=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
 const L1_ERO_STOPS=[[0,"#f3efe2"],[0.5,"#e7cf8e"],[2,"#d39a4f"],[5,"#a85a2c"],[10,"#5e2a17"]];
 const L1_UP_STOPS=[[0,"#eef1f3"],[2,"#c7d9e8"],[10,"#7f9fd0"],[30,"#7a55b0"],[80,"#3d1859"]];
 const LUT_ERO=buildLut(L1_ERO_STOPS,256,0,10),LUT_UP=buildLut(L1_UP_STOPS,256,0,80);
@@ -312,8 +312,8 @@ function l1Reset(){l1Look=null;l1Picking=false;l1Sel=null;region=null;l1Running=
 function l1WorldMoved(){if(l1Sel&&!region){l1Sel=null;l1Mask=null;$("l1Run").disabled=true;$("l1Info").innerHTML=`<div class="muted">L0 moved on, so the pick was cleared. Pick again.</div>`;}
   else if(region&&!l1Running&&!l1Stale){l1Stale=true;l1Mask=null;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">L0 has moved on since this L1 run; the map still shows the continent at ${fmtT(region.t0+region.t)} Myr.</div>`);}}
 function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world)return null;const N=world.N;
-  if(region&&!l1Stale){const m=new Uint8Array(N),own=world.owner,bi=world.bodyIdx;
-    for(let i=0;i<N;i++){const arr=region.slotAt.get(own[i]);if(!arr)continue;const s=arr[bi[i]];if(s>=0&&region.slotAlive[s])m[i]=region.slotCont[s]?2:1;}return l1Mask=m;}
+  if(region&&!l1Stale){const m=new Uint8Array(N);
+    for(let i=0;i<N;i++){const s=region.slotAtFixed(i);if(s>=0&&region.slotActive[s])m[i]=region.slotTarget[s]?2:1;}return l1Mask=m;}
   if(l1Sel){const m=new Uint8Array(N),{plate,dist}=l1Sel.sel;for(let i=0;i<N;i++)if(world.owner[i]===plate&&dist[world.bodyIdx[i]]>=0)m[i]=dist[world.bodyIdx[i]]===0?2:1;return l1Mask=m;}
   return null;}
 $("l1Pick").onclick=()=>{if(l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
@@ -326,54 +326,65 @@ function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("h
     <div class="muted">At ~${l1Km().toFixed(1)} km cells that is ${(cells/1e6).toFixed(2)} million L1 cells${cells>2.5e6?"; expect a slow, memory-hungry run":""}.</div>`;render();}
 $("l1Ref").onchange=()=>{if(l1Sel&&!region)l1PickAt(l1Sel.cell);};
 $("l1Win").oninput=e=>$("l1WinVal").textContent=e.target.value+" Myr";
+$("l1Reach").oninput=e=>$("l1ReachVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";
 $("l1K").oninput=e=>$("l1KVal").textContent=Math.pow(10,+e.target.value).toFixed(e.target.value<-1.5?3:2);
 $("l1Run").onclick=()=>{if(!l1Sel||l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}
   $("l1Run").disabled=true;$("l1Pick").disabled=true;
-  if($("l1Look").checked){l1Look=new L1.Lookahead(world,l1Sel.cell,+$("l1Win").value);$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Looking">Looking ahead…</div>`);}
-  else l1Build([]);};
+  l1Look=new L1.Lookahead(world,l1Sel.cell,+$("l1Win").value,{reachKm:+$("l1Reach").value});$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Looking">Looking ahead…</div>`);};
 // the lookahead runs L0 forward in slices between frames, then rewinds it exactly
 function l1LookTick(){const done=l1Look.advance(120),el=$("l1Looking"),w=+$("l1Win").value;
   if(el)el.textContent=`Looking ahead: ${Math.min(w,Math.round(world.t-l1Look.t0))} / ${w} Myr…`;
-  if(!done)return;const partners=l1Look.finish();l1Look=null;if(el)el.remove();
-  const km=world.cellKm*world.cellKm;
-  $("l1Info").insertAdjacentHTML("beforeend",partners.length?partners.map(p=>`<div>Looking ahead: a continent on plate ${p.plate} (about ${(p.nCont*km/1e6).toFixed(1)} million km²) welds on at +${Math.round(p.t)} Myr; included.</div>`).join(""):`<div class="muted">Looking ahead: no continent welds onto this one within the window.</div>`);
-  l1Build(partners);}
-function l1Build(partners){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
-  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value,partners});}
+  if(!done)return;const rel=l1Look.finish();l1Look=null;if(el)el.remove();
+  // summarize: crust beyond the picked continent, by the plate that held it at the start
+  const km=world.cellKm*world.cellKm,N=rel.N,by=new Map();
+  for(let q=0;q<rel.pids.length;q++){if(rel.target[q])continue;const p=(rel.pids[q]/N)|0,v=by.get(p)||{n:0,first:Infinity,leave:0};v.n++;v.first=Math.min(v.first,rel.first[q]);if(isFinite(rel.last[q]))v.leave++;by.set(p,v);}
+  const lines=[...by].sort((a,b)=>b[1].n-a[1].n).map(([p,v])=>`<div>Crust from plate ${p} (about ${(v.n*km/1e6).toFixed(1)} million km²) comes within reach ${v.first>0?`at +${Math.round(v.first)} Myr`:"from the start"}${v.leave?`; ${Math.round(100*v.leave/v.n)}% of it later separates and drops out`:""}.</div>`);
+  $("l1Info").insertAdjacentHTML("beforeend",lines.length?lines.join(""):`<div class="muted">Looking ahead: no other land comes within reach during the window.</div>`);
+  l1Build(rel);}
+function l1Build(rel){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
+  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value,relevance:rel});}
     catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not build L1: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
     const b=$("l1Building");if(b)b.remove();
     $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">${region.G.nC.toLocaleString("en-US")} L1 cells of ~${l1Km().toFixed(1)} km; flexure and crustal flow on a ${(world.cellKm/region.rf).toFixed(0)} km grid.</div>`);
     l1Running=true;l1Mask=null;l1Zoom=1;l1Pan=[0,0];l1Pix=null;$("l1stage").hidden=false;$("l1controls").hidden=false;
     document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x.dataset.z==="1"?"true":"false"));l1Legend();l1Render();l1Stats();},30);};
-function l1Tick(){const nw=region.welds.length,t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
+function l1Tick(){const t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
   l1Mask=null;colorsDirty=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();
-  for(const wd of region.welds.slice(nw))$("l1Info").insertAdjacentHTML("beforeend",`<div>At +${Math.round(region.t)} Myr the continents weld; ${wd.links.toLocaleString("en-US")} links stitched across the suture.</div>`);
-  // while parts move relative to each other the map is redrawn every other step (its pixel lookup changes)
-  if(!region.moving()||region.steps%2===0||region.t>=region.o.window-1e-9)l1Render();l1Stats();
+  // pieces of crust move against each other, so the map's pixel lookup is rebuilt; it is redrawn every other step
+  if(region.steps%2===0||region.t>=region.o.window-1e-9){l1Pix=null;l1Render();}l1Stats();
   if(region.t>=region.o.window-1e-9){l1Running=false;$("l1Pick").disabled=false;l1Stats(true);}}
-// map: orthographic projection about the continent's centroid, north up as it was at the start, in body coordinates
+// map: orthographic projection about the picked continent's centroid, north up as it was at the start, in the frame
+// of the plate carrying most of it (F0 maps that frame to the world)
 function l1Frame(){const c=region.center,nB=region.northB,d=nB[0]*c[0]+nB[1]*c[1]+nB[2]*c[2];let nr=[nB[0]-d*c[0],nB[1]-d*c[1],nB[2]-d*c[2]];const L=Math.hypot(...nr)||1;nr=nr.map(v=>v/L);
   const ea=[nr[1]*c[2]-nr[2]*c[1],nr[2]*c[0]-nr[0]*c[2],nr[0]*c[1]-nr[1]*c[0]];
-  if(!region._ext){const p=world.cube.pos,parts=region.viewParts();let x0=1,x1=-1,y0=1,y1=-1;
-    for(let s=0;s<region.slots.length;s++){const k=region.slots[s],pt=parts.find(x=>x.piece===region.pieceOf[s]&&x.plate===region.slotPlate[s]);let v=[p[3*k],p[3*k+1],p[3*k+2]];
-      if(pt){const R=pt.A;v=[R[0]*v[0]+R[3]*v[1]+R[6]*v[2],R[1]*v[0]+R[4]*v[1]+R[7]*v[2],R[2]*v[0]+R[5]*v[1]+R[8]*v[2]];} // piece frame -> map frame
+  if(!region._ext){const p=world.cube.pos,F0=region.mapFrame();let x0=1,x1=-1,y0=1,y1=-1;
+    for(let s=0;s<region.slots.length;s++){const k=region.slots[s],F=region.partF(s);if(!F)continue;const b=[p[3*k],p[3*k+1],p[3*k+2]];
+      const wv=[F[0]*b[0]+F[1]*b[1]+F[2]*b[2],F[3]*b[0]+F[4]*b[1]+F[5]*b[2],F[6]*b[0]+F[7]*b[1]+F[8]*b[2]];
+      const v=[F0[0]*wv[0]+F0[3]*wv[1]+F0[6]*wv[2],F0[1]*wv[0]+F0[4]*wv[1]+F0[7]*wv[2],F0[2]*wv[0]+F0[5]*wv[1]+F0[8]*wv[2]]; // world -> map frame
       const x=v[0]*ea[0]+v[1]*ea[1]+v[2]*ea[2],y=v[0]*nr[0]+v[1]*nr[1]+v[2]*nr[2];x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
     const pad=world.cellRad;region._ext=[x0-pad,x1+pad,y0-pad,y1+pad];}
   return{c,ea,nr,ext:region._ext};}
 function l1Size(){const wrap=$("l1wrap"),f=l1Frame(),[x0,x1,y0,y1]=f.ext,asp=Math.min(1.3,Math.max(0.45,(y1-y0)/(x1-x0)));
-  wrap.style.aspectRatio=`${1/asp}`;const dpr=window.devicePixelRatio||1,W=Math.min(1200,Math.round((wrap.clientWidth||600)*dpr)),H=Math.round(W*asp);
-  if(region.moving()&&region._drawnAt!==region.steps){l1Pix=null;region._drawnAt=region.steps;}
+  wrap.style.aspectRatio=`${1/asp}`;const dpr=window.devicePixelRatio||1,W=Math.min(1000,Math.round((wrap.clientWidth||600)*dpr)),H=Math.round(W*asp);
   if(W!==l1PW||H!==l1PH||!l1Pix){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
-  if(!l1Pix){l1Pix=new Int32Array(W*H);const A=region.moving()?region.viewParts():null;const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
-    for(let py=0;py<H;py++){const Y=cy+(H/2-py-0.5)*s;for(let px=0;px<W;px++){const X=cx+(px+0.5-W/2)*s,z2=1-X*X-Y*Y;
-      if(z2<=0){l1Pix[py*W+px]=-1;continue;}const z=Math.sqrt(z2);
-      l1Pix[py*W+px]=region.localAt(f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,f.c[2]*z+f.ea[2]*X+f.nr[2]*Y,A);}}}}
+  // per pixel: the L1 cell there, or else L0's elevation there (bilinear on L0's fixed grid) as the backdrop
+  if(!l1Pix){l1Pix=new Int32Array(W*H);l1Back=new Float32Array(W*H).fill(NaN);const F0=region.mapFrame(),cube=world.cube,nb=cube.nb,el=world.elev,out=[0,0,0];
+    const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
+    for(let py=0;py<H;py++){const Y=cy+(H/2-py-0.5)*s;for(let px=0;px<W;px++){const X=cx+(px+0.5-W/2)*s,z2=1-X*X-Y*Y,q=py*W+px;
+      if(z2<=0){l1Pix[q]=-1;continue;}const z=Math.sqrt(z2),dx=f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,dy=f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,dz=f.c[2]*z+f.ea[2]*X+f.nr[2]*Y;
+      const wx=F0[0]*dx+F0[1]*dy+F0[2]*dz,wy=F0[3]*dx+F0[4]*dy+F0[5]*dz,wz=F0[6]*dx+F0[7]*dy+F0[8]*dz,l=region.cellAtWorld(wx,wy,wz);l1Pix[q]=l;
+      if(l<0||!region.cont[l]){cube.lookupFrac(wx,wy,wz,out);const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty);
+        l1Back[q]=(1-ax)*(1-ay)*el[c]+ax*(1-ay)*el[cB]+(1-ax)*ay*el[cC]+ax*ay*el[cD];}}}}}
 function l1Render(){if(!region)return;l1Size();
-  const W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,{e,cont,alive,eroded,uplifted,S}=region,A=S.A;
+  const W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,{e,cont,live:alive,eroded,uplifted,S}=region,A=S.A;
   const rivers=$("l1Rivers").checked,cellA=region.G.area[0],Amin=Math.max(2000,10*cellA),bas=l1View==="basins"?region.basins():null,out=region.outlet;
   const shade=l1Shade();
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,l=P[q];
-    if(l<0||!alive[l]){d[o]=d[o+1]=d[o+2]=l<0?24:60;d[o+3]=255;continue;}
+    if(l<0||!alive[l]||!cont[l]){const hb=l1Back[q];
+      if(isNaN(hb)){d[o]=d[o+1]=d[o+2]=24;d[o+3]=255;continue;}
+      // L0 backdrop, also for L1's (static) ocean: sea as L0 has it; land L1 does not simulate dimmed and greyed
+      let k=Math.round((hb+8)/16*1023);k=k<0?0:k>1023?1023:k;const r0=LUT_E[k*3],g0=LUT_E[k*3+1],b0=LUT_E[k*3+2],m=(r0+g0+b0)/3;
+      if(hb<=0){d[o]=r0;d[o+1]=g0;d[o+2]=b0;}else{d[o]=0.72*(0.6*r0+0.4*m);d[o+1]=0.72*(0.6*g0+0.4*m);d[o+2]=0.72*(0.6*b0+0.4*m);}d[o+3]=255;continue;}
     const h=e[l],land=cont[l]&&h>0,sh=shade[l];
     let r,g,b;
     if(!land){let k=Math.round((Math.min(h,-0.01)+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}
@@ -386,10 +397,10 @@ function l1Render(){if(!region)return;l1Size();
   $("l1map").getContext("2d").putImageData(l1Img,0,0);}
 // hillshade per cell (light from the northwest, 6x exaggeration): the slope is a least-squares plane through the
 // land neighbours, in the map's east/north frame, so it is the same at every zoom and continuous across cube faces
-function l1Shade(){const {G,e,cont,alive,pieceOf}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,rr=G.rr,f=l1Frame(),out=region._shade||(region._shade=new Float32Array(nC));
+function l1Shade(){const {G,e,cont,live:alive,pieceOf}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,rr=G.rr,f=l1Frame(),out=region._shade||(region._shade=new Float32Array(nC));
   const Lx=-0.55,Ly=0.55,Lz=0.63,sp=region.slotPlate,rot=(R,v)=>[R[0]*v[0]+R[1]*v[1]+R[2]*v[2],R[3]*v[0]+R[4]*v[1]+R[5]*v[2],R[6]*v[0]+R[7]*v[1]+R[8]*v[2]];
   // the map's east and north axes, carried into each part's frame (neighbours are compared within one part)
-  const axes=new Map();if(region.moving())for(const pt of region.viewParts())axes.set(pt.piece*65536+pt.plate,[rot(pt.A,f.ea),rot(pt.A,f.nr)]);
+  const axes=new Map();for(const pt of region.viewParts())axes.set(pt.piece*65536+pt.plate,[rot(pt.A,f.ea),rot(pt.A,f.nr)]);
   for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;const sl=(l/rr)|0,key=pieceOf[sl]*65536+sp[sl],[ea,nr]=axes.get(key)||[f.ea,f.nr];
     for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0||pieceOf[(j/rr)|0]*65536+sp[(j/rr)|0]!==key)continue;
       const dx=pos[3*j]-pos[3*l],dy=pos[3*j+1]-pos[3*l+1],dz=pos[3*j+2]-pos[3*l+2],x=(dx*ea[0]+dy*ea[1]+dz*ea[2])*R_KM,y=(dx*nr[0]+dy*nr[1]+dz*nr[2])*R_KM,de=e[j]-e[l];
@@ -406,9 +417,10 @@ function l1Stats(final){if(!region)return;const h=region.history[region.history.
   $("l1stats").innerHTML=`<div>L1 time<b class="num">${fmtT(region.t)} / ${region.o.window} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
     <div>Mean elevation<b class="num">${h.meanElevKm.toFixed(2)} km</b></div><div>Highest point<b class="num">${h.maxElevKm.toFixed(1)} km</b></div>
     <div>Mean erosion<b class="num">${Math.round(h.erosionRateKmPerMyr*1000)} m/Myr</b></div><div>Mean tectonic input<b class="num">${Math.round(h.upliftRateKmPerMyr*1000)} m/Myr</b></div>
-    <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>`;
+    <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>
+    <div>Cells simulated<b class="num">${h.cells.toLocaleString("en-US")}</b></div><div>Contact links<b class="num">${h.contacts.toLocaleString("en-US")}</b></div>`;
   const M=v=>(v/1e6).toFixed(2)+" M km³";
-  let html=`<div><b>Crust budget</b> (continental crust in the domain): started ${M(b.initial)}; L0 tectonics added ${M(b.tectonicApplied)} (${M(b.unappliedOcean)} more fell on static ocean); rivers removed ${M(b.eroded)}; ${M(b.capped)} lost to the 75 km thickness cap; ${M(b.consumed)} consumed at plate boundaries; ${M(b.rifted)} turned to sea along rifts. Now ${M(bal.now)}, bookkeeping error ${Math.abs(bal.error)<1e-9?"below 10⁻⁹":bal.error.toExponential(1)}.</div>`;
+  let html=`<div><b>Crust budget</b> (continental crust simulated by L1): started ${M(b.initial)}; ${M(b.activated)} brought in as land came within reach, ${M(b.dropped)} dropped as it separated; L0 tectonics added ${M(b.tectonicApplied)} (${M(b.unappliedOcean)} more fell on static ocean); rivers removed ${M(b.eroded)}; ${M(b.capped)} lost to the 75 km thickness cap; ${M(b.consumed)} consumed where L1’s own pieces collided and ${M(b.consumedOutside)} under crust L1 does not simulate; ${M(b.refilled)} refilled holes, as L0 does. Now ${M(bal.now)}, bookkeeping error ${Math.abs(bal.error)<1e-9?"below 10⁻⁹":bal.error.toExponential(1)}.</div>`;
   if(final){const dv=region.divergence();html+=`<div><b>L0 against L1</b> on ${dv.parcels.toLocaleString("en-US")} parcels continental in both: L1’s crust is ${dv.meanThicknessDiffKm>=0?"thicker":"thinner"} by ${Math.abs(dv.meanThicknessDiffKm).toFixed(1)} km on average (root-mean-square difference ${dv.rmsThicknessDiffKm.toFixed(1)} km, or ${dv.rmsElevationDiffKm.toFixed(2)} km of Airy elevation). L0 keeps its own crude erosion; this is how far the two levels drifted apart.</div>`;}
   $("l1budget").innerHTML=html;}
 document.querySelectorAll("#l1views button").forEach(b=>b.onclick=()=>{l1View=b.dataset.v;
@@ -422,7 +434,8 @@ $("l1Rivers").onchange=()=>l1Render();
     const k=l1Geo.s*l1PW/wrap.clientWidth;l1Pan[0]-=(e.clientX-lx)*k;l1Pan[1]+=(e.clientY-ly)*k;lx=e.clientX;ly=e.clientY;l1Pix=null;l1Render();});
   wrap.addEventListener("pointerup",e=>{drag=false;if(!mv)l1Inspect(e);});wrap.addEventListener("pointercancel",()=>{drag=false;});}
 function l1Inspect(e){if(!region||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
-  if(px<0||py<0||px>=l1PW||py>=l1PH)return;const l=l1Pix[py*l1PW+px],box=$("l1inspect");if(l<0||!region.alive[l])return;
+  if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,l=l1Pix[q],box=$("l1inspect");
+  if(l<0||!region.live[l]){if(isNaN(l1Back[q]))return;box.style.display="block";box.textContent=`Not simulated by L1 here; L0 ${l1Back[q]>=0?"elevation":"depth"} ${Math.abs(l1Back[q]).toFixed(2)} km`;clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",4000);return;}
   const h=region.e[l];box.style.display="block";
   box.textContent=region.cont[l]?`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km, crust ${region.T[l].toFixed(1)} km, eroded ${region.eroded[l].toFixed(2)} km, tectonic input ${region.uplifted[l].toFixed(1)} km, drains ${Math.round(region.S.A[l]).toLocaleString("en-US")} km²`:`Ocean, depth ${Math.abs(h).toFixed(1)} km (held fixed)`;
   clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",4000);}
