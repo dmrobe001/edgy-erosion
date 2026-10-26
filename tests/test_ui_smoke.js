@@ -30,7 +30,7 @@ new Function(code + `
   while (l1Busy()) l1Tick();
   if (!l1St || l1St.phase !== "done") throw new Error("L1 did not finish: " + document.getElementById("l1Info").innerHTML);
   if (world.t !== tNow) throw new Error("L0 did not come back to the present");
-  for (const v of ["terrain", "thick", "finite", "strain", "rock", "basins"]) { l1View = v; l1Legend(); l1Pix = null; l1Render(); }
+  for (const v of ["terrain", "thick", "finite", "strain", "rock", "rain", "basins"]) { l1View = v; l1Legend(); l1Pix = null; l1Render(); }
   l1Zoom = 4; l1Pix = null; l1Render(); l1Inspect({ clientX: 200, clientY: 200 });
   if (!document.getElementById("l1budget").innerHTML.includes("Drainage basins")) throw new Error("L1 summary not rendered");
   const sh = l1St.sh, bal = sh.balance(); if (Math.abs(bal.error) > 1e-9) throw new Error("L1 crust budget does not close: " + bal.error);

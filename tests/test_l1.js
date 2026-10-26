@@ -57,6 +57,18 @@ for (const [label, uf, vf, exact] of [
   check(e < 1e-12 && ea < 1e-12, "finite strain: " + label);
 }
 
+// 2c. closed basins: a round landmass 1 km high with a broad bowl 600 m deep in its middle. Centred in the wet
+//     tropics its lake overflows to the sea; in the dry subtropics it cannot, and the bowl drains inland.
+for (const [label, latDeg, expectClosed] of [["wet tropics (5 deg)", 5, false], ["dry subtropics (24 deg)", 24, true]]) {
+  const la = latDeg * Math.PI / 180, c = [Math.cos(la), 0, Math.sin(la)], ea = [0, 1, 0], nr = [-Math.sin(la), 0, Math.cos(la)];
+  const nx = 60, ny = 60, H = 50, sheet = { nx, ny, o: { h: H }, x0: -1500, y0: -1500, e: new Float64Array(nx * ny), proj: new L1.Projection(c, ea, nr), Qref: [1, 0, 0, 0, 1, 0, 0, 0, 1], world: { opts: { seed: "bowl" } } };
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) { const x = sheet.x0 + (i + .5) * H, y = sheet.y0 + (j + .5) * H, r = Math.hypot(x, y); sheet.e[j * nx + i] = r > 1200 ? -2 : 1 - 0.6 * Math.exp(-((r / 350) ** 2)); }
+  const bs = L1.basins(sheet), mid = ((bs.ny / 2) | 0) * bs.nx + ((bs.nx / 2) | 0);
+  let c0 = mid; while (bs.rec[c0] !== c0) c0 = bs.rec[c0]; const closed = !!(bs.land[c0] && bs.lake[c0] >= 2);
+  console.log(`closed basins, ${label}: rain at the centre ${bs.climate.P[mid].toFixed(2)} m/yr, evaporation ${bs.climate.E[mid].toFixed(2)} m/yr; the bowl ${closed ? "drains inland" : "overflows to the sea"}; ${(100 * bs.inlandFrac).toFixed(0)}% of the land drains inland`);
+  check(closed === expectClosed, "closed basins: " + label);
+}
+
 // 3. a real landmass: snapshots every 10 Myr, pick at the present, replay, sheet, drainage pass
 const n = +arg("n", 64), W = +arg("win", 10), T0 = +arg("t0", 400), H = +arg("h", 70), target = +arg("land", 200);
 const w = new SIM.World({ n, seed: "genesis", nPlates: 10, mode: "scatter", contTarget: 0.5 }), snaps = [];
@@ -87,11 +99,12 @@ check(A.maxS < 100 && hl.maxElevKm < 11, "thickness and peaks bounded");
 const B = run(); let same = B.sh.nm === sh.nm; for (let c = 0; same && c < sh.nx * sh.ny; c++) if (!(B.sh.e[c] === sh.e[c] || isNaN(B.sh.e[c]) && isNaN(sh.e[c]))) same = false;
 check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "different"} on a second run`);
 // the drainage pass
-{ const t0 = Date.now(), bs = L1.basins(sh), { S } = bs; let stuck = 0, label = 0, sum = 0;
-  for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l]) continue; let c = l, g = 0; while (S.rec[c] !== c && g < bs.land.length) { c = S.rec[c]; g++; } if (bs.land[c] && !S.sink[c]) stuck++; if (bs.basin[l] !== bs.basin[S.rec[l]] && bs.land[S.rec[l]]) label++; }
+{ const t0 = Date.now(), bs = L1.basins(sh), { S } = bs, rec = bs.rec; let stuck = 0, label = 0, sum = 0;
+  for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l]) continue; let c = l, g = 0; while (rec[c] !== c && g < bs.land.length) { c = rec[c]; g++; } if (bs.land[c] && !S.sink[c] && bs.lake[c] < 2) stuck++; if (bs.basin[l] !== bs.basin[rec[l]] && bs.land[rec[l]]) label++; }
   for (const v of bs.sizes) sum += v;
   console.log(`drainage pass: ${bs.nx}x${bs.ny} at ${bs.h} km, ${bs.landCells} land cells, ${bs.nBasins} basins (largest ${bs.sizes.slice(0, 3).join(", ")} cells), ${Date.now() - t0} ms; ${stuck} cells drain nowhere`);
-  check(stuck === 0, "all land drains to the sea or an inland sink"); check(label === 0 && sum === bs.landCells, "basins partition the land");
+  check(stuck === 0, "all land drains to the sea or an inland sink");
+  console.log(`climate: ${bs.nClosed} lakes cannot overflow; ${(100 * bs.inlandFrac).toFixed(1)}% of the land drains inland`); check(label === 0 && sum === bs.landCells, "basins partition the land");
   const Lup = new Float64Array(bs.land.length); for (let q = S.ns - 1; q >= 0; q--) { const l = S.stack[q], rc = S.rec[l]; if (rc !== l) Lup[rc] = Math.max(Lup[rc], Lup[l] + S.rdist[l]); }
   let n2 = 0, sx = 0, sy = 0, sxx = 0, sxy = 0; const amin = 20 * bs.h * bs.h;
   for (let l = 0; l < bs.land.length; l++) { if (!bs.land[l] || S.A[l] < amin || Lup[l] <= 0) continue; const X = Math.log(S.A[l]), Y = Math.log(Lup[l]); n2++; sx += X; sy += Y; sxx += X * X; sxy += X * Y; }

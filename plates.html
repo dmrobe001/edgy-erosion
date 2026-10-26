@@ -192,6 +192,7 @@ button:disabled{opacity:.5;cursor:default}
         <button data-v="finite" aria-pressed="false">Finite strain</button>
         <button data-v="strain" aria-pressed="false">Strain rate</button>
         <button data-v="rock" aria-pressed="false">Surface rock</button>
+        <button data-v="rain" aria-pressed="false" disabled>Rainfall</button>
         <button data-v="basins" aria-pressed="false" disabled>Drainage basins</button>
       </div>
       <label><input type="checkbox" id="l1Rivers" checked> Rivers</label>
@@ -1284,27 +1285,107 @@ class Sheet{
     return(1-ax)*(1-ay)*E[c]+ax*(1-ay)*E[cB]+(1-ax)*ay*E[cC]+ax*ay*E[cD];}
 }
 
+// ---------- climate for the drainage pass ----------
+// A deliberately crude, present-day climate on the fine grid, enough to tell wet from dry:
+// - Rain far from relief follows latitude as on Earth: wet equator, dry subtropics, wet westerly belts, dry poles.
+// - Winds are zonal: easterly trades below 30 degrees, westerlies to 60, polar easterlies beyond.
+// - Moisture blows in from the sea and rains out with distance (1/Lr per km; Lr is long because vegetation recycles
+//   rain back into the air) and with uplift (1/He per km climbed),
+//   and rain is proportional to the moisture lost, so windward slopes are wet and lee sides lie in a rain shadow.
+// - Potential evaporation peaks in the clear-sky subtropics and falls with elevation; land loses water by Fu's form
+//   of Budyko's curve.
+// Units: m/yr. Returns latitude (radians), rain P, potential evaporation E and runoff R per cell.
+const P_LAT=[[0,2.2],[10,1.8],[20,0.6],[28,0.35],[40,0.9],[55,1.0],[70,0.4],[90,0.2]];
+// potential evaporation (m/yr) at sea level: highest under the clear skies of the subtropics, lower in the cloudy tropics
+const E_LAT=[[0,1.4],[15,1.8],[25,2.0],[35,1.5],[50,0.8],[65,0.4],[90,0.2]];
+function lerpTab(T,x){if(x<=T[0][0])return T[0][1];for(let k=1;k<T.length;k++)if(x<=T[k][0]){const [x0,y0]=T[k-1],[x1,y1]=T[k];return y0+(y1-y0)*(x-x0)/(x1-x0);}return T[T.length-1][1];}
+// separable Gaussian blur of a grid field (edges renormalized)
+function blurGrid(f,nx,ny,sig){const R=Math.max(1,Math.ceil(3*sig)),w=[];for(let k=-R;k<=R;k++)w.push(Math.exp(-k*k/(2*sig*sig)));
+  const a=new Float32Array(nx*ny),b=new Float32Array(nx*ny);
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let s=0,sw=0;for(let k=-R;k<=R;k++){const ii=i+k;if(ii<0||ii>=nx)continue;s+=w[k+R]*f[j*nx+ii];sw+=w[k+R];}a[j*nx+i]=s/sw;}
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let s=0,sw=0;for(let k=-R;k<=R;k++){const jj=j+k;if(jj<0||jj>=ny)continue;s+=w[k+R]*a[jj*nx+i];sw+=w[k+R];}b[j*nx+i]=s/sw;}
+  return b;}
+function climate(sheet,nx,ny,h,e,land,o){
+  const nc=nx*ny,lat=new Float32Array(nc),wx=new Float32Array(nc),wy=new Float32Array(nc),Qr=sheet.Qref,proj=sheet.proj,b=[0,0,0],p=[0,0,0],eb=[0,0,0],q0=[0,0],q1=[0,0],dl=1e-3;
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i,x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h;proj.inv(x,y,b);mv(Qr,b[0],b[1],b[2],p);lat[c]=Math.asin(Math.max(-1,Math.min(1,p[2])));
+    if(!land[c])continue;const L=Math.hypot(p[0],p[1])||1;mtv(Qr,-p[1]/L,p[0]/L,0,eb);proj.fwd(b,q0);b[0]+=dl*eb[0];b[1]+=dl*eb[1];b[2]+=dl*eb[2];proj.fwd(b,q1);
+    const dx=q1[0]-q0[0],dy=q1[1]-q0[1],n=Math.hypot(dx,dy)||1;wx[c]=dx/n;wy[c]=dy/n;}
+  // moisture q (1 over the sea), carried downwind: Gauss-Seidel sweeps in the four grid orders, once for a westerly
+  // and once for an easterly wind everywhere; the two are blended by latitude (the belts' edges are gradual)
+  const qm=new Float32Array(nc),P=new Float32Array(nc),E=new Float32Array(nc),R=new Float32Array(nc);let sgn=1;
+  const samp=(f,x,y)=>{const gx=x-0.5,gy=y-0.5,i0=Math.max(0,Math.min(nx-2,Math.floor(gx))),j0=Math.max(0,Math.min(ny-2,Math.floor(gy))),fx=Math.min(1,Math.max(0,gx-i0)),fy=Math.min(1,Math.max(0,gy-j0)),c=j0*nx+i0;
+    return(1-fx)*(1-fy)*f[c]+fx*(1-fy)*f[c+1]+(1-fx)*fy*f[c+nx]+fx*fy*f[c+nx+1];};
+  // rain responds to relief tens of km across, not to the fine relief: uplift is measured on a smoothed surface
+  const eL=blurGrid(Float32Array.from(e,(v,c)=>land[c]?Math.max(0,v):0),nx,ny,o.rainSmoothKm/h);
+  const lose=new Float32Array(nc);
+  const upd=(i,j)=>{const c=j*nx+i;if(!land[c])return;const x=i+0.5-sgn*wx[c],y=j+0.5-sgn*wy[c],qu=samp(qm,x,y),eu=samp(eL,x,y);
+    const k=h/o.Lr+Math.max(0,eL[c]-eu)/o.He;qm[c]=qu*Math.exp(-k);lose[c]=Math.min(o.orogMax/o.Lr,(qu-qm[c])/h);};
+  const loseW=new Float32Array(nc);
+  for(sgn of [1,-1]){qm.fill(1);lose.fill(0);
+    for(let it=0;it<2;it++){for(let j=0;j<ny;j++)for(let i=0;i<nx;i++)upd(i,j);for(let j=0;j<ny;j++)for(let i=nx-1;i>=0;i--)upd(i,j);
+      for(let j=ny-1;j>=0;j--)for(let i=0;i<nx;i++)upd(i,j);for(let j=ny-1;j>=0;j--)for(let i=nx-1;i>=0;i--)upd(i,j);}
+    if(sgn===1)loseW.set(lose);}
+  // westerly weight: 0 in the trades and polar easterlies, 1 in the westerlies, ramps 15 degrees wide at 30 and 60
+  const west=a=>Math.min(1,Math.max(0,(a-22.5)/15))*Math.min(1,Math.max(0,(67.5-a)/15));
+  for(let c=0;c<nc;c++){const a=Math.abs(lat[c])*180/Math.PI,ww=west(a);P[c]=lerpTab(P_LAT,a)*(land[c]?(ww*loseW[c]+(1-ww)*lose[c])*o.Lr:1);}
+  P.set(blurGrid(P,nx,ny,o.rainSmoothKm/h));
+  for(let c=0;c<nc;c++){E[c]=lerpTab(E_LAT,Math.abs(lat[c])*180/Math.PI)*Math.max(0.2,1-eL[c]/6);
+    // Fu (1981): actual evaporation from land, given rain and potential evaporation
+    const r=E[c]/Math.max(1e-6,P[c]),aet=P[c]*(1+r-Math.pow(1+Math.pow(r,o.fuW),1/o.fuW));R[c]=Math.max(0,P[c]-aet);}
+  return{lat,P,E,R};
+}
 // ---------- the drainage pass ----------
-// With tectonics frozen at the end, the sheet's surface is refined (bilinear, plus relief L0 and the sheet cannot
-// resolve, fixed to the planet) and eroded for a few Myr by stream power on a finer grid, only to settle the
-// drainage network; each outlet's drainage basin is a natural tile for L2.
+// With tectonics frozen at the end, the sheet's surface is refined (bilinear, plus relief the sheet cannot resolve,
+// fixed to the planet) and eroded for a few Myr by stream power on a finer grid, only to settle the network; then
+// every land cell is labelled by where it drains. With climate on, discharge (runoff, not area) drives erosion, and
+// each lake the depression filling makes is tested by its water balance: it overflows only if its inflow beats net
+// evaporation over its full surface; otherwise its basin ends there (drains inland) and the lake shrinks to the area
+// that balances its inflow, the rest of the depression a dry lake floor.
 function basins(sheet,o){
-  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4},o);
-  const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),land=new Uint8Array(nc);
+  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4,climate:true,Lr:3000,He:3,orogMax:5,fuW:2.6,rainSmoothKm:30,lakeMinKm:0.002,basinMinKm:0.01},o);
+  const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),es=new Float64Array(nc),land=new Uint8Array(nc);
   const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins")|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4;
   for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h,gx=(x-sheet.x0)/H-0.5,gy=(y-sheet.y0)/H-0.5;
     let i0=Math.floor(gx),j0=Math.floor(gy);const fx=gx-i0,fy=gy-j0;let s=0,w=0;
     for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=snx||jj>=sny)continue;const v=se[jj*snx+ii];if(isNaN(v))continue;s+=ww*v;w+=ww;}
-    const c=j*nx+i;if(w<0.5){e[c]=-1;continue;}let v=s/w;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
+    const c=j*nx+i;if(w<0.5){e[c]=-1;es[c]=-1;continue;}let v=s/w;es[c]=v;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
   const G=planarGrid(nx,ny,h,o.jitter,Math.round(sheet.x0/h),Math.round(sheet.y0/h),hashStr(String(sheet.world.opts.seed)+"|L1nodes")|0),S=scratch(nc),alive=new Uint8Array(nc).fill(1),out=new Uint8Array(nc);
   for(let c=0;c<nc;c++)out[c]=land[c]?0:1;
-  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,null);const hN=streamPower(e,S,o.K,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
+  // climate from the surface as it starts (the network settles on it); erosion weights runoff by its land mean
+  const cl=o.climate?climate(sheet,nx,ny,h,e,land,o):null;let wgt=null;
+  if(cl){let sr=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){sr+=cl.R[c];nl++;}const mr=sr/(nl||1)||1;wgt=new Float32Array(nc);for(let c=0;c<nc;c++)wgt[c]=cl.R[c]/mr;}
+  // Depressions of the resolved surface (the sheet's, before the fine relief is added) are information; hollows that
+  // exist only in the fine relief are stand-in texture, filled as sediment would fill them.
+  // The sheet resolves nothing narrower than about three of its cells, so its surface is first smoothed over one cell.
+  const esm=Float64Array.from(blurGrid(es,nx,ny,f)),deep=new Uint8Array(nc);route(G,esm,alive,out,S,null);for(let c=0;c<nc;c++)deep[c]=land[c]&&S.f[c]-esm[c]>o.basinMinKm?1:0;
+  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,wgt);const hN=streamPower(e,S,o.K,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
   route(G,e,alive,out,S,null);
-  const basin=new Int32Array(nc).fill(-1),size=new Map();
-  for(let q=0;q<S.ns;q++){const l=S.stack[q],r=S.rec[l];basin[l]=r===l?l:basin[r];}
+  const rec=Int32Array.from(S.rec),stack=S.stack.subarray(0,S.ns),A=new Float64Array(nc),Q=new Float64Array(nc),lake=new Uint8Array(nc);let nClosed=0;
+  // lakes: cells the filling raised by more than lakeMinKm; each lake's exit is a lake cell draining out of the lake
+  const fl=S.f,isLake=c=>land[c]&&fl[c]-e[c]>o.lakeMinKm;
+  const lakeArea=new Float64Array(nc),lakeLoss=new Float64Array(nc),exitOf=new Int32Array(nc).fill(-1);
+  for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];if(!isLake(l))continue;exitOf[l]=r!==l&&isLake(r)?exitOf[r]:l;}
+  for(let c=0;c<nc;c++)if(exitOf[c]>=0){const x=exitOf[c];lakeArea[x]+=h*h;if(cl)lakeLoss[x]+=(cl.E[c]-cl.P[c])*h*h;lake[c]=1;}
+  // A lake none of whose cells lies in a resolved depression is filled (a sediment flat the water crosses).
+  // Accumulate area and discharge from the top of the network down; a lake that cannot overflow ends its basin.
+  const filled=new Uint8Array(nc),real=new Uint8Array(nc);for(let c=0;c<nc;c++)if(exitOf[c]>=0&&deep[c])real[exitOf[c]]=1;
+  for(let c=0;c<nc;c++)if(lakeArea[c]>0&&!real[c])filled[c]=1;
+  for(let q=stack.length-1;q>=0;q--){const l=stack[q];A[l]+=h*h;if(cl)Q[l]+=cl.R[l]*h*h;
+    const lk=lakeArea[l]>0&&rec[l]!==l&&!filled[l];
+    if(lk&&cl&&Q[l]<=lakeLoss[l]){rec[l]=l;nClosed++;lake[l]=2;continue;}
+    const r=rec[l];if(r!==l){A[r]+=A[l];Q[r]+=lk&&cl?Math.max(0,Q[l]-lakeLoss[l]):Q[l];}}
+  // filled depressions become sediment flats at their spill level
+  let nFilled=0;for(let c=0;c<nc;c++){const x=exitOf[c];if(x>=0&&filled[x]){lake[c]=0;e[c]=fl[c];if(c===x)nFilled++;}}
+  // labels, now that some basins end inland; closed lakes shrink to the area their inflow can supply
+  const basin=new Int32Array(nc).fill(-1),size=new Map(),closedB=new Uint8Array(nc);
+  for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];basin[l]=r===l?l:basin[r];}
+  if(cl){const cells=new Map();for(let c=0;c<nc;c++)if(exitOf[c]>=0&&lake[exitOf[c]]===2){const x=exitOf[c];if(!cells.has(x))cells.set(x,[]);cells.get(x).push(c);}
+    for(const [x,cs] of cells){cs.sort((a,b2)=>e[a]-e[b2]);let need=Q[x],wet=0;
+      for(const c of cs){const loss=(cl.E[c]-cl.P[c])*h*h;if(need>0&&loss>0){need-=loss;lake[c]=2;wet++;}else lake[c]=3;}lake[x]=lake[x]||2;}
+    for(let c=0;c<nc;c++)if(land[c]&&lake[basin[c]]>=2&&!out[basin[c]])closedB[c]=1;}
   for(let c=0;c<nc;c++)if(land[c]){const id=basin[c];size.set(id,(size.get(id)||0)+1);}
-  const sizes=[...size.values()].sort((a,b)=>b-a);
-  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A:Float64Array.from(S.A),rec:Int32Array.from(S.rec),basin,nBasins:size.size,sizes,landCells:land.reduce((a,v)=>a+v,0),S};
+  const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;}
+  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A,Q,rec,basin,lake,closedB,climate:cl,nClosed,nFilled,inlandFrac:inland/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
 return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
 })();
@@ -1618,7 +1699,8 @@ const l1Busy=()=>!!(l1St&&/^(replay|forward|run|basins)$/.test(l1St.phase));
 const THICK_DIV=[[-15,"#2c5aa0"],[-5,"#9db8de"],[0,"#f2f0ea"],[5,"#e6a07a"],[15,"#b8322a"],[30,"#5e0f12"]];
 const STRAIN_STOPS=[[-3,"#f3f1ea"],[-2,"#d9e2c0"],[-1.25,"#9cc38c"],[-0.5,"#3f9b8a"],[0,"#265c8f"],[0.5,"#2b1f5c"]];
 const FIN_STOPS=[[-0.5,"#2c5aa0"],[-0.2,"#9db8de"],[0,"#f2f0ea"],[0.15,"#e9b08a"],[0.35,"#c4452f"],[0.6,"#5e0f12"]];
-const LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
+const RAIN_STOPS=[[-1.3,"#96703c"],[-0.7,"#dcc88c"],[-0.3,"#b4dc96"],[0.1,"#3ca078"],[0.5,"#145a8c"]];
+const LUT_RAIN=buildLut(RAIN_STOPS,256,-1.3,0.5),LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
 function l1Reset(){l1Picking=false;l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
   $("l1Info").innerHTML=`<div class="muted">No landmass picked yet.</div>`;}
@@ -1667,7 +1749,7 @@ function l1Tick(){const S=l1St,w=world;colorsDirty=true;
     if(!S.basinsDue){S.basinsDue=true;return;}
     const t0=performance.now();S.bs=L1.basins(S.sh);S.bsMs=performance.now()-t0;w.untrackParcels();
     S.phase="done";const el=$("l1Prog");if(el)el.remove();$("l1Pick").disabled=false;l1Mask=null;l1View="basins";l1SetViews();l1Pix=null;l1Legend();l1Render();l1Stats();updateUi();}}
-function l1SetViews(){const has=!!(l1St&&l1St.bs);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v==="basins")x.disabled=!has;x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
+function l1SetViews(){const has=!!(l1St&&l1St.bs);document.querySelectorAll("#l1views button").forEach(x=>{if(x.dataset.v==="basins"||x.dataset.v==="rain")x.disabled=!has;x.setAttribute("aria-pressed",x.dataset.v===l1View?"true":"false");});}
 // canvas geometry: the sheet's grid, zoomed and panned; per pixel its map-plane point
 function l1Size(){const sh=l1St.sh,wrap=$("l1wrap"),X0=sh.x0,X1=sh.x0+sh.nx*sh.o.h,Y0=sh.y0,Y1=sh.y0+sh.ny*sh.o.h,asp=Math.min(1.3,Math.max(0.45,(Y1-Y0)/(X1-X0)));
   wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp);
@@ -1707,13 +1789,18 @@ function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
       let k=Math.round((v+0.5)/1.1*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_FIN[k*3]*s2;g=LUT_FIN[k*3+1]*s2;b=LUT_FIN[k*3+2]*s2;}
     else if(l1View==="strain"){const v=c>=0?Math.log10(Math.max(1e-3,sh.eps[c])):-3;let k=Math.round((v+3)/3.5*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_EPS[k*3]*s2;g=LUT_EPS[k*3+1]*s2;b=LUT_EPS[k*3+2]*s2;}
     else if(l1View==="rock"){const R=ROCK_RGB[c>=0?rock[c]:0]||[128,128,128];r=R[0]*sh_;g=R[1]*sh_;b=R[2]*sh_;}
+    else if(l1View==="rain"){if(f>=0&&bs.land[f]){let k=Math.round((Math.log10(Math.max(0.05,bs.climate.P[f]))+1.3)/1.8*255);k=k<0?0:k>255?255:k;r=LUT_RAIN[k*3]*sh_;g=LUT_RAIN[k*3+1]*sh_;b=LUT_RAIN[k*3+2]*sh_;}
+      else{let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}}
     else if(l1View==="basins"){if(f>=0&&bs.land[f]){const id=bs.basin[f];let col=bcol.get(id);
-        if(!col){const big=bsize.get(id)>=l1BasinMin(),u=(Math.imul(id+1,2654435761)>>>0)/4294967296;col=big?hsl(u*360,45+20*((u*7)%1),58+12*((u*13)%1)):[205,200,188];bcol.set(id,col);}
+        // basins draining inland in muted earth tones, those reaching the sea in clear colours
+        if(!col){const big=bsize.get(id)>=l1BasinMin(),u=(Math.imul(id+1,2654435761)>>>0)/4294967296;col=bs.closedB[f]?hsl(25+30*u,35,52+14*((u*13)%1)):big?hsl(u*360,45+20*((u*7)%1),58+12*((u*13)%1)):[205,200,188];bcol.set(id,col);}
         r=col[0]*sh_;g=col[1]*sh_;b=col[2]*sh_;}
       else{let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}}
-    // rivers draining 20,000 km² or more (the drainage pass draws them; the sheet itself has none)
-    if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins")){const A=bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
+    // rivers carrying what 20,000 km² of land at 0.3 m/yr of runoff would (the drainage pass draws them; the sheet
+    // has none), and lakes: open (blue), closed (pale blue), dry lake floors (white)
+    if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins"||l1View==="rain")){const A=bs.climate?bs.Q[f]/0.3:bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
       if(a>0){r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}}
+    if(land&&f>=0&&bs.lake[f]&&l1View!=="thick"&&l1View!=="strain"&&l1View!=="finite"){const L=[null,[52,104,190],[120,196,214],[238,234,222]][bs.lake[f]];r=L[0];g=L[1];b=L[2];}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
   const ctx=$("l1map").getContext("2d");ctx.putImageData(l1Img,0,0);
   // ticks along the shortening axis where crust has shortened by 10% or more, on a lattice of cells about 26 px apart
@@ -1733,7 +1820,8 @@ function l1Legend(){const L=$("l1legend");
   else if(l1View==="finite")L.innerHTML=`<span class="num">50% ext.</span><span class="bar" style="background:${gradCss(FIN_STOPS,-0.5,0.6)}"></span><span class="num">60% short.</span><span>Total horizontal shortening of the crust since the window began (red), and extension (blue) where it has not shortened. Ticks lie along the shortening direction where it exceeds 10%.</span>`;
   else if(l1View==="strain")L.innerHTML=`<span class="num">0.001</span><span class="bar" style="background:${gradCss(STRAIN_STOPS,-3,0.5)}"></span><span class="num">3 /Myr</span><span>How fast the sheet deforms now (log scale). 0.1 per Myr is 10% shortening or stretching every million years.</span>`;
   else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Topmost unit of the markers in each cell, by volume.</span>`;
-  else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast (or one inland sink). Smaller coastal basins are grey. These are the tiles for L2.</span>`;}
+  else if(l1View==="rain")L.innerHTML=`<span class="num">50 mm</span><span class="bar" style="background:${gradCss(RAIN_STOPS,-1.3,0.5)}"></span><span class="num">3 m/yr</span><span>Yearly rain from a crude climate: latitude belts, zonal winds, moisture raining out inland and over relief (wet windward slopes, rain shadows).</span>`;
+  else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast; basins that drain inland, to a lake with no outlet, are in muted earth tones. Smaller coastal basins are grey. Lakes: blue if they overflow, pale blue if they have no outlet, white for dry lake floors. These are the tiles for L2.</span>`;}
 function l1MaxShort(sh){const sf=sh.strainField();let m=0;for(let c=0;c<sf.lmin.length;c++)if(!isNaN(sf.lmin[c])&&1-sf.lmin[c]>m)m=1-sf.lmin[c];return Math.round(100*m);}
 function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[sh.history.length-1],h0=sh.history[0],b=sh.budget,bal=sh.balance(),M=v=>`${(v/1e6).toFixed(2)} M km³`;
   $("l1stats").innerHTML=`<div>L1 time<b class="num">${sh.t.toFixed(1)} / ${S.plan.window.toFixed(1)} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
@@ -1742,7 +1830,7 @@ function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[s
     <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>Markers<b class="num">${sh.nm.toLocaleString("en-US")}</b></div>`;
   let html=`<div><b>Crust budget</b>: started ${M(b.initial)}; ${M(b.arcsHotspots)} added by arcs and hotspots, ${M(b.eroded)} eroded, ${M(b.left)} carried off the grid; now ${M(bal.now)}, off by ${(Math.abs(bal.error)*100).toExponential(1)}%.</div>`;
   if(S.bs){const bs=S.bs,sz=l1BasinSizes(),min=l1BasinMin(),big=[...sz.values()].filter(v=>v>=min).sort((a,b2)=>b2-a),cell=bs.h*bs.h,inBig=big.reduce((a,v)=>a+v,0);
-    html+=`<div><b>Drainage basins</b>: ${big.length} of at least 10,000 km² cover ${(100*inBig/bs.landCells).toFixed(0)}% of the land; the largest are ${big.slice(0,5).map(v=>(v*cell/1e6).toFixed(2)).join(", ")} M km². ${(bs.nBasins-big.length).toLocaleString("en-US")} smaller ones drain the rest, mostly short coastal streams. (${bs.nx}×${bs.ny} cells of ${bs.h} km, ${Math.round(S.bsMs)} ms.)</div>`;}
+    html+=`<div><b>Drainage basins</b>: ${(100*bs.inlandFrac).toFixed(1)}% of the land drains inland, to ${bs.nClosed} lakes with no outlet. ${big.length} of at least 10,000 km² cover ${(100*inBig/bs.landCells).toFixed(0)}% of the land; the largest are ${big.slice(0,5).map(v=>(v*cell/1e6).toFixed(2)).join(", ")} M km². ${(bs.nBasins-big.length).toLocaleString("en-US")} smaller ones drain the rest, mostly short coastal streams. (${bs.nx}×${bs.ny} cells of ${bs.h} km, ${Math.round(S.bsMs)} ms.)</div>`;}
   $("l1budget").innerHTML=html;}
 document.querySelectorAll("#l1views button").forEach(b=>b.onclick=()=>{if(b.disabled)return;l1View=b.dataset.v;l1SetViews();l1Legend();l1Render();});
 document.querySelectorAll("#l1zoom button").forEach(b=>b.onclick=()=>{l1Zoom=+b.dataset.z;if(l1Zoom===1)l1Pan=[0,0];l1Pix=null;
@@ -1758,7 +1846,7 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
   if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb))return;box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
     if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
-    if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km²`;}
+    if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km² that ${bs.closedB[f]?"drains inland":"reaches the sea"}`;if(bs.climate)t+=`; rain ${Math.round(bs.climate.P[f]*1000)} mm/yr, runoff ${Math.round(bs.climate.R[f]*1000)} mm/yr`;if(bs.lake[f])t+=["","; a lake that overflows","; a lake with no outlet","; a dry lake floor"][bs.lake[f]];}
     box.textContent=t;}
   box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}
 build();updateLegend();requestAnimationFrame(frame);

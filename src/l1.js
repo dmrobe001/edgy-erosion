@@ -417,27 +417,107 @@ class Sheet{
     return(1-ax)*(1-ay)*E[c]+ax*(1-ay)*E[cB]+(1-ax)*ay*E[cC]+ax*ay*E[cD];}
 }
 
+// ---------- climate for the drainage pass ----------
+// A deliberately crude, present-day climate on the fine grid, enough to tell wet from dry:
+// - Rain far from relief follows latitude as on Earth: wet equator, dry subtropics, wet westerly belts, dry poles.
+// - Winds are zonal: easterly trades below 30 degrees, westerlies to 60, polar easterlies beyond.
+// - Moisture blows in from the sea and rains out with distance (1/Lr per km; Lr is long because vegetation recycles
+//   rain back into the air) and with uplift (1/He per km climbed),
+//   and rain is proportional to the moisture lost, so windward slopes are wet and lee sides lie in a rain shadow.
+// - Potential evaporation peaks in the clear-sky subtropics and falls with elevation; land loses water by Fu's form
+//   of Budyko's curve.
+// Units: m/yr. Returns latitude (radians), rain P, potential evaporation E and runoff R per cell.
+const P_LAT=[[0,2.2],[10,1.8],[20,0.6],[28,0.35],[40,0.9],[55,1.0],[70,0.4],[90,0.2]];
+// potential evaporation (m/yr) at sea level: highest under the clear skies of the subtropics, lower in the cloudy tropics
+const E_LAT=[[0,1.4],[15,1.8],[25,2.0],[35,1.5],[50,0.8],[65,0.4],[90,0.2]];
+function lerpTab(T,x){if(x<=T[0][0])return T[0][1];for(let k=1;k<T.length;k++)if(x<=T[k][0]){const [x0,y0]=T[k-1],[x1,y1]=T[k];return y0+(y1-y0)*(x-x0)/(x1-x0);}return T[T.length-1][1];}
+// separable Gaussian blur of a grid field (edges renormalized)
+function blurGrid(f,nx,ny,sig){const R=Math.max(1,Math.ceil(3*sig)),w=[];for(let k=-R;k<=R;k++)w.push(Math.exp(-k*k/(2*sig*sig)));
+  const a=new Float32Array(nx*ny),b=new Float32Array(nx*ny);
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let s=0,sw=0;for(let k=-R;k<=R;k++){const ii=i+k;if(ii<0||ii>=nx)continue;s+=w[k+R]*f[j*nx+ii];sw+=w[k+R];}a[j*nx+i]=s/sw;}
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let s=0,sw=0;for(let k=-R;k<=R;k++){const jj=j+k;if(jj<0||jj>=ny)continue;s+=w[k+R]*a[jj*nx+i];sw+=w[k+R];}b[j*nx+i]=s/sw;}
+  return b;}
+function climate(sheet,nx,ny,h,e,land,o){
+  const nc=nx*ny,lat=new Float32Array(nc),wx=new Float32Array(nc),wy=new Float32Array(nc),Qr=sheet.Qref,proj=sheet.proj,b=[0,0,0],p=[0,0,0],eb=[0,0,0],q0=[0,0],q1=[0,0],dl=1e-3;
+  for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i,x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h;proj.inv(x,y,b);mv(Qr,b[0],b[1],b[2],p);lat[c]=Math.asin(Math.max(-1,Math.min(1,p[2])));
+    if(!land[c])continue;const L=Math.hypot(p[0],p[1])||1;mtv(Qr,-p[1]/L,p[0]/L,0,eb);proj.fwd(b,q0);b[0]+=dl*eb[0];b[1]+=dl*eb[1];b[2]+=dl*eb[2];proj.fwd(b,q1);
+    const dx=q1[0]-q0[0],dy=q1[1]-q0[1],n=Math.hypot(dx,dy)||1;wx[c]=dx/n;wy[c]=dy/n;}
+  // moisture q (1 over the sea), carried downwind: Gauss-Seidel sweeps in the four grid orders, once for a westerly
+  // and once for an easterly wind everywhere; the two are blended by latitude (the belts' edges are gradual)
+  const qm=new Float32Array(nc),P=new Float32Array(nc),E=new Float32Array(nc),R=new Float32Array(nc);let sgn=1;
+  const samp=(f,x,y)=>{const gx=x-0.5,gy=y-0.5,i0=Math.max(0,Math.min(nx-2,Math.floor(gx))),j0=Math.max(0,Math.min(ny-2,Math.floor(gy))),fx=Math.min(1,Math.max(0,gx-i0)),fy=Math.min(1,Math.max(0,gy-j0)),c=j0*nx+i0;
+    return(1-fx)*(1-fy)*f[c]+fx*(1-fy)*f[c+1]+(1-fx)*fy*f[c+nx]+fx*fy*f[c+nx+1];};
+  // rain responds to relief tens of km across, not to the fine relief: uplift is measured on a smoothed surface
+  const eL=blurGrid(Float32Array.from(e,(v,c)=>land[c]?Math.max(0,v):0),nx,ny,o.rainSmoothKm/h);
+  const lose=new Float32Array(nc);
+  const upd=(i,j)=>{const c=j*nx+i;if(!land[c])return;const x=i+0.5-sgn*wx[c],y=j+0.5-sgn*wy[c],qu=samp(qm,x,y),eu=samp(eL,x,y);
+    const k=h/o.Lr+Math.max(0,eL[c]-eu)/o.He;qm[c]=qu*Math.exp(-k);lose[c]=Math.min(o.orogMax/o.Lr,(qu-qm[c])/h);};
+  const loseW=new Float32Array(nc);
+  for(sgn of [1,-1]){qm.fill(1);lose.fill(0);
+    for(let it=0;it<2;it++){for(let j=0;j<ny;j++)for(let i=0;i<nx;i++)upd(i,j);for(let j=0;j<ny;j++)for(let i=nx-1;i>=0;i--)upd(i,j);
+      for(let j=ny-1;j>=0;j--)for(let i=0;i<nx;i++)upd(i,j);for(let j=ny-1;j>=0;j--)for(let i=nx-1;i>=0;i--)upd(i,j);}
+    if(sgn===1)loseW.set(lose);}
+  // westerly weight: 0 in the trades and polar easterlies, 1 in the westerlies, ramps 15 degrees wide at 30 and 60
+  const west=a=>Math.min(1,Math.max(0,(a-22.5)/15))*Math.min(1,Math.max(0,(67.5-a)/15));
+  for(let c=0;c<nc;c++){const a=Math.abs(lat[c])*180/Math.PI,ww=west(a);P[c]=lerpTab(P_LAT,a)*(land[c]?(ww*loseW[c]+(1-ww)*lose[c])*o.Lr:1);}
+  P.set(blurGrid(P,nx,ny,o.rainSmoothKm/h));
+  for(let c=0;c<nc;c++){E[c]=lerpTab(E_LAT,Math.abs(lat[c])*180/Math.PI)*Math.max(0.2,1-eL[c]/6);
+    // Fu (1981): actual evaporation from land, given rain and potential evaporation
+    const r=E[c]/Math.max(1e-6,P[c]),aet=P[c]*(1+r-Math.pow(1+Math.pow(r,o.fuW),1/o.fuW));R[c]=Math.max(0,P[c]-aet);}
+  return{lat,P,E,R};
+}
 // ---------- the drainage pass ----------
-// With tectonics frozen at the end, the sheet's surface is refined (bilinear, plus relief L0 and the sheet cannot
-// resolve, fixed to the planet) and eroded for a few Myr by stream power on a finer grid, only to settle the
-// drainage network; each outlet's drainage basin is a natural tile for L2.
+// With tectonics frozen at the end, the sheet's surface is refined (bilinear, plus relief the sheet cannot resolve,
+// fixed to the planet) and eroded for a few Myr by stream power on a finer grid, only to settle the network; then
+// every land cell is labelled by where it drains. With climate on, discharge (runoff, not area) drives erosion, and
+// each lake the depression filling makes is tested by its water balance: it overflows only if its inflow beats net
+// evaporation over its full surface; otherwise its basin ends there (drains inland) and the lake shrinks to the area
+// that balances its inflow, the rest of the depression a dry lake floor.
 function basins(sheet,o){
-  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4},o);
-  const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),land=new Uint8Array(nc);
+  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4,climate:true,Lr:3000,He:3,orogMax:5,fuW:2.6,rainSmoothKm:30,lakeMinKm:0.002,basinMinKm:0.01},o);
+  const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),es=new Float64Array(nc),land=new Uint8Array(nc);
   const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins")|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4;
   for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h,gx=(x-sheet.x0)/H-0.5,gy=(y-sheet.y0)/H-0.5;
     let i0=Math.floor(gx),j0=Math.floor(gy);const fx=gx-i0,fy=gy-j0;let s=0,w=0;
     for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=snx||jj>=sny)continue;const v=se[jj*snx+ii];if(isNaN(v))continue;s+=ww*v;w+=ww;}
-    const c=j*nx+i;if(w<0.5){e[c]=-1;continue;}let v=s/w;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
+    const c=j*nx+i;if(w<0.5){e[c]=-1;es[c]=-1;continue;}let v=s/w;es[c]=v;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
   const G=planarGrid(nx,ny,h,o.jitter,Math.round(sheet.x0/h),Math.round(sheet.y0/h),hashStr(String(sheet.world.opts.seed)+"|L1nodes")|0),S=scratch(nc),alive=new Uint8Array(nc).fill(1),out=new Uint8Array(nc);
   for(let c=0;c<nc;c++)out[c]=land[c]?0:1;
-  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,null);const hN=streamPower(e,S,o.K,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
+  // climate from the surface as it starts (the network settles on it); erosion weights runoff by its land mean
+  const cl=o.climate?climate(sheet,nx,ny,h,e,land,o):null;let wgt=null;
+  if(cl){let sr=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){sr+=cl.R[c];nl++;}const mr=sr/(nl||1)||1;wgt=new Float32Array(nc);for(let c=0;c<nc;c++)wgt[c]=cl.R[c]/mr;}
+  // Depressions of the resolved surface (the sheet's, before the fine relief is added) are information; hollows that
+  // exist only in the fine relief are stand-in texture, filled as sediment would fill them.
+  // The sheet resolves nothing narrower than about three of its cells, so its surface is first smoothed over one cell.
+  const esm=Float64Array.from(blurGrid(es,nx,ny,f)),deep=new Uint8Array(nc);route(G,esm,alive,out,S,null);for(let c=0;c<nc;c++)deep[c]=land[c]&&S.f[c]-esm[c]>o.basinMinKm?1:0;
+  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,wgt);const hN=streamPower(e,S,o.K,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
   route(G,e,alive,out,S,null);
-  const basin=new Int32Array(nc).fill(-1),size=new Map();
-  for(let q=0;q<S.ns;q++){const l=S.stack[q],r=S.rec[l];basin[l]=r===l?l:basin[r];}
+  const rec=Int32Array.from(S.rec),stack=S.stack.subarray(0,S.ns),A=new Float64Array(nc),Q=new Float64Array(nc),lake=new Uint8Array(nc);let nClosed=0;
+  // lakes: cells the filling raised by more than lakeMinKm; each lake's exit is a lake cell draining out of the lake
+  const fl=S.f,isLake=c=>land[c]&&fl[c]-e[c]>o.lakeMinKm;
+  const lakeArea=new Float64Array(nc),lakeLoss=new Float64Array(nc),exitOf=new Int32Array(nc).fill(-1);
+  for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];if(!isLake(l))continue;exitOf[l]=r!==l&&isLake(r)?exitOf[r]:l;}
+  for(let c=0;c<nc;c++)if(exitOf[c]>=0){const x=exitOf[c];lakeArea[x]+=h*h;if(cl)lakeLoss[x]+=(cl.E[c]-cl.P[c])*h*h;lake[c]=1;}
+  // A lake none of whose cells lies in a resolved depression is filled (a sediment flat the water crosses).
+  // Accumulate area and discharge from the top of the network down; a lake that cannot overflow ends its basin.
+  const filled=new Uint8Array(nc),real=new Uint8Array(nc);for(let c=0;c<nc;c++)if(exitOf[c]>=0&&deep[c])real[exitOf[c]]=1;
+  for(let c=0;c<nc;c++)if(lakeArea[c]>0&&!real[c])filled[c]=1;
+  for(let q=stack.length-1;q>=0;q--){const l=stack[q];A[l]+=h*h;if(cl)Q[l]+=cl.R[l]*h*h;
+    const lk=lakeArea[l]>0&&rec[l]!==l&&!filled[l];
+    if(lk&&cl&&Q[l]<=lakeLoss[l]){rec[l]=l;nClosed++;lake[l]=2;continue;}
+    const r=rec[l];if(r!==l){A[r]+=A[l];Q[r]+=lk&&cl?Math.max(0,Q[l]-lakeLoss[l]):Q[l];}}
+  // filled depressions become sediment flats at their spill level
+  let nFilled=0;for(let c=0;c<nc;c++){const x=exitOf[c];if(x>=0&&filled[x]){lake[c]=0;e[c]=fl[c];if(c===x)nFilled++;}}
+  // labels, now that some basins end inland; closed lakes shrink to the area their inflow can supply
+  const basin=new Int32Array(nc).fill(-1),size=new Map(),closedB=new Uint8Array(nc);
+  for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];basin[l]=r===l?l:basin[r];}
+  if(cl){const cells=new Map();for(let c=0;c<nc;c++)if(exitOf[c]>=0&&lake[exitOf[c]]===2){const x=exitOf[c];if(!cells.has(x))cells.set(x,[]);cells.get(x).push(c);}
+    for(const [x,cs] of cells){cs.sort((a,b2)=>e[a]-e[b2]);let need=Q[x],wet=0;
+      for(const c of cs){const loss=(cl.E[c]-cl.P[c])*h*h;if(need>0&&loss>0){need-=loss;lake[c]=2;wet++;}else lake[c]=3;}lake[x]=lake[x]||2;}
+    for(let c=0;c<nc;c++)if(land[c]&&lake[basin[c]]>=2&&!out[basin[c]])closedB[c]=1;}
   for(let c=0;c<nc;c++)if(land[c]){const id=basin[c];size.set(id,(size.get(id)||0)+1);}
-  const sizes=[...size.values()].sort((a,b)=>b-a);
-  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A:Float64Array.from(S.A),rec:Int32Array.from(S.rec),basin,nBasins:size.size,sizes,landCells:land.reduce((a,v)=>a+v,0),S};
+  const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;}
+  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A,Q,rec,basin,lake,closedB,climate:cl,nClosed,nFilled,inlandFrac:inland/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
 return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
 })();
