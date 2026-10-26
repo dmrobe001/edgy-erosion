@@ -103,14 +103,38 @@ function buildGrid(n,slots,slotOf,r,jitter){
       faceDir(f,ang(I+2*jitter*u),ang(J+2*jitter*v),t);node[3*l]=t[0];node[3*l+1]=t[1];node[3*l+2]=t[2];}}
   for(let l=0;l<nC;l++)for(let k=0;k<8;k++){const m=nbr[8*l+k];if(m<0)continue;
     dist[8*l+k]=Math.hypot(node[3*l]-node[3*m],node[3*l+1]-node[3*m+1],node[3*l+2]-node[3*m+2])*R_KM;}
-  return{n,r,rr,nS,nC,NR,pos,area,nbr,dist,gid,lookup:lk,localOf};
+  return{n,r,rr,nS,nC,NR,pos,node,area,nbr,dist,gid,lookup:lk,localOf,jitter};
 }
+
+// 3x3 rotations, row-major
+function mat(A,B){const o=new Array(9);for(let r=0;r<3;r++)for(let c=0;c<3;c++)o[r*3+c]=A[r*3]*B[c]+A[r*3+1]*B[3+c]+A[r*3+2]*B[6+c];return o;}
+function matT(A){return[A[0],A[3],A[6],A[1],A[4],A[7],A[2],A[5],A[8]];}
+// Link edge cells of piece i (neighbour slot -1) to the cell of piece j one step beyond, if any. Rji maps piece j's
+// frame into piece i's, Rij the reverse. Distances are measured between nodes in piece i's frame.
+function stitchGrid(G,i,j,Rij,Rji,use){const Gi=G.parts[i],Gj=G.parts[j],oi=G.offsets[i],oj=G.offsets[j],NR=Gi.NR,q=Math.PI/4,t=[0,0,0];let links=0;
+  const ang=v=>Math.tan(((v+.5)/NR*2-1)*q);
+  for(let l=0;l<Gi.nC;l++){const L=l+oi;if(use&&!use(L))continue;let hasEdge=false;for(let k=0;k<8;k++)if(G.nbr[8*L+k]<0){hasEdge=true;break;}if(!hasEdge)continue;
+    const g=Gi.gid[l],f=(g/(NR*NR))|0,rem=g-f*NR*NR,J=(rem/NR)|0,I=rem-J*NR;
+    for(let k=0;k<8;k++){if(G.nbr[8*L+k]>=0)continue;faceDir(f,ang(I+D8[k][0]),ang(J+D8[k][1]),t);
+      const x=Rij[0]*t[0]+Rij[1]*t[1]+Rij[2]*t[2],y=Rij[3]*t[0]+Rij[4]*t[1]+Rij[5]*t[2],z=Rij[6]*t[0]+Rij[7]*t[1]+Rij[8]*t[2];
+      const m=Gj.localOf(Gj.lookup(x,y,z));if(m<0||(use&&!use(m+oj)))continue;const M=m+oj,nd=G.node;
+      const a=nd[3*M],b=nd[3*M+1],c=nd[3*M+2],X=Rji[0]*a+Rji[1]*b+Rji[2]*c,Y=Rji[3]*a+Rji[4]*b+Rji[5]*c,Z=Rji[6]*a+Rji[7]*b+Rji[8]*c;
+      G.nbr[8*L+k]=M;G.dist[8*L+k]=Math.hypot(nd[3*L]-X,nd[3*L+1]-Y,nd[3*L+2]-Z)*R_KM;links++;}}
+  return links;}
+// Pieces (one per continent, each in its own plate's frame) are concatenated into one graph; cell indices of
+// piece p are offset by its first slot x r^2. There are no links between pieces until they are stitched.
+function concatGrids(list){if(list.length===1)return list[0];const g0=list[0];let nC=0,nS=0;for(const g of list){nC+=g.nC;nS+=g.nS;}
+  const out={n:g0.n,r:g0.r,rr:g0.rr,nS,nC,NR:g0.NR,pos:new Float32Array(3*nC),node:new Float32Array(3*nC),area:new Float32Array(nC),nbr:new Int32Array(8*nC),dist:new Float32Array(8*nC),gid:new Int32Array(nC),parts:list,offsets:[],jitter:g0.jitter};
+  let o=0;for(const g of list){out.offsets.push(o);out.pos.set(g.pos,3*o);out.node.set(g.node,3*o);out.area.set(g.area,o);out.gid.set(g.gid,o);out.dist.set(g.dist,8*o);
+    for(let q=0;q<8*g.nC;q++)out.nbr[8*o+q]=g.nbr[q]<0?-1:g.nbr[q]+o;o+=g.nC;}
+  return out;}
 
 // ---------- continent selection ----------
 // The connected continental crust of the clicked cell's plate, in that plate's body frame, plus every body
 // cell of the same plate within `margin` L0 cells of it (the ocean margin is base level for the rivers).
-function select(world,cell,margin){
-  const P=world.plates[world.owner[cell]],k0=world.bodyIdx[cell],N=world.N,nb=world.cube.nb;
+function select(world,cell,margin){return selectBody(world,world.owner[cell],world.bodyIdx[cell],margin);}
+function selectBody(world,plate,k0,margin){
+  const P=world.plates[plate],N=world.N,nb=world.cube.nb;
   if(!P||!P.alive||!P.K[k0]||P.T[k0]<=0)return null;
   const d=new Int8Array(N).fill(-1),q=[k0];d[k0]=0;
   for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(d[b]<0&&P.K[b]&&P.T[b]>0){d[b]=0;q.push(b);}}}
@@ -120,31 +144,84 @@ function select(world,cell,margin){
   return{plate:P.id,k0,slots,nCont,dist:d};
 }
 
+// ---------- looking ahead for sutures ----------
+// Run L0 forward through the window from a snapshot, following the picked continent's plate lineage (splits add
+// the new plate; a weld with a plate outside the lineage makes it a partner). Each step, remember where outside
+// continental crust touches the lineage's continental crust, by plate and body cell. When a partner welds on,
+// those last contacts identify its continent: each is traced back in time to where that crust was at t0, through
+// splits (a split keeps body indices) and welds (L0's merge log says which absorbed cell filled each surviving
+// cell). Then restore the snapshot, so the real run replays the same future.
+class Lookahead{
+  constructor(world,cell,window,margin){
+    const sel=select(world,cell,margin||3);if(!sel)throw new Error("not a continental cell");
+    this.world=world;this.t0=world.t;this.window=window;this.snap=world.snapshot();this.seen0=world.plates.length;world.mergeLog=[];this.splits=[];
+    this.lineage=new Set([sel.plate]);this.deadSeen=new Set(world.plates.filter(P=>!P.alive).map(P=>P.id));this.platesSeen=world.plates.length;
+    this.contacts=new Map();this.found=[];this.done=false;}
+  // run up to maxMs of L0 steps; returns true when the window is covered
+  advance(maxMs){const w=this.world,t1=Date.now();
+    while(!this.done&&Date.now()-t1<maxMs){w.step();const plates=w.plates,lin=this.lineage;
+      for(let id=this.platesSeen;id<plates.length;id++){if(!plates[id].alive)continue;this.splits.push({id,parent:plates[id].parent,t:w.t});if(lin.has(plates[id].parent))lin.add(id);}
+      this.platesSeen=plates.length;
+      for(const P of plates){if(P.alive||P.mergedInto===undefined||this.deadSeen.has(P.id))continue;this.deadSeen.add(P.id);
+        const a=P.id,b=P.mergedInto,partner=lin.has(a)&&!lin.has(b)?b:lin.has(b)&&!lin.has(a)?a:-1;
+        if(partner>=0){const c=this.contacts.get(partner);this.found.push({plate:partner,t:w.t-this.t0,contacts:c?c.ks:[],tc:c?c.t:w.t});lin.add(a);lin.add(b);}}
+      // contacts this step: continental cells of an outside plate next to continental cells of the lineage
+      const now=new Map(),O=w.owner,K=w.wK,nb=w.cube.nb;
+      for(let i=0;i<w.N;i++){if(!K[i]||!lin.has(O[i]))continue;for(let k=0;k<4;k++){const j=nb[4*i+k];const q=O[j];if(!K[j]||lin.has(q))continue;
+        let arr=now.get(q);if(!arr)now.set(q,arr=[]);if(arr.length<40)arr.push(w.bodyIdx[j]);}}
+      for(const [q,arr] of now)this.contacts.set(q,{t:w.t,ks:arr});
+      if(w.t-this.t0>=this.window-1e-9)this.done=true;}
+    return this.done;}
+  // restore L0 to t0 and return the partners as [{plate, k, t, nCont}], each a continent present at t0
+  // where the crust at (plate q, body cell k) at time t was at t0, or null (crust created after t0)
+  trace(q,k,t){const ev=[...this.merges.filter(m=>m.t<=t).map(m=>({m,t:m.t})),...this.splits.filter(x=>x.t<=t).map(x=>({x,t:x.t}))].sort((a,b)=>b.t-a.t);
+    for(const e of ev){if(e.m&&e.m.into===q&&e.m.map[k]>=0){k=e.m.map[k];q=e.m.from;}else if(e.x&&e.x.id===q)q=e.x.parent;}
+    return q<this.seen0?{q,k}:null;}
+  finish(){const w=this.world;this.merges=w.mergeLog||[];w.restore(this.snap);delete w.mergeLog;const out=[];
+    for(const f of this.found)for(const k0 of f.contacts){const o=this.trace(f.plate,k0,f.tc);if(!o)continue;
+      if(out.some(x=>x.plate===o.q&&x.sel.dist[o.k]===0))continue;
+      const sel=selectBody(w,o.q,o.k,1);if(!sel||sel.nCont<8)continue;out.push({plate:o.q,k:o.k,t:f.t,nCont:sel.nCont,sel});}
+    return out.map(({sel,...x})=>x);}
+}
+
 class Region{
+  // o.cell: the picked fixed-grid cell. o.partners: continents that will weld onto it within the window, as
+  // [{plate, k}] (a plate and body cell at t0; see lookahead()). Each continent is a piece in its own plate's frame.
   constructor(world,o){
-    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,jitter:0.4,window:100},o);this.o=o;this.world=world;
+    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,jitter:0.4,window:100,partners:[]},o);this.o=o;this.world=world;
     const sel=select(world,o.cell,o.margin);if(!sel)throw new Error("not a continental cell");
-    const n=world.n,N=world.N,cube=world.cube,nb=cube.nb,P=world.plates[sel.plate],t0=world.t;
-    this.t0=t0;this.t=0;this.steps=0;this.plate0=P.id;this.Q0=Float64Array.from(P.Q);
-    const slots=this.slots=sel.slots,nS=slots.length,slotOf=this.slotOf=new Int32Array(N).fill(-1);
-    for(let s=0;s<nS;s++)slotOf[slots[s]]=s;
-    this.nCont=sel.nCont;this.slotCont=new Uint8Array(nS);for(let s=0;s<nS;s++)this.slotCont[s]=sel.dist[slots[s]]===0?1:0;
+    const n=world.n,N=world.N,cube=world.cube,nb=cube.nb,t0=world.t,r=o.r,rr=r*r;
+    // continents on the same plate share a frame, so they are one piece (the union of their slots)
+    const sels=[sel];for(const pt of o.partners){if(sels.some(x=>x.plate===pt.plate&&x.dist[pt.k]>=0))continue;const ps=selectBody(world,pt.plate,pt.k,o.margin);if(!ps)continue;
+      const same=sels.find(x=>x.plate===ps.plate);if(!same){sels.push(ps);continue;}
+      const d=same.dist;for(let k=0;k<N;k++)if(ps.dist[k]>=0&&(d[k]<0||ps.dist[k]<d[k]))d[k]=ps.dist[k];
+      same.slots=Int32Array.from(d.reduce((a,v,k)=>{if(v>=0)a.push(k);return a;},[]));same.nCont+=ps.nCont;}
+    this.t0=t0;this.t=0;this.steps=0;this.plate0=sel.plate;this.Q0=Float64Array.from(world.plates[sel.plate].Q);
+    // pieces: slot range, the plate whose body frame holds the piece, and the frame's fixed offset M (world = Q(plate) M b)
+    this.pieces=[];let nS=0;for(const ps of sels){const slotOf=new Int32Array(N).fill(-1);for(let s=0;s<ps.slots.length;s++)slotOf[ps.slots[s]]=s;
+      this.pieces.push({plate0:ps.plate,s0:nS,nS:ps.slots.length,sel:ps,slotOf,frames:new Map([[ps.plate,[1,0,0,0,1,0,0,0,1]]]),nCont:ps.nCont});nS+=ps.slots.length;}
+    this.framesSeen=world.plates.length;
+    const slots=this.slots=new Int32Array(nS),pieceOf=this.pieceOf=new Uint8Array(nS);this.slotCont=new Uint8Array(nS);
+    for(const [pi,pc] of this.pieces.entries())for(let s=0;s<pc.nS;s++){const k=pc.sel.slots[s];slots[pc.s0+s]=k;pieceOf[pc.s0+s]=pi;this.slotCont[pc.s0+s]=pc.sel.dist[k]===0?1:0;}
+    this.nCont=sel.nCont;this.slotOf=this.pieces[0].slotOf;
+    const so=s=>{const pc=this.pieces[pieceOf[s]];return c=>{const v=pc.slotOf[c];return v<0?-1:v+pc.s0;};};
     // slot lineage: which plate and body cell holds each parcel now
-    this.platesSeen=world.plates.length;this.slotPlate=new Int32Array(nS).fill(P.id);this.slotBody=Int32Array.from(slots);this.slotAlive=new Uint8Array(nS).fill(1);
-    this.slotNb=new Int32Array(4*nS);for(let s=0;s<nS;s++)for(let k=0;k<4;k++)this.slotNb[4*s+k]=slotOf[nb[4*slots[s]+k]];
-    // bilinear stencils: for each slot and quadrant, the three other parents (as slots, -1 outside the domain)
-    this.quad=new Int32Array(12*nS);
-    for(let s=0;s<nS;s++){const c=slots[s];for(let qd=0;qd<4;qd++){const cB=nb[4*c+(qd&1?1:0)],cC=nb[4*c+(qd&2?3:2)],cD=nb[4*cB+(qd&2?3:2)];
-      this.quad[12*s+3*qd]=slotOf[cB];this.quad[12*s+3*qd+1]=slotOf[cC];this.quad[12*s+3*qd+2]=slotOf[cD];}}
-    const r=o.r,G=this.G=buildGrid(n,slots,slotOf,r,o.jitter),nC=G.nC,rr=r*r;
+    this.platesSeen=world.plates.length;this.slotPlate=new Int32Array(nS);this.slotBody=Int32Array.from(slots);this.slotAlive=new Uint8Array(nS).fill(1);
+    for(let s=0;s<nS;s++)this.slotPlate[s]=this.pieces[pieceOf[s]].plate0;
+    this.slotNb=new Int32Array(4*nS);this.quad=new Int32Array(12*nS);
+    for(let s=0;s<nS;s++){const f=so(s),c=slots[s];for(let k=0;k<4;k++)this.slotNb[4*s+k]=f(nb[4*c+k]);
+      // bilinear stencils: for each slot and quadrant, the three other parents (as slots, -1 outside the domain)
+      for(let qd=0;qd<4;qd++){const cB=nb[4*c+(qd&1?1:0)],cC=nb[4*c+(qd&2?3:2)],cD=nb[4*cB+(qd&2?3:2)];
+        this.quad[12*s+3*qd]=f(cB);this.quad[12*s+3*qd+1]=f(cC);this.quad[12*s+3*qd+2]=f(cD);}}
+    const G=this.G=concatGrids(this.pieces.map(pc=>buildGrid(n,pc.sel.slots,pc.slotOf,r,o.jitter))),nC=G.nC;
     this.subQ=new Uint8Array(rr);this.subW=new Float32Array(2*rr);
     for(let jj=0;jj<r;jj++)for(let ii=0;ii<r;ii++){const tx=(ii+.5)/r-.5,ty=(jj+.5)/r-.5,sb=jj*r+ii;this.subQ[sb]=(tx<0?1:0)+(ty<0?2:0);this.subW[2*sb]=Math.abs(tx);this.subW[2*sb+1]=Math.abs(ty);}
     // flexure and crustal flow run on a coarser nested grid (b x b fine cells per mid cell), then are interpolated back
     const sigma=1.18*o.flexKm,cellKm=world.cellKm;let rf=1;for(let d=r;d>=1;d--)if(r%d===0&&cellKm/d>=sigma/2.5){rf=d;break;}
-    this.rf=rf;this.Gm=buildGrid(n,slots,slotOf,rf);this.buildMidMaps();this.flexPasses=Math.max(1,Math.round(sigma*sigma/(0.4*(cellKm/rf)**2)));
+    this.rf=rf;this.Gm=concatGrids(this.pieces.map(pc=>buildGrid(n,pc.sel.slots,pc.slotOf,rf,0)));this.buildMidMaps();this.flexPasses=Math.max(1,Math.round(sigma*sigma/(0.4*(cellKm/rf)**2)));
     // initial state from L0: elevation smoothed over the domain (three passes), interpolated, inverted through Airy isostasy
     const e0=new Float64Array(nS),kf=new Float64Array(nS);
-    for(let s=0;s<nS;s++){const k=slots[s];e0[s]=elevOf(P.K[k],P.T[k],P.B[k],P.S[k],t0);kf[s]=P.K[k];}
+    for(let s=0;s<nS;s++){const k=slots[s],P=world.plates[this.pieces[pieceOf[s]].plate0];e0[s]=elevOf(P.K[k],P.T[k],P.B[k],P.S[k],t0);kf[s]=P.K[k];}
     let es=e0,tmp=new Float64Array(nS);
     for(let pass=0;pass<3;pass++){for(let s=0;s<nS;s++){let v=es[s],w=1;for(let k=0;k<4;k++){const u=this.slotNb[4*s+k];if(u>=0){v+=es[u];w++;}}tmp[s]=v/w;}[es,tmp]=[tmp,es];}
     this.T=new Float64Array(nC);this.e=new Float64Array(nC);this.cont=new Uint8Array(nC);this.alive=new Uint8Array(nC).fill(1);this.eOcean=new Float32Array(nC);
@@ -158,11 +235,11 @@ class Region{
       if(ki[l]>=0.5||ei[l]>0){const p=G.pos,amp=0.05+0.05*Math.max(0,ei[l]),v=nz(p[3*l],p[3*l+1],p[3*l+2],f0,oct);
         this.cont[l]=1;this.T[l]=this.T0[l]=C.CONT_BASE+ei[l]/C.ISO;this.e0[l]=ei[l]+amp*2*(v-0.5)*2;}else{this.eOcean[l]=ei[l];}}
     this.S=scratch(nC);this.rate=new Float64Array(nS);this.rec0=new Float32Array(N);this.slotAt=new Map();this.touched=[];
-    this.precip=null;this.K=o.K;
-    this.budget={initial:this.volume(),tectonicL0:0,tectonicApplied:0,unappliedOcean:0,eroded:0,capped:0,consumed:0,rifted:0,flowResidual:0};
+    this.precip=null;this.K=o.K;this.welds=[];
+    this.budget={initial:this.volume(),tectonicApplied:0,tectonicL0:0,unappliedOcean:0,eroded:0,capped:0,consumed:0,rifted:0,flowResidual:0};
     this.history=[];this.flexure();this.classify();route(G,this.e,this.alive,this.outlet,this.S,this.precip);this.stats(0,0);
-    // map orientation: the continent's centroid, and world north at t0, in body coordinates
-    let cx=0,cy=0,cz=0;for(let s=0;s<nS;s++){if(!this.slotCont[s])continue;const c=slots[s];cx+=cube.pos[3*c];cy+=cube.pos[3*c+1];cz+=cube.pos[3*c+2];}
+    // map orientation: the picked continent's centroid, and world north at t0, in its body coordinates
+    let cx=0,cy=0,cz=0;for(let s=0;s<this.pieces[0].nS;s++){if(!this.slotCont[s])continue;const c=slots[s];cx+=cube.pos[3*c];cy+=cube.pos[3*c+1];cz+=cube.pos[3*c+2];}
     const cl=Math.hypot(cx,cy,cz);this.center=[cx/cl,cy/cl,cz/cl];const Q=this.Q0;this.northB=[Q[6],Q[7],Q[8]];
   }
   // bilinear interpolation of a per-slot field onto fine cells (parents outside the domain, or dead, are skipped)
@@ -287,8 +364,39 @@ class Region{
   // one coupled step: L0 advances (recording its tectonics), then L1 applies that forcing and erodes
   advance(){
     const w=this.world;this.rec0.fill(0);w.tecRec=this.rec0;w.step();w.tecRec=null;const dt=w.dt;
-    this.updateLineage();this.collectForcing(dt);this.step(dt);this.t+=dt;this.steps++;
+    this.updateLineage();this.updateFrames();this.collectForcing(dt);this.step(dt);this.t+=dt;this.steps++;
   }
+  // Each piece keeps a frame for every plate it has parcels on: for parcels on plate X, world = Q(X) M b, with b
+  // the parcel's position in the piece's own (t0) body frame. A split copies the parent's M to the new plate;
+  // a weld of L into W composes M with the fixed rotation between their frames. Two pieces have welded once
+  // they have parcels on the same plate; they are then stitched, using that plate's frames.
+  updateFrames(){const plates=this.world.plates,pcs=this.pieces;
+    for(let id=this.framesSeen;id<plates.length;id++){const C=plates[id];if(!C.alive||C.parent===undefined)continue;
+      for(const pc of pcs){const M=pc.frames.get(C.parent);if(M&&!pc.frames.has(id))pc.frames.set(id,M.slice());}}
+    this.framesSeen=plates.length;
+    for(const pc of pcs)for(const [p,M] of [...pc.frames]){let P=plates[p],Mn=M;
+      for(let g=0;g<16&&!P.alive&&P.mergedInto!==undefined;g++){const W=plates[P.mergedInto];Mn=mat(matT(W.Q),mat(P.Q,Mn));P=W;}
+      if(P.id!==p){pc.frames.delete(p);if(P.alive&&!pc.frames.has(P.id))pc.frames.set(P.id,Mn);}}
+    // where each piece's live parcels are now
+    const on=pcs.map(()=>new Map());for(let s=0;s<this.slots.length;s++)if(this.slotAlive[s]){const m=on[this.pieceOf[s]],p=this.slotPlate[s];m.set(p,(m.get(p)||0)+1);}
+    this.piecePlates=on;
+    for(let i=0;i<pcs.length;i++)for(let j=i+1;j<pcs.length;j++){if(this.welds.some(x=>x.i===i&&x.j===j))continue;
+      for(const [p] of on[i])if(on[j].has(p)&&pcs[i].frames.has(p)&&pcs[j].frames.has(p)){this.welds.push({i,j,t:this.t,plate:p,links:this.stitch(i,j,p)});break;}}}
+  // Link the outward-facing edge cells of pieces i and j that are on plate p, on the fine grid and the coarse
+  // (flexure) grid, to the cell of the other piece one step beyond each edge. Gaps (consumed crust) stay unlinked.
+  stitch(i,j,p){const Mi=this.pieces[i].frames.get(p),Mj=this.pieces[j].frames.get(p),Rji=mat(matT(Mi),Mj),Rij=matT(Rji);let links=0;
+    const sp=this.slotPlate,sa=this.slotAlive;
+    for(const G of [this.G,this.Gm]){const per=G.r*G.r,onP=l=>{const s=(l/per)|0;return sa[s]&&sp[s]===p;};
+      links+=stitchGrid(G,i,j,Rij,Rji,onP)+stitchGrid(G,j,i,Rji,Rij,onP);}
+    this.buildMidMaps();return links;}
+  // The map is drawn in the frame of the plate holding most of the first piece. Every piece's parcels on each
+  // plate (a "part") move rigidly; for each part, A maps a map-frame direction into the piece's own frame.
+  viewParts(){const plates=this.world.plates,pcs=this.pieces,on=this.piecePlates||pcs.map(pc=>new Map([[pc.plate0,1]]));
+    let X0=-1,bn=-1;for(const [q,c] of on[0])if(c>bn&&pcs[0].frames.has(q)){bn=c;X0=q;}if(X0<0)X0=[...pcs[0].frames.keys()][0];
+    const F0=mat(plates[X0].Q,pcs[0].frames.get(X0)),out=[];
+    pcs.forEach((pc,p)=>{for(const [q] of on[p]){const M=pc.frames.get(q);if(!M)continue;out.push({piece:p,plate:q,A:mat(matT(mat(plates[q].Q,M)),F0)});}});
+    return out;}
+  welded(){return this.welds.length>=this.pieces.length-1;}
   step(dt){
     const {G,T,cont,alive,eroded,uplifted,S,budget}=this,nC=G.nC,nbr=G.nbr,rr=G.rr,area=G.area;
     const u=this.interp(this.rate,this._u||(this._u=new Float64Array(nC)),this.slotAlive);
@@ -331,10 +439,19 @@ class Region{
       const d=v/a-P.T[k],de=C.ISO*d;n++;s1+=d;s2+=d*d;e1+=de;e2+=de*de;}
     return{parcels:n,meanThicknessDiffKm:n?s1/n:0,rmsThicknessDiffKm:n?Math.sqrt(s2/n):0,rmsElevationDiffKm:n?Math.sqrt(e2/n):0};}
   // body-frame direction -> fine cell (or -1)
-  localAt(x,y,z){return this.G.localOf(this.G.lookup(x,y,z));}
+  // map-frame direction -> fine cell (or -1). Without parts, the map frame is the first piece's own frame.
+  // With parts (from viewParts), a cell counts only if its parcel is on that part's plate now.
+  localAt(x,y,z,parts){const G=this.G,grids=G.parts||[G],offs=G.offsets||[0],rr=G.rr;
+    if(!parts)return grids[0].localOf(grids[0].lookup(x,y,z));let first=-1;
+    for(const pt of parts){const R=pt.A,g=grids[pt.piece],X=R[0]*x+R[1]*y+R[2]*z,Y=R[3]*x+R[4]*y+R[5]*z,Z=R[6]*x+R[7]*y+R[8]*z;
+      const m=g.localOf(g.lookup(X,Y,Z));if(m<0)continue;const l=m+offs[pt.piece],s=(l/rr)|0;
+      if(this.slotPlate[s]===pt.plate&&this.alive[l])return l;if(first<0)first=l;}
+    return first;}
+  // more than one rigid part (several pieces, or a piece split by a rift): the map changes as they move
+  moving(){return (this.piecePlates||[]).reduce((a,m)=>a+m.size,0)>1;}
   basins(){const {S,G}=this,out=this._basin||(this._basin=new Int32Array(G.nC).fill(-1));out.fill(-1);
     for(let h=0;h<S.ns;h++){const l=S.stack[h],r=S.rec[l];out[l]=r===l?l:out[r];}return out;}
 }
-return {Region,select,buildGrid,route,streamPower,planarGrid,scratch,Heap};
+return {Region,Lookahead,select,selectBody,buildGrid,route,streamPower,planarGrid,scratch,Heap};
 })();
 // ===== L1-END =====

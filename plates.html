@@ -171,12 +171,13 @@ button:disabled{opacity:.5;cursor:default}
 
   <section class="panel l1panel" id="l1panel">
     <h2>L1 continent</h2>
-    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window.</p>
+    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window. Optionally, L0 first looks ahead through the window (then rewinds exactly); continents that will weld onto this one are included in their own frames, drawn moving into place, and stitched on when L0 welds them.</p>
     <div class="row">
       <button id="l1Pick">Pick a continent</button>
       <label><span class="field-label">Cell size</span><select id="l1Ref"><option value="4">4× finer</option><option value="8" selected>8× finer</option><option value="16">16× finer</option></select></label>
       <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="150" step="10" value="100"><span class="num" id="l1WinVal">100 Myr</span></label>
       <label><span class="field-label">Erodibility K</span><input type="range" id="l1K" min="-2" max="0" step="0.25" value="-1"><span class="num" id="l1KVal">0.10</span></label>
+      <label title="Run L0 ahead through the window first; any continent that welds onto this one is included and evolves alongside it."><input type="checkbox" id="l1Look" checked> Include continents that will weld on</label>
       <button class="primary" id="l1Run" disabled>Run L1</button>
     </div>
     <div class="summary" id="l1Info"><div class="muted">No continent picked yet.</div></div>
@@ -245,7 +246,8 @@ const FK={NONE:0,THRUST:1,NORMAL:2,STRIKE:3}, FK_NAMES=["none","thrust","normal"
 const C={OCEAN_T:7,CONT_BASE:33,ISO:0.16,CAP:75,ARC:0.6,ARCW:[0,0.5,0.3,0.2],COLL:0.5,COLLW:[0.35,0.3,0.2,0.15],
   KE:0.03,KD:0.03,VOLC_DECAY:0.02,SED_CONV:5,ARC_CONV:17,COLLAPSE:48,HOT:0.7,CONT_TARGET:0.40,MERGE:180,COLL_LOG:30,SPLIT_TAU:40,VMAX:8,VMIN:0.5,
   UNIT_MERGE:150,COVER_DEPTH:1,SPEED_TAU:40,FAULT_GAP:10,FAULT_SWITCH:10};
-function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function mulberry32(a){const f=function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+  f.getState=()=>a;f.setState=v=>{a=v;};return f;} // state exposed so a world can be saved and restored exactly
 function hashStr(s){let h=1779033703^s.length;for(let i=0;i<s.length;i++){h=Math.imul(h^s.charCodeAt(i),3432918353);h=h<<13|h>>>19;}h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909);return(h^h>>>16)>>>0;}
 function gauss(r){let u=0;while(u===0)u=r();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*r());}
 function randUnit(r){const z=2*r()-1,p=2*Math.PI*r(),s=Math.sqrt(1-z*z);return[s*Math.cos(p),s*Math.sin(p),z];}
@@ -662,6 +664,8 @@ class World{
     if(!a.alive||!b.alive){purge();return;}
     const [Wn,L]=a.area>=b.area?[a,b]:[b,a];const {N,owner,bodyIdx}=this,p=this.cube.pos,lk=this.cube.lookup,QL=L.Q,QW=Wn.Q;
     const M=new Float64Array(9);for(let r=0;r<3;r++)for(let c=0;c<3;c++)M[r*3+c]=QW[r]*QL[c]+QW[3+r]*QL[3+c]+QW[6+r]*QL[6+c]; // QW^T QL
+    // optional provenance for L1's lookahead: which absorbed-plate body cell filled each surviving-plate cell
+    const from=this.mergeLog?new Int32Array(N).fill(-1):null;if(from)this.mergeLog.push({from:L.id,into:Wn.id,t:this.t,map:from});
     // pull: every empty cell of the surviving plate's grid asks which absorbed-plate cell lies under it.
     // (Pushing each absorbed cell to its nearest target is many-to-one and leaves a scatter of empty cells.)
     // Cells of the surviving plate's grid that now sit on the absorbed plate's territory are overwritten too:
@@ -669,10 +673,10 @@ class World{
     for(let kk=0;kk<N;kk++){const bx=p[3*kk],by=p[3*kk+1],bz=p[3*kk+2];
       const x=QW[0]*bx+QW[1]*by+QW[2]*bz,y=QW[3]*bx+QW[4]*by+QW[5]*bz,z=QW[6]*bx+QW[7]*by+QW[8]*bz;
       if(Wn.T[kk]>0&&owner[lk(x,y,z)]!==L.id)continue;
-      const k=lk(QL[0]*x+QL[3]*y+QL[6]*z,QL[1]*x+QL[4]*y+QL[7]*z,QL[2]*x+QL[5]*y+QL[8]*z);if(L.T[k]>0)this.copyCell(L,k,Wn,kk,M);}
+      const k=lk(QL[0]*x+QL[3]*y+QL[6]*z,QL[1]*x+QL[4]*y+QL[7]*z,QL[2]*x+QL[5]*y+QL[8]*z);if(L.T[k]>0){this.copyCell(L,k,Wn,kk,M);if(from)from[kk]=k;}}
     for(let i=0;i<N;i++){if(owner[i]!==L.id)continue;const x=p[3*i],y=p[3*i+1],z=p[3*i+2];
       const kk=lk(QW[0]*x+QW[3]*y+QW[6]*z,QW[1]*x+QW[4]*y+QW[7]*z,QW[2]*x+QW[5]*y+QW[8]*z);
-      if(Wn.T[kk]<=0)this.copyCell(L,bodyIdx[i],Wn,kk,M);owner[i]=Wn.id;bodyIdx[i]=kk;}
+      if(Wn.T[kk]<=0){this.copyCell(L,bodyIdx[i],Wn,kk,M);if(from)from[kk]=bodyIdx[i];}owner[i]=Wn.id;bodyIdx[i]=kk;}
     const tot=Wn.area+L.area;for(let k=0;k<3;k++)Wn.W[k]=(Wn.W[k]*Wn.area+L.W[k]*L.area)/tot;
     Wn.area=tot;Wn.contArea+=L.contArea;
     this.log("suture",`Plates ${Wn.id} and ${L.id} weld into one along a suture`,Wn.c);
@@ -695,6 +699,13 @@ class World{
     this.log("rift",`${contA>40&&contB>40?"Continental rift":"Rift"}: plate ${P.id} splits and plate ${Qp.id} drifts away`,c);
     this.updateStats(true);
   }
+  // Save and restore the whole state, so the future can be previewed (L1 looks ahead for sutures) and then
+  // replayed identically. The cube is shared and the noise function is stateless; the generator's state is saved.
+  snapshot(){const d={};for(const k of Object.keys(this))if(k!=="cube"&&k!=="rand"&&k!=="noise")d[k]=this[k];
+    return{data:structuredClone(d),rand:this.rand.getState()};}
+  restore(snap){const d=structuredClone(snap.data);Object.setPrototypeOf(d.pool,ColumnPool.prototype);Object.setPrototypeOf(d.fpool,FaultPool.prototype);
+    for(const k of Object.keys(this))if(k!=="cube"&&k!=="rand"&&k!=="noise"&&!(k in d))delete this[k];
+    Object.assign(this,d);this.rand.setState(snap.rand);}
   // ---------- inspection and L1 handoff ----------
   velocityAt(i){const P=this.plates[this.owner[i]],p=this.cube.pos,x=p[3*i],y=p[3*i+1],z=p[3*i+2];
     const v=[P.W[1]*z-P.W[2]*y,P.W[2]*x-P.W[0]*z,P.W[0]*y-P.W[1]*x];
@@ -953,14 +964,38 @@ function buildGrid(n,slots,slotOf,r,jitter){
       faceDir(f,ang(I+2*jitter*u),ang(J+2*jitter*v),t);node[3*l]=t[0];node[3*l+1]=t[1];node[3*l+2]=t[2];}}
   for(let l=0;l<nC;l++)for(let k=0;k<8;k++){const m=nbr[8*l+k];if(m<0)continue;
     dist[8*l+k]=Math.hypot(node[3*l]-node[3*m],node[3*l+1]-node[3*m+1],node[3*l+2]-node[3*m+2])*R_KM;}
-  return{n,r,rr,nS,nC,NR,pos,area,nbr,dist,gid,lookup:lk,localOf};
+  return{n,r,rr,nS,nC,NR,pos,node,area,nbr,dist,gid,lookup:lk,localOf,jitter};
 }
+
+// 3x3 rotations, row-major
+function mat(A,B){const o=new Array(9);for(let r=0;r<3;r++)for(let c=0;c<3;c++)o[r*3+c]=A[r*3]*B[c]+A[r*3+1]*B[3+c]+A[r*3+2]*B[6+c];return o;}
+function matT(A){return[A[0],A[3],A[6],A[1],A[4],A[7],A[2],A[5],A[8]];}
+// Link edge cells of piece i (neighbour slot -1) to the cell of piece j one step beyond, if any. Rji maps piece j's
+// frame into piece i's, Rij the reverse. Distances are measured between nodes in piece i's frame.
+function stitchGrid(G,i,j,Rij,Rji,use){const Gi=G.parts[i],Gj=G.parts[j],oi=G.offsets[i],oj=G.offsets[j],NR=Gi.NR,q=Math.PI/4,t=[0,0,0];let links=0;
+  const ang=v=>Math.tan(((v+.5)/NR*2-1)*q);
+  for(let l=0;l<Gi.nC;l++){const L=l+oi;if(use&&!use(L))continue;let hasEdge=false;for(let k=0;k<8;k++)if(G.nbr[8*L+k]<0){hasEdge=true;break;}if(!hasEdge)continue;
+    const g=Gi.gid[l],f=(g/(NR*NR))|0,rem=g-f*NR*NR,J=(rem/NR)|0,I=rem-J*NR;
+    for(let k=0;k<8;k++){if(G.nbr[8*L+k]>=0)continue;faceDir(f,ang(I+D8[k][0]),ang(J+D8[k][1]),t);
+      const x=Rij[0]*t[0]+Rij[1]*t[1]+Rij[2]*t[2],y=Rij[3]*t[0]+Rij[4]*t[1]+Rij[5]*t[2],z=Rij[6]*t[0]+Rij[7]*t[1]+Rij[8]*t[2];
+      const m=Gj.localOf(Gj.lookup(x,y,z));if(m<0||(use&&!use(m+oj)))continue;const M=m+oj,nd=G.node;
+      const a=nd[3*M],b=nd[3*M+1],c=nd[3*M+2],X=Rji[0]*a+Rji[1]*b+Rji[2]*c,Y=Rji[3]*a+Rji[4]*b+Rji[5]*c,Z=Rji[6]*a+Rji[7]*b+Rji[8]*c;
+      G.nbr[8*L+k]=M;G.dist[8*L+k]=Math.hypot(nd[3*L]-X,nd[3*L+1]-Y,nd[3*L+2]-Z)*R_KM;links++;}}
+  return links;}
+// Pieces (one per continent, each in its own plate's frame) are concatenated into one graph; cell indices of
+// piece p are offset by its first slot x r^2. There are no links between pieces until they are stitched.
+function concatGrids(list){if(list.length===1)return list[0];const g0=list[0];let nC=0,nS=0;for(const g of list){nC+=g.nC;nS+=g.nS;}
+  const out={n:g0.n,r:g0.r,rr:g0.rr,nS,nC,NR:g0.NR,pos:new Float32Array(3*nC),node:new Float32Array(3*nC),area:new Float32Array(nC),nbr:new Int32Array(8*nC),dist:new Float32Array(8*nC),gid:new Int32Array(nC),parts:list,offsets:[],jitter:g0.jitter};
+  let o=0;for(const g of list){out.offsets.push(o);out.pos.set(g.pos,3*o);out.node.set(g.node,3*o);out.area.set(g.area,o);out.gid.set(g.gid,o);out.dist.set(g.dist,8*o);
+    for(let q=0;q<8*g.nC;q++)out.nbr[8*o+q]=g.nbr[q]<0?-1:g.nbr[q]+o;o+=g.nC;}
+  return out;}
 
 // ---------- continent selection ----------
 // The connected continental crust of the clicked cell's plate, in that plate's body frame, plus every body
 // cell of the same plate within `margin` L0 cells of it (the ocean margin is base level for the rivers).
-function select(world,cell,margin){
-  const P=world.plates[world.owner[cell]],k0=world.bodyIdx[cell],N=world.N,nb=world.cube.nb;
+function select(world,cell,margin){return selectBody(world,world.owner[cell],world.bodyIdx[cell],margin);}
+function selectBody(world,plate,k0,margin){
+  const P=world.plates[plate],N=world.N,nb=world.cube.nb;
   if(!P||!P.alive||!P.K[k0]||P.T[k0]<=0)return null;
   const d=new Int8Array(N).fill(-1),q=[k0];d[k0]=0;
   for(let h=0;h<q.length;h++){const a=q[h];for(let k=0;k<4;k++){const b=nb[4*a+k];if(d[b]<0&&P.K[b]&&P.T[b]>0){d[b]=0;q.push(b);}}}
@@ -970,31 +1005,84 @@ function select(world,cell,margin){
   return{plate:P.id,k0,slots,nCont,dist:d};
 }
 
+// ---------- looking ahead for sutures ----------
+// Run L0 forward through the window from a snapshot, following the picked continent's plate lineage (splits add
+// the new plate; a weld with a plate outside the lineage makes it a partner). Each step, remember where outside
+// continental crust touches the lineage's continental crust, by plate and body cell. When a partner welds on,
+// those last contacts identify its continent: each is traced back in time to where that crust was at t0, through
+// splits (a split keeps body indices) and welds (L0's merge log says which absorbed cell filled each surviving
+// cell). Then restore the snapshot, so the real run replays the same future.
+class Lookahead{
+  constructor(world,cell,window,margin){
+    const sel=select(world,cell,margin||3);if(!sel)throw new Error("not a continental cell");
+    this.world=world;this.t0=world.t;this.window=window;this.snap=world.snapshot();this.seen0=world.plates.length;world.mergeLog=[];this.splits=[];
+    this.lineage=new Set([sel.plate]);this.deadSeen=new Set(world.plates.filter(P=>!P.alive).map(P=>P.id));this.platesSeen=world.plates.length;
+    this.contacts=new Map();this.found=[];this.done=false;}
+  // run up to maxMs of L0 steps; returns true when the window is covered
+  advance(maxMs){const w=this.world,t1=Date.now();
+    while(!this.done&&Date.now()-t1<maxMs){w.step();const plates=w.plates,lin=this.lineage;
+      for(let id=this.platesSeen;id<plates.length;id++){if(!plates[id].alive)continue;this.splits.push({id,parent:plates[id].parent,t:w.t});if(lin.has(plates[id].parent))lin.add(id);}
+      this.platesSeen=plates.length;
+      for(const P of plates){if(P.alive||P.mergedInto===undefined||this.deadSeen.has(P.id))continue;this.deadSeen.add(P.id);
+        const a=P.id,b=P.mergedInto,partner=lin.has(a)&&!lin.has(b)?b:lin.has(b)&&!lin.has(a)?a:-1;
+        if(partner>=0){const c=this.contacts.get(partner);this.found.push({plate:partner,t:w.t-this.t0,contacts:c?c.ks:[],tc:c?c.t:w.t});lin.add(a);lin.add(b);}}
+      // contacts this step: continental cells of an outside plate next to continental cells of the lineage
+      const now=new Map(),O=w.owner,K=w.wK,nb=w.cube.nb;
+      for(let i=0;i<w.N;i++){if(!K[i]||!lin.has(O[i]))continue;for(let k=0;k<4;k++){const j=nb[4*i+k];const q=O[j];if(!K[j]||lin.has(q))continue;
+        let arr=now.get(q);if(!arr)now.set(q,arr=[]);if(arr.length<40)arr.push(w.bodyIdx[j]);}}
+      for(const [q,arr] of now)this.contacts.set(q,{t:w.t,ks:arr});
+      if(w.t-this.t0>=this.window-1e-9)this.done=true;}
+    return this.done;}
+  // restore L0 to t0 and return the partners as [{plate, k, t, nCont}], each a continent present at t0
+  // where the crust at (plate q, body cell k) at time t was at t0, or null (crust created after t0)
+  trace(q,k,t){const ev=[...this.merges.filter(m=>m.t<=t).map(m=>({m,t:m.t})),...this.splits.filter(x=>x.t<=t).map(x=>({x,t:x.t}))].sort((a,b)=>b.t-a.t);
+    for(const e of ev){if(e.m&&e.m.into===q&&e.m.map[k]>=0){k=e.m.map[k];q=e.m.from;}else if(e.x&&e.x.id===q)q=e.x.parent;}
+    return q<this.seen0?{q,k}:null;}
+  finish(){const w=this.world;this.merges=w.mergeLog||[];w.restore(this.snap);delete w.mergeLog;const out=[];
+    for(const f of this.found)for(const k0 of f.contacts){const o=this.trace(f.plate,k0,f.tc);if(!o)continue;
+      if(out.some(x=>x.plate===o.q&&x.sel.dist[o.k]===0))continue;
+      const sel=selectBody(w,o.q,o.k,1);if(!sel||sel.nCont<8)continue;out.push({plate:o.q,k:o.k,t:f.t,nCont:sel.nCont,sel});}
+    return out.map(({sel,...x})=>x);}
+}
+
 class Region{
+  // o.cell: the picked fixed-grid cell. o.partners: continents that will weld onto it within the window, as
+  // [{plate, k}] (a plate and body cell at t0; see lookahead()). Each continent is a piece in its own plate's frame.
   constructor(world,o){
-    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,jitter:0.4,window:100},o);this.o=o;this.world=world;
+    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,jitter:0.4,window:100,partners:[]},o);this.o=o;this.world=world;
     const sel=select(world,o.cell,o.margin);if(!sel)throw new Error("not a continental cell");
-    const n=world.n,N=world.N,cube=world.cube,nb=cube.nb,P=world.plates[sel.plate],t0=world.t;
-    this.t0=t0;this.t=0;this.steps=0;this.plate0=P.id;this.Q0=Float64Array.from(P.Q);
-    const slots=this.slots=sel.slots,nS=slots.length,slotOf=this.slotOf=new Int32Array(N).fill(-1);
-    for(let s=0;s<nS;s++)slotOf[slots[s]]=s;
-    this.nCont=sel.nCont;this.slotCont=new Uint8Array(nS);for(let s=0;s<nS;s++)this.slotCont[s]=sel.dist[slots[s]]===0?1:0;
+    const n=world.n,N=world.N,cube=world.cube,nb=cube.nb,t0=world.t,r=o.r,rr=r*r;
+    // continents on the same plate share a frame, so they are one piece (the union of their slots)
+    const sels=[sel];for(const pt of o.partners){if(sels.some(x=>x.plate===pt.plate&&x.dist[pt.k]>=0))continue;const ps=selectBody(world,pt.plate,pt.k,o.margin);if(!ps)continue;
+      const same=sels.find(x=>x.plate===ps.plate);if(!same){sels.push(ps);continue;}
+      const d=same.dist;for(let k=0;k<N;k++)if(ps.dist[k]>=0&&(d[k]<0||ps.dist[k]<d[k]))d[k]=ps.dist[k];
+      same.slots=Int32Array.from(d.reduce((a,v,k)=>{if(v>=0)a.push(k);return a;},[]));same.nCont+=ps.nCont;}
+    this.t0=t0;this.t=0;this.steps=0;this.plate0=sel.plate;this.Q0=Float64Array.from(world.plates[sel.plate].Q);
+    // pieces: slot range, the plate whose body frame holds the piece, and the frame's fixed offset M (world = Q(plate) M b)
+    this.pieces=[];let nS=0;for(const ps of sels){const slotOf=new Int32Array(N).fill(-1);for(let s=0;s<ps.slots.length;s++)slotOf[ps.slots[s]]=s;
+      this.pieces.push({plate0:ps.plate,s0:nS,nS:ps.slots.length,sel:ps,slotOf,frames:new Map([[ps.plate,[1,0,0,0,1,0,0,0,1]]]),nCont:ps.nCont});nS+=ps.slots.length;}
+    this.framesSeen=world.plates.length;
+    const slots=this.slots=new Int32Array(nS),pieceOf=this.pieceOf=new Uint8Array(nS);this.slotCont=new Uint8Array(nS);
+    for(const [pi,pc] of this.pieces.entries())for(let s=0;s<pc.nS;s++){const k=pc.sel.slots[s];slots[pc.s0+s]=k;pieceOf[pc.s0+s]=pi;this.slotCont[pc.s0+s]=pc.sel.dist[k]===0?1:0;}
+    this.nCont=sel.nCont;this.slotOf=this.pieces[0].slotOf;
+    const so=s=>{const pc=this.pieces[pieceOf[s]];return c=>{const v=pc.slotOf[c];return v<0?-1:v+pc.s0;};};
     // slot lineage: which plate and body cell holds each parcel now
-    this.platesSeen=world.plates.length;this.slotPlate=new Int32Array(nS).fill(P.id);this.slotBody=Int32Array.from(slots);this.slotAlive=new Uint8Array(nS).fill(1);
-    this.slotNb=new Int32Array(4*nS);for(let s=0;s<nS;s++)for(let k=0;k<4;k++)this.slotNb[4*s+k]=slotOf[nb[4*slots[s]+k]];
-    // bilinear stencils: for each slot and quadrant, the three other parents (as slots, -1 outside the domain)
-    this.quad=new Int32Array(12*nS);
-    for(let s=0;s<nS;s++){const c=slots[s];for(let qd=0;qd<4;qd++){const cB=nb[4*c+(qd&1?1:0)],cC=nb[4*c+(qd&2?3:2)],cD=nb[4*cB+(qd&2?3:2)];
-      this.quad[12*s+3*qd]=slotOf[cB];this.quad[12*s+3*qd+1]=slotOf[cC];this.quad[12*s+3*qd+2]=slotOf[cD];}}
-    const r=o.r,G=this.G=buildGrid(n,slots,slotOf,r,o.jitter),nC=G.nC,rr=r*r;
+    this.platesSeen=world.plates.length;this.slotPlate=new Int32Array(nS);this.slotBody=Int32Array.from(slots);this.slotAlive=new Uint8Array(nS).fill(1);
+    for(let s=0;s<nS;s++)this.slotPlate[s]=this.pieces[pieceOf[s]].plate0;
+    this.slotNb=new Int32Array(4*nS);this.quad=new Int32Array(12*nS);
+    for(let s=0;s<nS;s++){const f=so(s),c=slots[s];for(let k=0;k<4;k++)this.slotNb[4*s+k]=f(nb[4*c+k]);
+      // bilinear stencils: for each slot and quadrant, the three other parents (as slots, -1 outside the domain)
+      for(let qd=0;qd<4;qd++){const cB=nb[4*c+(qd&1?1:0)],cC=nb[4*c+(qd&2?3:2)],cD=nb[4*cB+(qd&2?3:2)];
+        this.quad[12*s+3*qd]=f(cB);this.quad[12*s+3*qd+1]=f(cC);this.quad[12*s+3*qd+2]=f(cD);}}
+    const G=this.G=concatGrids(this.pieces.map(pc=>buildGrid(n,pc.sel.slots,pc.slotOf,r,o.jitter))),nC=G.nC;
     this.subQ=new Uint8Array(rr);this.subW=new Float32Array(2*rr);
     for(let jj=0;jj<r;jj++)for(let ii=0;ii<r;ii++){const tx=(ii+.5)/r-.5,ty=(jj+.5)/r-.5,sb=jj*r+ii;this.subQ[sb]=(tx<0?1:0)+(ty<0?2:0);this.subW[2*sb]=Math.abs(tx);this.subW[2*sb+1]=Math.abs(ty);}
     // flexure and crustal flow run on a coarser nested grid (b x b fine cells per mid cell), then are interpolated back
     const sigma=1.18*o.flexKm,cellKm=world.cellKm;let rf=1;for(let d=r;d>=1;d--)if(r%d===0&&cellKm/d>=sigma/2.5){rf=d;break;}
-    this.rf=rf;this.Gm=buildGrid(n,slots,slotOf,rf);this.buildMidMaps();this.flexPasses=Math.max(1,Math.round(sigma*sigma/(0.4*(cellKm/rf)**2)));
+    this.rf=rf;this.Gm=concatGrids(this.pieces.map(pc=>buildGrid(n,pc.sel.slots,pc.slotOf,rf,0)));this.buildMidMaps();this.flexPasses=Math.max(1,Math.round(sigma*sigma/(0.4*(cellKm/rf)**2)));
     // initial state from L0: elevation smoothed over the domain (three passes), interpolated, inverted through Airy isostasy
     const e0=new Float64Array(nS),kf=new Float64Array(nS);
-    for(let s=0;s<nS;s++){const k=slots[s];e0[s]=elevOf(P.K[k],P.T[k],P.B[k],P.S[k],t0);kf[s]=P.K[k];}
+    for(let s=0;s<nS;s++){const k=slots[s],P=world.plates[this.pieces[pieceOf[s]].plate0];e0[s]=elevOf(P.K[k],P.T[k],P.B[k],P.S[k],t0);kf[s]=P.K[k];}
     let es=e0,tmp=new Float64Array(nS);
     for(let pass=0;pass<3;pass++){for(let s=0;s<nS;s++){let v=es[s],w=1;for(let k=0;k<4;k++){const u=this.slotNb[4*s+k];if(u>=0){v+=es[u];w++;}}tmp[s]=v/w;}[es,tmp]=[tmp,es];}
     this.T=new Float64Array(nC);this.e=new Float64Array(nC);this.cont=new Uint8Array(nC);this.alive=new Uint8Array(nC).fill(1);this.eOcean=new Float32Array(nC);
@@ -1008,11 +1096,11 @@ class Region{
       if(ki[l]>=0.5||ei[l]>0){const p=G.pos,amp=0.05+0.05*Math.max(0,ei[l]),v=nz(p[3*l],p[3*l+1],p[3*l+2],f0,oct);
         this.cont[l]=1;this.T[l]=this.T0[l]=C.CONT_BASE+ei[l]/C.ISO;this.e0[l]=ei[l]+amp*2*(v-0.5)*2;}else{this.eOcean[l]=ei[l];}}
     this.S=scratch(nC);this.rate=new Float64Array(nS);this.rec0=new Float32Array(N);this.slotAt=new Map();this.touched=[];
-    this.precip=null;this.K=o.K;
-    this.budget={initial:this.volume(),tectonicL0:0,tectonicApplied:0,unappliedOcean:0,eroded:0,capped:0,consumed:0,rifted:0,flowResidual:0};
+    this.precip=null;this.K=o.K;this.welds=[];
+    this.budget={initial:this.volume(),tectonicApplied:0,tectonicL0:0,unappliedOcean:0,eroded:0,capped:0,consumed:0,rifted:0,flowResidual:0};
     this.history=[];this.flexure();this.classify();route(G,this.e,this.alive,this.outlet,this.S,this.precip);this.stats(0,0);
-    // map orientation: the continent's centroid, and world north at t0, in body coordinates
-    let cx=0,cy=0,cz=0;for(let s=0;s<nS;s++){if(!this.slotCont[s])continue;const c=slots[s];cx+=cube.pos[3*c];cy+=cube.pos[3*c+1];cz+=cube.pos[3*c+2];}
+    // map orientation: the picked continent's centroid, and world north at t0, in its body coordinates
+    let cx=0,cy=0,cz=0;for(let s=0;s<this.pieces[0].nS;s++){if(!this.slotCont[s])continue;const c=slots[s];cx+=cube.pos[3*c];cy+=cube.pos[3*c+1];cz+=cube.pos[3*c+2];}
     const cl=Math.hypot(cx,cy,cz);this.center=[cx/cl,cy/cl,cz/cl];const Q=this.Q0;this.northB=[Q[6],Q[7],Q[8]];
   }
   // bilinear interpolation of a per-slot field onto fine cells (parents outside the domain, or dead, are skipped)
@@ -1137,8 +1225,39 @@ class Region{
   // one coupled step: L0 advances (recording its tectonics), then L1 applies that forcing and erodes
   advance(){
     const w=this.world;this.rec0.fill(0);w.tecRec=this.rec0;w.step();w.tecRec=null;const dt=w.dt;
-    this.updateLineage();this.collectForcing(dt);this.step(dt);this.t+=dt;this.steps++;
+    this.updateLineage();this.updateFrames();this.collectForcing(dt);this.step(dt);this.t+=dt;this.steps++;
   }
+  // Each piece keeps a frame for every plate it has parcels on: for parcels on plate X, world = Q(X) M b, with b
+  // the parcel's position in the piece's own (t0) body frame. A split copies the parent's M to the new plate;
+  // a weld of L into W composes M with the fixed rotation between their frames. Two pieces have welded once
+  // they have parcels on the same plate; they are then stitched, using that plate's frames.
+  updateFrames(){const plates=this.world.plates,pcs=this.pieces;
+    for(let id=this.framesSeen;id<plates.length;id++){const C=plates[id];if(!C.alive||C.parent===undefined)continue;
+      for(const pc of pcs){const M=pc.frames.get(C.parent);if(M&&!pc.frames.has(id))pc.frames.set(id,M.slice());}}
+    this.framesSeen=plates.length;
+    for(const pc of pcs)for(const [p,M] of [...pc.frames]){let P=plates[p],Mn=M;
+      for(let g=0;g<16&&!P.alive&&P.mergedInto!==undefined;g++){const W=plates[P.mergedInto];Mn=mat(matT(W.Q),mat(P.Q,Mn));P=W;}
+      if(P.id!==p){pc.frames.delete(p);if(P.alive&&!pc.frames.has(P.id))pc.frames.set(P.id,Mn);}}
+    // where each piece's live parcels are now
+    const on=pcs.map(()=>new Map());for(let s=0;s<this.slots.length;s++)if(this.slotAlive[s]){const m=on[this.pieceOf[s]],p=this.slotPlate[s];m.set(p,(m.get(p)||0)+1);}
+    this.piecePlates=on;
+    for(let i=0;i<pcs.length;i++)for(let j=i+1;j<pcs.length;j++){if(this.welds.some(x=>x.i===i&&x.j===j))continue;
+      for(const [p] of on[i])if(on[j].has(p)&&pcs[i].frames.has(p)&&pcs[j].frames.has(p)){this.welds.push({i,j,t:this.t,plate:p,links:this.stitch(i,j,p)});break;}}}
+  // Link the outward-facing edge cells of pieces i and j that are on plate p, on the fine grid and the coarse
+  // (flexure) grid, to the cell of the other piece one step beyond each edge. Gaps (consumed crust) stay unlinked.
+  stitch(i,j,p){const Mi=this.pieces[i].frames.get(p),Mj=this.pieces[j].frames.get(p),Rji=mat(matT(Mi),Mj),Rij=matT(Rji);let links=0;
+    const sp=this.slotPlate,sa=this.slotAlive;
+    for(const G of [this.G,this.Gm]){const per=G.r*G.r,onP=l=>{const s=(l/per)|0;return sa[s]&&sp[s]===p;};
+      links+=stitchGrid(G,i,j,Rij,Rji,onP)+stitchGrid(G,j,i,Rji,Rij,onP);}
+    this.buildMidMaps();return links;}
+  // The map is drawn in the frame of the plate holding most of the first piece. Every piece's parcels on each
+  // plate (a "part") move rigidly; for each part, A maps a map-frame direction into the piece's own frame.
+  viewParts(){const plates=this.world.plates,pcs=this.pieces,on=this.piecePlates||pcs.map(pc=>new Map([[pc.plate0,1]]));
+    let X0=-1,bn=-1;for(const [q,c] of on[0])if(c>bn&&pcs[0].frames.has(q)){bn=c;X0=q;}if(X0<0)X0=[...pcs[0].frames.keys()][0];
+    const F0=mat(plates[X0].Q,pcs[0].frames.get(X0)),out=[];
+    pcs.forEach((pc,p)=>{for(const [q] of on[p]){const M=pc.frames.get(q);if(!M)continue;out.push({piece:p,plate:q,A:mat(matT(mat(plates[q].Q,M)),F0)});}});
+    return out;}
+  welded(){return this.welds.length>=this.pieces.length-1;}
   step(dt){
     const {G,T,cont,alive,eroded,uplifted,S,budget}=this,nC=G.nC,nbr=G.nbr,rr=G.rr,area=G.area;
     const u=this.interp(this.rate,this._u||(this._u=new Float64Array(nC)),this.slotAlive);
@@ -1181,11 +1300,20 @@ class Region{
       const d=v/a-P.T[k],de=C.ISO*d;n++;s1+=d;s2+=d*d;e1+=de;e2+=de*de;}
     return{parcels:n,meanThicknessDiffKm:n?s1/n:0,rmsThicknessDiffKm:n?Math.sqrt(s2/n):0,rmsElevationDiffKm:n?Math.sqrt(e2/n):0};}
   // body-frame direction -> fine cell (or -1)
-  localAt(x,y,z){return this.G.localOf(this.G.lookup(x,y,z));}
+  // map-frame direction -> fine cell (or -1). Without parts, the map frame is the first piece's own frame.
+  // With parts (from viewParts), a cell counts only if its parcel is on that part's plate now.
+  localAt(x,y,z,parts){const G=this.G,grids=G.parts||[G],offs=G.offsets||[0],rr=G.rr;
+    if(!parts)return grids[0].localOf(grids[0].lookup(x,y,z));let first=-1;
+    for(const pt of parts){const R=pt.A,g=grids[pt.piece],X=R[0]*x+R[1]*y+R[2]*z,Y=R[3]*x+R[4]*y+R[5]*z,Z=R[6]*x+R[7]*y+R[8]*z;
+      const m=g.localOf(g.lookup(X,Y,Z));if(m<0)continue;const l=m+offs[pt.piece],s=(l/rr)|0;
+      if(this.slotPlate[s]===pt.plate&&this.alive[l])return l;if(first<0)first=l;}
+    return first;}
+  // more than one rigid part (several pieces, or a piece split by a rift): the map changes as they move
+  moving(){return (this.piecePlates||[]).reduce((a,m)=>a+m.size,0)>1;}
   basins(){const {S,G}=this,out=this._basin||(this._basin=new Int32Array(G.nC).fill(-1));out.fill(-1);
     for(let h=0;h<S.ns;h++){const l=S.stack[h],r=S.rec[l];out[l]=r===l?l:out[r];}return out;}
 }
-return {Region,select,buildGrid,route,streamPower,planarGrid,scratch,Heap};
+return {Region,Lookahead,select,selectBody,buildGrid,route,streamPower,planarGrid,scratch,Heap};
 })();
 // ===== L1-END =====
 // ---------- rendering ----------
@@ -1405,11 +1533,12 @@ function frame(now){
     const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=n*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
     colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();l1WorldMoved();}
   if(l1Running){l1Tick();need=true;}
+  if(l1Look){l1LookTick();lastFrame=now;requestAnimationFrame(frame);return;}
   if(proj==="globe"&&$("spin").checked&&!dragging){yaw+=0.0035;camDirty=true;need=true;}
   if(need)render();lastFrame=now;requestAnimationFrame(frame);
 }
-$("play").onclick=()=>{if(l1Running)return;running=!running;$("play").textContent=running?"Pause":"Run";};
-$("stepBtn").onclick=()=>{if(l1Running)return;l1WorldMoved();const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
+$("play").onclick=()=>{if(l1Running||l1Look)return;running=!running;$("play").textContent=running?"Pause":"Run";};
+$("stepBtn").onclick=()=>{if(l1Running||l1Look)return;l1WorldMoved();const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
 $("speed").oninput=e=>$("speedVal").textContent=e.target.value;
 $("nPlates").oninput=e=>$("nPlatesVal").textContent=e.target.value;
 $("contT").oninput=e=>$("contTVal").textContent=e.target.value+"%";
@@ -1488,13 +1617,13 @@ $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
 downloadsP=(window.claude&&typeof window.claude.use==="function")?window.claude.use("downloads").catch(()=>null):Promise.resolve(null);
 window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(region)l1Render();});
 // ---------- L1 continent ----------
-let l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
+let l1Look=null,l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
 const L1_ERO_STOPS=[[0,"#f3efe2"],[0.5,"#e7cf8e"],[2,"#d39a4f"],[5,"#a85a2c"],[10,"#5e2a17"]];
 const L1_UP_STOPS=[[0,"#eef1f3"],[2,"#c7d9e8"],[10,"#7f9fd0"],[30,"#7a55b0"],[80,"#3d1859"]];
 const LUT_ERO=buildLut(L1_ERO_STOPS,256,0,10),LUT_UP=buildLut(L1_UP_STOPS,256,0,80);
 const l1Km=()=>world.cellKm/+$("l1Ref").value;
 function l1Labels(){const o=$("l1Ref").options;for(const op of o)op.textContent=`~${(world.cellKm/+op.value).toFixed(world.cellKm/+op.value<10?1:0)} km`;}
-function l1Reset(){l1Picking=false;l1Sel=null;region=null;l1Running=false;l1Stale=false;l1Mask=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
+function l1Reset(){l1Look=null;l1Picking=false;l1Sel=null;region=null;l1Running=false;l1Stale=false;l1Mask=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
   $("l1Info").innerHTML=`<div class="muted">No continent picked yet.</div>`;if(world)l1Labels();}
 // a picked continent is tied to this moment of L0; once L0 moves on without L1, the pick (or the L1 result) goes stale
@@ -1505,7 +1634,7 @@ function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world)return null;const N=wor
     for(let i=0;i<N;i++){const arr=region.slotAt.get(own[i]);if(!arr)continue;const s=arr[bi[i]];if(s>=0&&region.slotAlive[s])m[i]=region.slotCont[s]?2:1;}return l1Mask=m;}
   if(l1Sel){const m=new Uint8Array(N),{plate,dist}=l1Sel.sel;for(let i=0;i<N;i++)if(world.owner[i]===plate&&dist[world.bodyIdx[i]]>=0)m[i]=dist[world.bodyIdx[i]]===0?2:1;return l1Mask=m;}
   return null;}
-$("l1Pick").onclick=()=>{if(l1Running)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
+$("l1Pick").onclick=()=>{if(l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
   $("l1Info").innerHTML=`<div>Tap a continent on the map above.</div>`;$("hint").textContent="Tap a continent to pick it for L1.";};
 function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("hint").textContent=proj==="globe"?"Drag to turn the globe. Tap a spot to inspect it.":"Tap a spot to inspect it.";
   const sel=L1.select(world,i,3);if(!sel){$("l1Info").innerHTML=`<div class="muted">That spot is oceanic crust. Pick again and tap a continent.</div>`;return;}
@@ -1516,32 +1645,47 @@ function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("h
 $("l1Ref").onchange=()=>{if(l1Sel&&!region)l1PickAt(l1Sel.cell);};
 $("l1Win").oninput=e=>$("l1WinVal").textContent=e.target.value+" Myr";
 $("l1K").oninput=e=>$("l1KVal").textContent=Math.pow(10,+e.target.value).toFixed(e.target.value<-1.5?3:2);
-$("l1Run").onclick=()=>{if(!l1Sel||l1Running)return;if(running){running=false;$("play").textContent="Run";}
-  $("l1Run").disabled=true;$("l1Pick").disabled=true;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
-  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value});}
+$("l1Run").onclick=()=>{if(!l1Sel||l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}
+  $("l1Run").disabled=true;$("l1Pick").disabled=true;
+  if($("l1Look").checked){l1Look=new L1.Lookahead(world,l1Sel.cell,+$("l1Win").value);$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Looking">Looking ahead…</div>`);}
+  else l1Build([]);};
+// the lookahead runs L0 forward in slices between frames, then rewinds it exactly
+function l1LookTick(){const done=l1Look.advance(120),el=$("l1Looking"),w=+$("l1Win").value;
+  if(el)el.textContent=`Looking ahead: ${Math.min(w,Math.round(world.t-l1Look.t0))} / ${w} Myr…`;
+  if(!done)return;const partners=l1Look.finish();l1Look=null;if(el)el.remove();
+  const km=world.cellKm*world.cellKm;
+  $("l1Info").insertAdjacentHTML("beforeend",partners.length?partners.map(p=>`<div>Looking ahead: a continent on plate ${p.plate} (about ${(p.nCont*km/1e6).toFixed(1)} million km²) welds on at +${Math.round(p.t)} Myr; included.</div>`).join(""):`<div class="muted">Looking ahead: no continent welds onto this one within the window.</div>`);
+  l1Build(partners);}
+function l1Build(partners){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
+  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value,partners});}
     catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not build L1: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
     const b=$("l1Building");if(b)b.remove();
     $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">${region.G.nC.toLocaleString("en-US")} L1 cells of ~${l1Km().toFixed(1)} km; flexure and crustal flow on a ${(world.cellKm/region.rf).toFixed(0)} km grid.</div>`);
     l1Running=true;l1Mask=null;l1Zoom=1;l1Pan=[0,0];l1Pix=null;$("l1stage").hidden=false;$("l1controls").hidden=false;
     document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x.dataset.z==="1"?"true":"false"));l1Legend();l1Render();l1Stats();},30);};
-function l1Tick(){const t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
+function l1Tick(){const nw=region.welds.length,t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
   l1Mask=null;colorsDirty=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();
-  l1Render();l1Stats();
+  for(const wd of region.welds.slice(nw))$("l1Info").insertAdjacentHTML("beforeend",`<div>At +${Math.round(region.t)} Myr the continents weld; ${wd.links.toLocaleString("en-US")} links stitched across the suture.</div>`);
+  // while parts move relative to each other the map is redrawn every other step (its pixel lookup changes)
+  if(!region.moving()||region.steps%2===0||region.t>=region.o.window-1e-9)l1Render();l1Stats();
   if(region.t>=region.o.window-1e-9){l1Running=false;$("l1Pick").disabled=false;l1Stats(true);}}
 // map: orthographic projection about the continent's centroid, north up as it was at the start, in body coordinates
 function l1Frame(){const c=region.center,nB=region.northB,d=nB[0]*c[0]+nB[1]*c[1]+nB[2]*c[2];let nr=[nB[0]-d*c[0],nB[1]-d*c[1],nB[2]-d*c[2]];const L=Math.hypot(...nr)||1;nr=nr.map(v=>v/L);
   const ea=[nr[1]*c[2]-nr[2]*c[1],nr[2]*c[0]-nr[0]*c[2],nr[0]*c[1]-nr[1]*c[0]];
-  if(!region._ext){const p=world.cube.pos;let x0=1,x1=-1,y0=1,y1=-1;for(const k of region.slots){const v=[p[3*k],p[3*k+1],p[3*k+2]];
+  if(!region._ext){const p=world.cube.pos,parts=region.viewParts();let x0=1,x1=-1,y0=1,y1=-1;
+    for(let s=0;s<region.slots.length;s++){const k=region.slots[s],pt=parts.find(x=>x.piece===region.pieceOf[s]&&x.plate===region.slotPlate[s]);let v=[p[3*k],p[3*k+1],p[3*k+2]];
+      if(pt){const R=pt.A;v=[R[0]*v[0]+R[3]*v[1]+R[6]*v[2],R[1]*v[0]+R[4]*v[1]+R[7]*v[2],R[2]*v[0]+R[5]*v[1]+R[8]*v[2]];} // piece frame -> map frame
       const x=v[0]*ea[0]+v[1]*ea[1]+v[2]*ea[2],y=v[0]*nr[0]+v[1]*nr[1]+v[2]*nr[2];x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
     const pad=world.cellRad;region._ext=[x0-pad,x1+pad,y0-pad,y1+pad];}
   return{c,ea,nr,ext:region._ext};}
 function l1Size(){const wrap=$("l1wrap"),f=l1Frame(),[x0,x1,y0,y1]=f.ext,asp=Math.min(1.3,Math.max(0.45,(y1-y0)/(x1-x0)));
   wrap.style.aspectRatio=`${1/asp}`;const dpr=window.devicePixelRatio||1,W=Math.min(1200,Math.round((wrap.clientWidth||600)*dpr)),H=Math.round(W*asp);
+  if(region.moving()&&region._drawnAt!==region.steps){l1Pix=null;region._drawnAt=region.steps;}
   if(W!==l1PW||H!==l1PH||!l1Pix){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
-  if(!l1Pix){l1Pix=new Int32Array(W*H);const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
+  if(!l1Pix){l1Pix=new Int32Array(W*H);const A=region.moving()?region.viewParts():null;const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
     for(let py=0;py<H;py++){const Y=cy+(H/2-py-0.5)*s;for(let px=0;px<W;px++){const X=cx+(px+0.5-W/2)*s,z2=1-X*X-Y*Y;
       if(z2<=0){l1Pix[py*W+px]=-1;continue;}const z=Math.sqrt(z2);
-      l1Pix[py*W+px]=region.localAt(f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,f.c[2]*z+f.ea[2]*X+f.nr[2]*Y);}}}}
+      l1Pix[py*W+px]=region.localAt(f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,f.c[2]*z+f.ea[2]*X+f.nr[2]*Y,A);}}}}
 function l1Render(){if(!region)return;l1Size();
   const W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,{e,cont,alive,eroded,uplifted,S}=region,A=S.A;
   const rivers=$("l1Rivers").checked,cellA=region.G.area[0],Amin=Math.max(2000,10*cellA),bas=l1View==="basins"?region.basins():null,out=region.outlet;
@@ -1560,10 +1704,12 @@ function l1Render(){if(!region)return;l1Size();
   $("l1map").getContext("2d").putImageData(l1Img,0,0);}
 // hillshade per cell (light from the northwest, 6x exaggeration): the slope is a least-squares plane through the
 // land neighbours, in the map's east/north frame, so it is the same at every zoom and continuous across cube faces
-function l1Shade(){const {G,e,cont,alive}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,f=l1Frame(),ea=f.ea,nr=f.nr,out=region._shade||(region._shade=new Float32Array(nC));
-  const Lx=-0.55,Ly=0.55,Lz=0.63;
-  for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;
-    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0)continue;
+function l1Shade(){const {G,e,cont,alive,pieceOf}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,rr=G.rr,f=l1Frame(),out=region._shade||(region._shade=new Float32Array(nC));
+  const Lx=-0.55,Ly=0.55,Lz=0.63,sp=region.slotPlate,rot=(R,v)=>[R[0]*v[0]+R[1]*v[1]+R[2]*v[2],R[3]*v[0]+R[4]*v[1]+R[5]*v[2],R[6]*v[0]+R[7]*v[1]+R[8]*v[2]];
+  // the map's east and north axes, carried into each part's frame (neighbours are compared within one part)
+  const axes=new Map();if(region.moving())for(const pt of region.viewParts())axes.set(pt.piece*65536+pt.plate,[rot(pt.A,f.ea),rot(pt.A,f.nr)]);
+  for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;const sl=(l/rr)|0,key=pieceOf[sl]*65536+sp[sl],[ea,nr]=axes.get(key)||[f.ea,f.nr];
+    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0||pieceOf[(j/rr)|0]*65536+sp[(j/rr)|0]!==key)continue;
       const dx=pos[3*j]-pos[3*l],dy=pos[3*j+1]-pos[3*l+1],dz=pos[3*j+2]-pos[3*l+2],x=(dx*ea[0]+dy*ea[1]+dz*ea[2])*R_KM,y=(dx*nr[0]+dy*nr[1]+dz*nr[2])*R_KM,de=e[j]-e[l];
       a+=x*x;b+=x*y;c+=y*y;u+=x*de;v+=y*de;}
     const det=a*c-b*b;if(!(det>1e-9))continue;const gx=6*(c*u-b*v)/det,gy=6*(a*v-b*u)/det;

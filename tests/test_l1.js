@@ -1,6 +1,7 @@
 // L1 checks: the stream-power solver against its analytic steady state, then a real continent coupled to L0:
 // crust budget closes, every land cell drains to the sea (or a recorded inland basin), runs are deterministic, peaks stay bounded.
-// Hack's law and the L0-L1 divergence are printed as diagnostics.
+// Hack's law and the L0-L1 divergence are printed as diagnostics. Then the suture lookahead: L0 restored exactly,
+// the welding continent found, stitched on at the weld, rivers crossing the suture.
 const { loadSim, loadL1, runTo, arg } = require("./lib");
 const SIM = loadSim(), L1 = loadL1(SIM);
 let ok = true; const check = (cond, msg) => { if (!cond) { ok = false; console.log("FAIL " + msg); } };
@@ -48,4 +49,18 @@ const dv = R.divergence(); console.log(`L0 vs L1: mean thickness difference ${dv
 // determinism: a second run from scratch gives the same surface
 { const R2 = make(); while (R2.t < W) R2.advance(); let same = R2.G.nC === G.nC; for (let l = 0; same && l < G.nC; l++) if (R2.e[l] !== e[l]) same = false;
   check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "different"} on a second run`); }
+// 3. suture lookahead: a continent that another continent welds onto within the window
+{ const hash = w => { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; };
+  const w = runTo(new SIM.World({ n: 64, seed: "genesis", nPlates: 10, mode: "scatter", contTarget: 0.5 }), 1000);
+  let cell = -1; for (let i = 0; i < w.N && cell < 0; i++) if (w.wK[i] && w.owner[i] === 21) { const s = L1.select(w, i, 3); if (s && s.nCont === 451) cell = i; }
+  check(cell >= 0, "lookahead test continent found");
+  const before = hash(w), la = new L1.Lookahead(w, cell, 100); while (!la.advance(1e9)); const partners = la.finish();
+  check(hash(w) === before && w.t === 1000, "lookahead restores L0 exactly");
+  console.log(`lookahead: partners ${JSON.stringify(partners)}`); check(partners.length > 0, "lookahead finds the welding continent");
+  const R = new L1.Region(w, { cell, r: 4, window: 100, partners }); while (R.t < 100) R.advance();
+  const { G, S, alive, outlet } = R, piece = l => R.pieceOf[(l / G.rr) | 0]; let cross = 0, crossA = 0;
+  for (let l = 0; l < G.nC; l++) { if (!alive[l] || outlet[l]) continue; const r = S.rec[l]; if (r !== l && piece(r) !== piece(l)) { cross++; crossA = Math.max(crossA, S.A[l]); } }
+  const b2 = R.balance();
+  console.log(`pieces: ${R.pieces.length}, welds ${JSON.stringify(R.welds)}; ${cross} cells drain across the suture (largest ${Math.round(crossA)} km^2); budget error ${b2.error.toExponential(1)}`);
+  check(R.welds.length > 0 && R.welds[0].links > 0, "pieces stitched at the weld"); check(cross > 0, "rivers cross the suture"); check(Math.abs(b2.error) < 1e-9, "multi-piece crust budget closes"); }
 console.log(ok ? "PASS L1" : "FAIL L1"); process.exitCode = ok ? 0 : 1;

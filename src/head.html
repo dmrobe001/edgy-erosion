@@ -171,12 +171,13 @@ button:disabled{opacity:.5;cursor:default}
 
   <section class="panel l1panel" id="l1panel">
     <h2>L1 continent</h2>
-    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window.</p>
+    <p>Pick a continent and run it forward. L0 keeps running underneath and supplies only its tectonic thickening (arcs, collisions, hotspots, collapse). L1 replaces L0’s erosion with rivers on a grid 4–16 times finer, in the continent’s own frame, with elevation from crust thickness through flexural isostasy. Running L1 advances L0 by the window. Optionally, L0 first looks ahead through the window (then rewinds exactly); continents that will weld onto this one are included in their own frames, drawn moving into place, and stitched on when L0 welds them.</p>
     <div class="row">
       <button id="l1Pick">Pick a continent</button>
       <label><span class="field-label">Cell size</span><select id="l1Ref"><option value="4">4× finer</option><option value="8" selected>8× finer</option><option value="16">16× finer</option></select></label>
       <label><span class="field-label">Window</span><input type="range" id="l1Win" min="10" max="150" step="10" value="100"><span class="num" id="l1WinVal">100 Myr</span></label>
       <label><span class="field-label">Erodibility K</span><input type="range" id="l1K" min="-2" max="0" step="0.25" value="-1"><span class="num" id="l1KVal">0.10</span></label>
+      <label title="Run L0 ahead through the window first; any continent that welds onto this one is included and evolves alongside it."><input type="checkbox" id="l1Look" checked> Include continents that will weld on</label>
       <button class="primary" id="l1Run" disabled>Run L1</button>
     </div>
     <div class="summary" id="l1Info"><div class="muted">No continent picked yet.</div></div>

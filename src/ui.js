@@ -215,11 +215,12 @@ function frame(now){
     const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=n*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
     colorsDirty=true;need=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();l1WorldMoved();}
   if(l1Running){l1Tick();need=true;}
+  if(l1Look){l1LookTick();lastFrame=now;requestAnimationFrame(frame);return;}
   if(proj==="globe"&&$("spin").checked&&!dragging){yaw+=0.0035;camDirty=true;need=true;}
   if(need)render();lastFrame=now;requestAnimationFrame(frame);
 }
-$("play").onclick=()=>{if(l1Running)return;running=!running;$("play").textContent=running?"Pause":"Run";};
-$("stepBtn").onclick=()=>{if(l1Running)return;l1WorldMoved();const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
+$("play").onclick=()=>{if(l1Running||l1Look)return;running=!running;$("play").textContent=running?"Pause":"Run";};
+$("stepBtn").onclick=()=>{if(l1Running||l1Look)return;l1WorldMoved();const t0=performance.now();world.step();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();};
 $("speed").oninput=e=>$("speedVal").textContent=e.target.value;
 $("nPlates").oninput=e=>$("nPlatesVal").textContent=e.target.value;
 $("contT").oninput=e=>$("contTVal").textContent=e.target.value+"%";
@@ -298,13 +299,13 @@ $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
 downloadsP=(window.claude&&typeof window.claude.use==="function")?window.claude.use("downloads").catch(()=>null):Promise.resolve(null);
 window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(region)l1Render();});
 // ---------- L1 continent ----------
-let l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
+let l1Look=null,l1Picking=false,l1Sel=null,region=null,l1Running=false,l1Stale=false,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
 const L1_ERO_STOPS=[[0,"#f3efe2"],[0.5,"#e7cf8e"],[2,"#d39a4f"],[5,"#a85a2c"],[10,"#5e2a17"]];
 const L1_UP_STOPS=[[0,"#eef1f3"],[2,"#c7d9e8"],[10,"#7f9fd0"],[30,"#7a55b0"],[80,"#3d1859"]];
 const LUT_ERO=buildLut(L1_ERO_STOPS,256,0,10),LUT_UP=buildLut(L1_UP_STOPS,256,0,80);
 const l1Km=()=>world.cellKm/+$("l1Ref").value;
 function l1Labels(){const o=$("l1Ref").options;for(const op of o)op.textContent=`~${(world.cellKm/+op.value).toFixed(world.cellKm/+op.value<10?1:0)} km`;}
-function l1Reset(){l1Picking=false;l1Sel=null;region=null;l1Running=false;l1Stale=false;l1Mask=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
+function l1Reset(){l1Look=null;l1Picking=false;l1Sel=null;region=null;l1Running=false;l1Stale=false;l1Mask=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
   $("l1Info").innerHTML=`<div class="muted">No continent picked yet.</div>`;if(world)l1Labels();}
 // a picked continent is tied to this moment of L0; once L0 moves on without L1, the pick (or the L1 result) goes stale
@@ -315,7 +316,7 @@ function l1GlobeMask(){if(l1Mask)return l1Mask;if(!world)return null;const N=wor
     for(let i=0;i<N;i++){const arr=region.slotAt.get(own[i]);if(!arr)continue;const s=arr[bi[i]];if(s>=0&&region.slotAlive[s])m[i]=region.slotCont[s]?2:1;}return l1Mask=m;}
   if(l1Sel){const m=new Uint8Array(N),{plate,dist}=l1Sel.sel;for(let i=0;i<N;i++)if(world.owner[i]===plate&&dist[world.bodyIdx[i]]>=0)m[i]=dist[world.bodyIdx[i]]===0?2:1;return l1Mask=m;}
   return null;}
-$("l1Pick").onclick=()=>{if(l1Running)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
+$("l1Pick").onclick=()=>{if(l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}l1Picking=true;document.body.classList.add("pick");
   $("l1Info").innerHTML=`<div>Tap a continent on the map above.</div>`;$("hint").textContent="Tap a continent to pick it for L1.";};
 function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("hint").textContent=proj==="globe"?"Drag to turn the globe. Tap a spot to inspect it.":"Tap a spot to inspect it.";
   const sel=L1.select(world,i,3);if(!sel){$("l1Info").innerHTML=`<div class="muted">That spot is oceanic crust. Pick again and tap a continent.</div>`;return;}
@@ -326,32 +327,47 @@ function l1PickAt(i){l1Picking=false;document.body.classList.remove("pick");$("h
 $("l1Ref").onchange=()=>{if(l1Sel&&!region)l1PickAt(l1Sel.cell);};
 $("l1Win").oninput=e=>$("l1WinVal").textContent=e.target.value+" Myr";
 $("l1K").oninput=e=>$("l1KVal").textContent=Math.pow(10,+e.target.value).toFixed(e.target.value<-1.5?3:2);
-$("l1Run").onclick=()=>{if(!l1Sel||l1Running)return;if(running){running=false;$("play").textContent="Run";}
-  $("l1Run").disabled=true;$("l1Pick").disabled=true;$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
-  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value});}
+$("l1Run").onclick=()=>{if(!l1Sel||l1Running||l1Look)return;if(running){running=false;$("play").textContent="Run";}
+  $("l1Run").disabled=true;$("l1Pick").disabled=true;
+  if($("l1Look").checked){l1Look=new L1.Lookahead(world,l1Sel.cell,+$("l1Win").value);$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Looking">Looking ahead…</div>`);}
+  else l1Build([]);};
+// the lookahead runs L0 forward in slices between frames, then rewinds it exactly
+function l1LookTick(){const done=l1Look.advance(120),el=$("l1Looking"),w=+$("l1Win").value;
+  if(el)el.textContent=`Looking ahead: ${Math.min(w,Math.round(world.t-l1Look.t0))} / ${w} Myr…`;
+  if(!done)return;const partners=l1Look.finish();l1Look=null;if(el)el.remove();
+  const km=world.cellKm*world.cellKm;
+  $("l1Info").insertAdjacentHTML("beforeend",partners.length?partners.map(p=>`<div>Looking ahead: a continent on plate ${p.plate} (about ${(p.nCont*km/1e6).toFixed(1)} million km²) welds on at +${Math.round(p.t)} Myr; included.</div>`).join(""):`<div class="muted">Looking ahead: no continent welds onto this one within the window.</div>`);
+  l1Build(partners);}
+function l1Build(partners){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted" id="l1Building">Building the L1 grid…</div>`);
+  setTimeout(()=>{try{region=new L1.Region(world,{cell:l1Sel.cell,r:+$("l1Ref").value,K:Math.pow(10,+$("l1K").value),window:+$("l1Win").value,partners});}
     catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not build L1: ${err.message}</div>`);$("l1Pick").disabled=false;return;}
     const b=$("l1Building");if(b)b.remove();
     $("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">${region.G.nC.toLocaleString("en-US")} L1 cells of ~${l1Km().toFixed(1)} km; flexure and crustal flow on a ${(world.cellKm/region.rf).toFixed(0)} km grid.</div>`);
     l1Running=true;l1Mask=null;l1Zoom=1;l1Pan=[0,0];l1Pix=null;$("l1stage").hidden=false;$("l1controls").hidden=false;
     document.querySelectorAll("#l1zoom button").forEach(x=>x.setAttribute("aria-pressed",x.dataset.z==="1"?"true":"false"));l1Legend();l1Render();l1Stats();},30);};
-function l1Tick(){const t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
+function l1Tick(){const nw=region.welds.length,t0=performance.now();region.advance();const ms=performance.now()-t0;l1Ms=l1Ms?l1Ms*0.8+ms*0.2:ms;
   l1Mask=null;colorsDirty=true;if(handoff)staleHandoff();updateUi();if(selCell>=0)showColumn();
-  l1Render();l1Stats();
+  for(const wd of region.welds.slice(nw))$("l1Info").insertAdjacentHTML("beforeend",`<div>At +${Math.round(region.t)} Myr the continents weld; ${wd.links.toLocaleString("en-US")} links stitched across the suture.</div>`);
+  // while parts move relative to each other the map is redrawn every other step (its pixel lookup changes)
+  if(!region.moving()||region.steps%2===0||region.t>=region.o.window-1e-9)l1Render();l1Stats();
   if(region.t>=region.o.window-1e-9){l1Running=false;$("l1Pick").disabled=false;l1Stats(true);}}
 // map: orthographic projection about the continent's centroid, north up as it was at the start, in body coordinates
 function l1Frame(){const c=region.center,nB=region.northB,d=nB[0]*c[0]+nB[1]*c[1]+nB[2]*c[2];let nr=[nB[0]-d*c[0],nB[1]-d*c[1],nB[2]-d*c[2]];const L=Math.hypot(...nr)||1;nr=nr.map(v=>v/L);
   const ea=[nr[1]*c[2]-nr[2]*c[1],nr[2]*c[0]-nr[0]*c[2],nr[0]*c[1]-nr[1]*c[0]];
-  if(!region._ext){const p=world.cube.pos;let x0=1,x1=-1,y0=1,y1=-1;for(const k of region.slots){const v=[p[3*k],p[3*k+1],p[3*k+2]];
+  if(!region._ext){const p=world.cube.pos,parts=region.viewParts();let x0=1,x1=-1,y0=1,y1=-1;
+    for(let s=0;s<region.slots.length;s++){const k=region.slots[s],pt=parts.find(x=>x.piece===region.pieceOf[s]&&x.plate===region.slotPlate[s]);let v=[p[3*k],p[3*k+1],p[3*k+2]];
+      if(pt){const R=pt.A;v=[R[0]*v[0]+R[3]*v[1]+R[6]*v[2],R[1]*v[0]+R[4]*v[1]+R[7]*v[2],R[2]*v[0]+R[5]*v[1]+R[8]*v[2]];} // piece frame -> map frame
       const x=v[0]*ea[0]+v[1]*ea[1]+v[2]*ea[2],y=v[0]*nr[0]+v[1]*nr[1]+v[2]*nr[2];x0=Math.min(x0,x);x1=Math.max(x1,x);y0=Math.min(y0,y);y1=Math.max(y1,y);}
     const pad=world.cellRad;region._ext=[x0-pad,x1+pad,y0-pad,y1+pad];}
   return{c,ea,nr,ext:region._ext};}
 function l1Size(){const wrap=$("l1wrap"),f=l1Frame(),[x0,x1,y0,y1]=f.ext,asp=Math.min(1.3,Math.max(0.45,(y1-y0)/(x1-x0)));
   wrap.style.aspectRatio=`${1/asp}`;const dpr=window.devicePixelRatio||1,W=Math.min(1200,Math.round((wrap.clientWidth||600)*dpr)),H=Math.round(W*asp);
+  if(region.moving()&&region._drawnAt!==region.steps){l1Pix=null;region._drawnAt=region.steps;}
   if(W!==l1PW||H!==l1PH||!l1Pix){l1PW=W;l1PH=H;const cv=$("l1map");cv.width=W;cv.height=H;l1Img=cv.getContext("2d").createImageData(W,H);l1Pix=null;}
-  if(!l1Pix){l1Pix=new Int32Array(W*H);const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
+  if(!l1Pix){l1Pix=new Int32Array(W*H);const A=region.moving()?region.viewParts():null;const s=Math.max((x1-x0)/W,(y1-y0)/H)/l1Zoom,cx=(x0+x1)/2+l1Pan[0],cy=(y0+y1)/2+l1Pan[1];l1Geo={s,cx,cy};
     for(let py=0;py<H;py++){const Y=cy+(H/2-py-0.5)*s;for(let px=0;px<W;px++){const X=cx+(px+0.5-W/2)*s,z2=1-X*X-Y*Y;
       if(z2<=0){l1Pix[py*W+px]=-1;continue;}const z=Math.sqrt(z2);
-      l1Pix[py*W+px]=region.localAt(f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,f.c[2]*z+f.ea[2]*X+f.nr[2]*Y);}}}}
+      l1Pix[py*W+px]=region.localAt(f.c[0]*z+f.ea[0]*X+f.nr[0]*Y,f.c[1]*z+f.ea[1]*X+f.nr[1]*Y,f.c[2]*z+f.ea[2]*X+f.nr[2]*Y,A);}}}}
 function l1Render(){if(!region)return;l1Size();
   const W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,{e,cont,alive,eroded,uplifted,S}=region,A=S.A;
   const rivers=$("l1Rivers").checked,cellA=region.G.area[0],Amin=Math.max(2000,10*cellA),bas=l1View==="basins"?region.basins():null,out=region.outlet;
@@ -370,10 +386,12 @@ function l1Render(){if(!region)return;l1Size();
   $("l1map").getContext("2d").putImageData(l1Img,0,0);}
 // hillshade per cell (light from the northwest, 6x exaggeration): the slope is a least-squares plane through the
 // land neighbours, in the map's east/north frame, so it is the same at every zoom and continuous across cube faces
-function l1Shade(){const {G,e,cont,alive}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,f=l1Frame(),ea=f.ea,nr=f.nr,out=region._shade||(region._shade=new Float32Array(nC));
-  const Lx=-0.55,Ly=0.55,Lz=0.63;
-  for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;
-    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0)continue;
+function l1Shade(){const {G,e,cont,alive,pieceOf}=region,nC=G.nC,pos=G.pos,nbr=G.nbr,rr=G.rr,f=l1Frame(),out=region._shade||(region._shade=new Float32Array(nC));
+  const Lx=-0.55,Ly=0.55,Lz=0.63,sp=region.slotPlate,rot=(R,v)=>[R[0]*v[0]+R[1]*v[1]+R[2]*v[2],R[3]*v[0]+R[4]*v[1]+R[5]*v[2],R[6]*v[0]+R[7]*v[1]+R[8]*v[2]];
+  // the map's east and north axes, carried into each part's frame (neighbours are compared within one part)
+  const axes=new Map();if(region.moving())for(const pt of region.viewParts())axes.set(pt.piece*65536+pt.plate,[rot(pt.A,f.ea),rot(pt.A,f.nr)]);
+  for(let l=0;l<nC;l++){out[l]=1;if(!alive[l]||!cont[l]||e[l]<=0)continue;let a=0,b=0,c=0,u=0,v=0;const sl=(l/rr)|0,key=pieceOf[sl]*65536+sp[sl],[ea,nr]=axes.get(key)||[f.ea,f.nr];
+    for(let k=0;k<8;k++){const j=nbr[8*l+k];if(j<0||!alive[j]||!cont[j]||e[j]<=0||pieceOf[(j/rr)|0]*65536+sp[(j/rr)|0]!==key)continue;
       const dx=pos[3*j]-pos[3*l],dy=pos[3*j+1]-pos[3*l+1],dz=pos[3*j+2]-pos[3*l+2],x=(dx*ea[0]+dy*ea[1]+dz*ea[2])*R_KM,y=(dx*nr[0]+dy*nr[1]+dz*nr[2])*R_KM,de=e[j]-e[l];
       a+=x*x;b+=x*y;c+=y*y;u+=x*de;v+=y*de;}
     const det=a*c-b*b;if(!(det>1e-9))continue;const gx=6*(c*u-b*v)/det,gy=6*(a*v-b*u)/det;

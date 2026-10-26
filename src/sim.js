@@ -7,7 +7,8 @@ const FK={NONE:0,THRUST:1,NORMAL:2,STRIKE:3}, FK_NAMES=["none","thrust","normal"
 const C={OCEAN_T:7,CONT_BASE:33,ISO:0.16,CAP:75,ARC:0.6,ARCW:[0,0.5,0.3,0.2],COLL:0.5,COLLW:[0.35,0.3,0.2,0.15],
   KE:0.03,KD:0.03,VOLC_DECAY:0.02,SED_CONV:5,ARC_CONV:17,COLLAPSE:48,HOT:0.7,CONT_TARGET:0.40,MERGE:180,COLL_LOG:30,SPLIT_TAU:40,VMAX:8,VMIN:0.5,
   UNIT_MERGE:150,COVER_DEPTH:1,SPEED_TAU:40,FAULT_GAP:10,FAULT_SWITCH:10};
-function mulberry32(a){return function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+function mulberry32(a){const f=function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
+  f.getState=()=>a;f.setState=v=>{a=v;};return f;} // state exposed so a world can be saved and restored exactly
 function hashStr(s){let h=1779033703^s.length;for(let i=0;i<s.length;i++){h=Math.imul(h^s.charCodeAt(i),3432918353);h=h<<13|h>>>19;}h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909);return(h^h>>>16)>>>0;}
 function gauss(r){let u=0;while(u===0)u=r();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*r());}
 function randUnit(r){const z=2*r()-1,p=2*Math.PI*r(),s=Math.sqrt(1-z*z);return[s*Math.cos(p),s*Math.sin(p),z];}
@@ -424,6 +425,8 @@ class World{
     if(!a.alive||!b.alive){purge();return;}
     const [Wn,L]=a.area>=b.area?[a,b]:[b,a];const {N,owner,bodyIdx}=this,p=this.cube.pos,lk=this.cube.lookup,QL=L.Q,QW=Wn.Q;
     const M=new Float64Array(9);for(let r=0;r<3;r++)for(let c=0;c<3;c++)M[r*3+c]=QW[r]*QL[c]+QW[3+r]*QL[3+c]+QW[6+r]*QL[6+c]; // QW^T QL
+    // optional provenance for L1's lookahead: which absorbed-plate body cell filled each surviving-plate cell
+    const from=this.mergeLog?new Int32Array(N).fill(-1):null;if(from)this.mergeLog.push({from:L.id,into:Wn.id,t:this.t,map:from});
     // pull: every empty cell of the surviving plate's grid asks which absorbed-plate cell lies under it.
     // (Pushing each absorbed cell to its nearest target is many-to-one and leaves a scatter of empty cells.)
     // Cells of the surviving plate's grid that now sit on the absorbed plate's territory are overwritten too:
@@ -431,10 +434,10 @@ class World{
     for(let kk=0;kk<N;kk++){const bx=p[3*kk],by=p[3*kk+1],bz=p[3*kk+2];
       const x=QW[0]*bx+QW[1]*by+QW[2]*bz,y=QW[3]*bx+QW[4]*by+QW[5]*bz,z=QW[6]*bx+QW[7]*by+QW[8]*bz;
       if(Wn.T[kk]>0&&owner[lk(x,y,z)]!==L.id)continue;
-      const k=lk(QL[0]*x+QL[3]*y+QL[6]*z,QL[1]*x+QL[4]*y+QL[7]*z,QL[2]*x+QL[5]*y+QL[8]*z);if(L.T[k]>0)this.copyCell(L,k,Wn,kk,M);}
+      const k=lk(QL[0]*x+QL[3]*y+QL[6]*z,QL[1]*x+QL[4]*y+QL[7]*z,QL[2]*x+QL[5]*y+QL[8]*z);if(L.T[k]>0){this.copyCell(L,k,Wn,kk,M);if(from)from[kk]=k;}}
     for(let i=0;i<N;i++){if(owner[i]!==L.id)continue;const x=p[3*i],y=p[3*i+1],z=p[3*i+2];
       const kk=lk(QW[0]*x+QW[3]*y+QW[6]*z,QW[1]*x+QW[4]*y+QW[7]*z,QW[2]*x+QW[5]*y+QW[8]*z);
-      if(Wn.T[kk]<=0)this.copyCell(L,bodyIdx[i],Wn,kk,M);owner[i]=Wn.id;bodyIdx[i]=kk;}
+      if(Wn.T[kk]<=0){this.copyCell(L,bodyIdx[i],Wn,kk,M);if(from)from[kk]=bodyIdx[i];}owner[i]=Wn.id;bodyIdx[i]=kk;}
     const tot=Wn.area+L.area;for(let k=0;k<3;k++)Wn.W[k]=(Wn.W[k]*Wn.area+L.W[k]*L.area)/tot;
     Wn.area=tot;Wn.contArea+=L.contArea;
     this.log("suture",`Plates ${Wn.id} and ${L.id} weld into one along a suture`,Wn.c);
@@ -457,6 +460,13 @@ class World{
     this.log("rift",`${contA>40&&contB>40?"Continental rift":"Rift"}: plate ${P.id} splits and plate ${Qp.id} drifts away`,c);
     this.updateStats(true);
   }
+  // Save and restore the whole state, so the future can be previewed (L1 looks ahead for sutures) and then
+  // replayed identically. The cube is shared and the noise function is stateless; the generator's state is saved.
+  snapshot(){const d={};for(const k of Object.keys(this))if(k!=="cube"&&k!=="rand"&&k!=="noise")d[k]=this[k];
+    return{data:structuredClone(d),rand:this.rand.getState()};}
+  restore(snap){const d=structuredClone(snap.data);Object.setPrototypeOf(d.pool,ColumnPool.prototype);Object.setPrototypeOf(d.fpool,FaultPool.prototype);
+    for(const k of Object.keys(this))if(k!=="cube"&&k!=="rand"&&k!=="noise"&&!(k in d))delete this[k];
+    Object.assign(this,d);this.rand.setState(snap.rand);}
   // ---------- inspection and L1 handoff ----------
   velocityAt(i){const P=this.plates[this.owner[i]],p=this.cube.pos,x=p[3*i],y=p[3*i+1],z=p[3*i+2];
     const v=[P.W[1]*z-P.W[2]*y,P.W[2]*x-P.W[0]*z,P.W[0]*y-P.W[1]*x];

@@ -23,7 +23,8 @@ new Function(code + `
   if (!document.getElementById("summary").innerHTML.includes("formations")) throw new Error("summary not rendered");
   let land = -1; for (let i = 0; i < world.N; i++) if (world.wK[i] && world.elev[i] > 0.5) { land = i; break; }
   document.getElementById("l1Pick").onclick(); l1PickAt(land); render();
-  document.getElementById("l1Run").onclick(); if (!region) throw new Error("L1 region not built: " + document.getElementById("l1Info").innerHTML);
+  document.getElementById("l1Run").onclick(); while (l1Look) l1LookTick();
+  if (!region) throw new Error("L1 region not built: " + document.getElementById("l1Info").innerHTML);
   while (l1Running) l1Tick();
   for (const v of ["terrain", "erosion", "uplift", "basins"]) { l1View = v; l1Legend(); l1Render(); }
   l1Zoom = 4; l1Pix = null; l1Render(); l1Inspect({ clientX: 200, clientY: 200 });
