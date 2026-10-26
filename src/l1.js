@@ -81,10 +81,15 @@ function streamPower(e,S,K,m,dt){
     const F=(typeof K==="number"?K:K[l])*dt*Math.pow(A[l],m)/rdist[l];hN[l]=(e[l]+F*hb)/(1+F);}
   return hN;
 }
-function planarGrid(nx,ny,dx){const nC=nx*ny,nbr=new Int32Array(8*nC),dist=new Float32Array(8*nC),area=new Float32Array(nC).fill(dx*dx);
-  const D=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]];
-  for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const l=y*nx+x;for(let k=0;k<8;k++){const X=x+D[k][0],Y=y+D[k][1];
-    nbr[8*l+k]=X<0||Y<0||X>=nx||Y>=ny?-1:Y*nx+X;dist[8*l+k]=dx*Math.hypot(D[k][0],D[k][1]);}}
+// A square grid with 8 neighbours. With jitter > 0, each cell's node (used for distances, hence slopes) is displaced
+// within the cell by up to jitter x cell width, by a fixed hash of (x + ix, y + iy) and salt, so the neighbour
+// directions differ from cell to cell and rivers are not locked to the lattice's 0 and 45 degree directions.
+function jit2(x,y,salt){let h=Math.imul(x,0x27d4eb2d)^Math.imul(y,0x165667b1)^salt;h=Math.imul(h^(h>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);h^=h>>>16;return[(h&0xffff)/65536-0.5,(h>>>16)/65536-0.5];}
+function planarGrid(nx,ny,dx,jitter=0,ix=0,iy=0,salt=0){const nC=nx*ny,nbr=new Int32Array(8*nC),dist=new Float32Array(8*nC),area=new Float32Array(nC).fill(dx*dx);
+  const D=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]],jx=new Float32Array(nC),jy=new Float32Array(nC);
+  if(jitter>0)for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const [u,v]=jit2(x+ix,y+iy,salt);jx[y*nx+x]=2*jitter*u;jy[y*nx+x]=2*jitter*v;}
+  for(let y=0;y<ny;y++)for(let x=0;x<nx;x++){const l=y*nx+x;for(let k=0;k<8;k++){const X=x+D[k][0],Y=y+D[k][1],m=X<0||Y<0||X>=nx||Y>=ny?-1:Y*nx+X;
+    nbr[8*l+k]=m;dist[8*l+k]=m<0?dx*Math.hypot(D[k][0],D[k][1]):dx*Math.hypot(D[k][0]+jx[m]-jx[l],D[k][1]+jy[m]-jy[l]);}}
   return{nC,nbr,dist,area};}
 
 
@@ -187,7 +192,7 @@ class Projection{
 // definite, and it is solved by conjugate gradients with a diagonal preconditioner and Picard iteration on viscosity.
 class Sheet{
   constructor(world,plan,o){
-    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
+    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
     this.world=world;this.plan=plan;this.proj=plan.proj;this.t=0;this.steps=0;this.t0=world.t;
     const h=o.h,[bx0,bx1,by0,by1]=plan.bbox,mg=o.marginKm;
     this.x0=Math.floor((bx0-mg)/h)*h;this.y0=Math.floor((by0-mg)/h)*h;this.nx=Math.ceil((bx1+mg-this.x0)/h);this.ny=Math.ceil((by1+mg-this.y0)/h);
@@ -201,8 +206,9 @@ class Sheet{
     this.budget={initial:0,arcsHotspots:0,eroded:0,left:0};this.history=[];
     this.seed();this.budget.initial=this.volume();this.deposit();this.solve();this.elevation();this.stats(0);
   }
-  // markers: m x m per parcel of the object present at t0, at sub-positions of its body cell
-  seed(){const w=this.world,N=w.N,n=w.n,nn=n*n,m=this.o.markers,q=Math.PI/4,t=[0,0,0],b=[0,0,0],xy=[0,0],obj=this.plan.obj,cube=w.cube,pool=w.pool,U=SIM.U;
+  // markers: m x m per parcel of the object present at t0, one at a random point (a fixed hash) in each of m x m
+  // sub-cells of its body cell (stratified, so marker rows don't alias with the grid or bunch into lines under shortening)
+  seed(){const w=this.world,N=w.N,n=w.n,nn=n*n,m=this.o.markers,mj=this.o.markerJitter,q=Math.PI/4,t=[0,0,0],b=[0,0,0],xy=[0,0],obj=this.plan.obj,cube=w.cube,pool=w.pool,U=SIM.U;
     this.Qref=this.refQ();const Qr=this.Qref;
     // L0 elevation smoothed (three passes) on the fixed grid, sampled bilinearly at each marker: the inherited surface
     let Es=Float64Array.from(w.elev),tmp=new Float64Array(N);const nb=cube.nb;
@@ -222,7 +228,7 @@ class Sheet{
         for(let u=0;u<cnt;u++)col.push([pool.R[c*U+u],pool.B[c*U+u],tot>0?pool.T[c*U+u]/tot:1]);
         let craton=0;for(const [r,born,fr] of col)if(r===SIM.ROCK.CRATON&&w.t-born>500)craton+=fr;
         for(let a=0;a<m;a++)for(let bb=0;bb<m;bb++){
-          faceDir(f,Math.tan(((i+(a+.5)/m)/n*2-1)*q),Math.tan(((j+(bb+.5)/m)/n*2-1)*q),b);
+          const [ju,jv]=mj>0?jit2(k,a*m+bb,P.id):[0,0];faceDir(f,Math.tan(((i+(a+.5+mj*ju)/m)/n*2-1)*q),Math.tan(((j+(bb+.5+mj*jv)/m)/n*2-1)*q),b);
           mv(P.Q,b[0],b[1],b[2],t);cube.lookupFrac(t[0],t[1],t[2],out);
           const cc=out[0],tx=out[1],ty=out[2],cB=nb[4*cc+(tx>=0?0:1)],cC=nb[4*cc+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty);
           const e0=(1-ax)*(1-ay)*Es[cc]+ax*(1-ay)*Es[cB]+(1-ax)*ay*Es[cC]+ax*ay*Es[cD],s0=Math.max(10,C.CONT_BASE+e0/C.ISO);
@@ -384,14 +390,14 @@ class Sheet{
 // resolve, fixed to the planet) and eroded for a few Myr by stream power on a finer grid, only to settle the
 // drainage network; each outlet's drainage basin is a natural tile for L2.
 function basins(sheet,o){
-  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15},o);
+  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4},o);
   const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),land=new Uint8Array(nc);
   const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins")|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4;
   for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h,gx=(x-sheet.x0)/H-0.5,gy=(y-sheet.y0)/H-0.5;
     let i0=Math.floor(gx),j0=Math.floor(gy);const fx=gx-i0,fy=gy-j0;let s=0,w=0;
     for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=snx||jj>=sny)continue;const v=se[jj*snx+ii];if(isNaN(v))continue;s+=ww*v;w+=ww;}
     const c=j*nx+i;if(w<0.5){e[c]=-1;continue;}let v=s/w;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
-  const G=planarGrid(nx,ny,h),S=scratch(nc),alive=new Uint8Array(nc).fill(1),out=new Uint8Array(nc);
+  const G=planarGrid(nx,ny,h,o.jitter,Math.round(sheet.x0/h),Math.round(sheet.y0/h),hashStr(String(sheet.world.opts.seed)+"|L1nodes")|0),S=scratch(nc),alive=new Uint8Array(nc).fill(1),out=new Uint8Array(nc);
   for(let c=0;c<nc;c++)out[c]=land[c]?0:1;
   const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,null);const hN=streamPower(e,S,o.K,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
   route(G,e,alive,out,S,null);
