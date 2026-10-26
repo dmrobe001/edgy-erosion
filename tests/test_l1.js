@@ -38,6 +38,25 @@ for (const [label, ny, f, row] of [["narrow strip, free sides", 4, Math.sqrt(3 /
   check(e / U0 < 0.005, "sheet: " + label);
 }
 
+// 2b. finite strain against exact solutions for uniform velocity gradients: pure shear gives F = diag(e^-et, e^et),
+//     simple shear F = [[1, gt], [0, 1]], rigid rotation F = rotation by wt (the three branches of the 2x2 exponential)
+for (const [label, uf, vf, exact] of [
+  ["pure shear", (x, y) => -0.05 * x, (x, y) => 0.05 * y, t => [Math.exp(-0.05 * t), 0, 0, Math.exp(0.05 * t)]],
+  ["simple shear", (x, y) => 0.05 * y, () => 0, t => [1, 0.05 * t, 0, 1]],
+  ["rigid rotation", (x, y) => -0.05 * y, (x, y) => 0.05 * x, t => [Math.cos(0.05 * t), -Math.sin(0.05 * t), Math.sin(0.05 * t), Math.cos(0.05 * t)]]]) {
+  const s = Object.create(L1.Sheet.prototype), nx = 40, ny = 40, h = 25; s.o = { h }; s.nx = nx; s.ny = ny; s.x0 = -500; s.y0 = -500; s.act = new Uint8Array(nx * ny).fill(1);
+  s.u = new Float64Array((nx + 1) * ny); s.v = new Float64Array(nx * (ny + 1)); s.budget = { left: 0 };
+  for (let j = 0; j < ny; j++) for (let i = 0; i <= nx; i++) s.u[j * (nx + 1) + i] = uf(s.x0 + i * h, s.y0 + (j + .5) * h);
+  for (let j = 0; j <= ny; j++) for (let i = 0; i < nx; i++) s.v[j * nx + i] = vf(s.x0 + (i + .5) * h, s.y0 + j * h);
+  s.nm = 3; s.mx = Float64Array.from([0, 60, -40]); s.my = Float64Array.from([0, -30, 50]); s.mS = new Float64Array(3).fill(35); s.mA = new Float64Array(3).fill(1);
+  s.mIn = new Uint8Array(3).fill(1); s.mF = Float64Array.from([1, 0, 0, 1, 1, 0, 0, 1, 1, 0, 0, 1]);
+  for (let q = 0; q < 10; q++) s.advect(1);
+  const ex = exact(10); let e = 0, ea = 0; for (let k = 0; k < 3; k++) { for (let q = 0; q < 4; q++) e = Math.max(e, Math.abs(s.mF[4 * k + q] - ex[q]));
+    const det = s.mF[4 * k] * s.mF[4 * k + 3] - s.mF[4 * k + 1] * s.mF[4 * k + 2]; ea = Math.max(ea, Math.abs(det - s.mA[k])); }
+  console.log(`finite strain, ${label}: max |F - exact| ${e.toExponential(1)}, max |det F - area ratio| ${ea.toExponential(1)}`);
+  check(e < 1e-12 && ea < 1e-12, "finite strain: " + label);
+}
+
 // 3. a real landmass: snapshots every 10 Myr, pick at the present, replay, sheet, drainage pass
 const n = +arg("n", 64), W = +arg("win", 10), T0 = +arg("t0", 400), H = +arg("h", 70), target = +arg("land", 200);
 const w = new SIM.World({ n, seed: "genesis", nPlates: 10, mode: "scatter", contTarget: 0.5 }), snaps = [];
@@ -61,6 +80,10 @@ check(A.back, "the replay brings L0 back to the present exactly");
 check(A.after, "the sheet's pass leaves L0 exactly as it was");
 check(Math.abs(bal.error) < 1e-9, "crust budget closes");
 check(A.maxS < 100 && hl.maxElevKm < 11, "thickness and peaks bounded");
+{ let e = 0; for (let k = 0; k < sh.nm; k++) { if (!sh.mIn[k]) continue; const F = sh.mF, det = F[4 * k] * F[4 * k + 3] - F[4 * k + 1] * F[4 * k + 2]; e = Math.max(e, Math.abs(det / (sh.mA[k] / sh.mA0[k]) - 1)); }
+  const sf = sh.strainField(); let smax = 0, rmax = 0; for (let c = 0; c < sh.nx * sh.ny; c++) if (!isNaN(sf.lmin[c])) { smax = Math.max(smax, 1 - sf.lmin[c]); rmax = Math.max(rmax, Math.abs(sf.rot[c])); }
+  console.log(`finite strain: most horizontal shortening ${(100 * smax).toFixed(0)}%, largest rotation ${(rmax * 180 / Math.PI).toFixed(0)} deg; det F against area ratio within ${e.toExponential(1)}`);
+  check(e < 1e-9, "det F matches each marker's area change"); }
 const B = run(); let same = B.sh.nm === sh.nm; for (let c = 0; same && c < sh.nx * sh.ny; c++) if (!(B.sh.e[c] === sh.e[c] || isNaN(B.sh.e[c]) && isNaN(sh.e[c]))) same = false;
 check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "different"} on a second run`);
 // the drainage pass

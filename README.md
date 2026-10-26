@@ -327,6 +327,7 @@ The crust is treated as a thin viscous sheet, the vertically averaged model of c
   - Markers move with the sheet (midpoint rule, substeps limited to half a cell per substep).
   - They thicken by the local convergence: S → S·e^(−div·dt), A → A·e^(div·dt). Each marker's volume S·A is therefore exactly conserved.
   - Grid fields are bilinear weighted averages of marker values.
+- **Finite strain.** Each marker carries a 2×2 deformation gradient F, updated every substep as F ← exp(L·dt)·F. L is the sheet's velocity gradient at the marker's midpoint: du/dx and dv/dy at cell centres, du/dy and dv/dx at cell corners. Its trace is the same divergence that thickens the marker, so det F equals the marker's area change exactly. The map's finite-strain view shows, per cell, the principal stretches of the marker-averaged B = F·Fᵀ: total horizontal shortening, its direction (ticks) and vertical-axis rotation. This is what L2 needs to build thrust sheets and folds. Under shortening with free sides, crust also stretches at right angles (squeezed out sideways), so the view colours shortening first and shows extension only where there is next to no shortening.
 - **Volcanism.** L0 records the crust its arcs and hotspots add. Its collisions and collapse are not passed on, because the sheet makes those itself. Each marker thickens by what its L0 cell gained, as a new top unit of arc rock.
 - **Elevation.** As in the first version: the inherited elevation plus the thickness change, minus a flexural root, e = e₀ + ΔS − 0.84·F[ΔS]. F is a Gaussian of width 1.18 × the 40 km flexural length, and the plate yields beyond 3 km from local balance. The inherited state counts as equilibrium.
 - **Erosion during the sheet** is a smooth stand-in for rivers, which a 50 km grid cannot draw. Denudation is 0.5 km/Myr × (e / 5 km)^1.4: 0.5 km/Myr in ranges at 5 km and about 20 m/Myr on lowlands at 0.5 km. These are the magnitudes of Ahnert's (1970) relation between denudation and relief. Eroded rock is stripped from the top of the rock columns and leaves the system. A first version ran stream power on the sheet grid; its 50 km gullies were aligned with the grid, and the drainage pass inherited them as parallel stripe-shaped basins.
@@ -341,6 +342,7 @@ With tectonics frozen at the end, the sheet's surface is refined to 10 km cells:
 Measured on seed "genesis" in Node.js, unless stated:
 
 - **Sheet solver against exact solutions.** A Newtonian sheet with no buoyancy has its left half dragged at +U and its right half at −U. The exact profile is U(1 − e^(−|x|/λ)). The solver matches it to 0.06% in a narrow strip with free sides (λ = √(3/4)·ℓ) and 0.03% in the middle of a wide sheet (λ = ℓ).
+- **Finite strain** is exact to rounding (about 10⁻¹⁵) for uniform pure shear, simple shear and rigid rotation, the three branches of the 2×2 matrix exponential. On a real landmass det F matches each marker's area change to 3 × 10⁻¹⁵. A 110 M km² supercontinent's collision belt reached 84% horizontal shortening in 20 Myr.
 - **Stream-power solver.** It reaches the analytic steady state S·A^m = U/K at every cell to 5 × 10⁻¹⁵.
 - **Hack's law** in the drainage pass comes out at 0.53–0.55 on the landmass below and 0.54 in the test setting, with no tuning (Earth's rivers: roughly 0.5–0.6).
 - **Lattice alignment in the drainage pass** (landmass below, channels draining 5,000 km² or more): node jitter cuts the share of channel steps in straight runs of four or more identical steps from 52% to 33%. The share of 6-step reaches within 5° of a grid direction falls from 25% to 18% (uniform would be 22%).
@@ -369,7 +371,7 @@ These are design sketches, not implementations (L1 above is partly built; its sk
 Built so far: section 5. The current plan, organised around the L1→L2 handoff (each item either feeds it, decides whether something belongs in it, or is parked):
 
 **A. L1 work, in order**
-1. **Finite strain per marker.** A 2×2 deformation gradient on each marker, updated with the sheet's velocity gradient: total horizontal shortening, its direction and vertical-axis rotation. This is what L2 needs to build thrust sheets and folds in crumple zones.
+1. ~~**Finite strain per marker.**~~ Done (section 5.2): total horizontal shortening, its direction and vertical-axis rotation, with a map view.
 2. **Closed basins.** A water balance on the depressions the drainage pass finds, with a crude aridity field (latitude belts plus a rain shadow from the sheet's topography and a prevailing wind): a hollow overflows only if inflow beats evaporation over its lake. This decides basins that drain inland versus to the sea.
 3. **Erodibility test (a decision gate).** Compare basin maps (adjusted Rand index) with uniform K against K driven by variables that actually predict rock strength:
    - rock type;

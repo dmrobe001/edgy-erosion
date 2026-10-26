@@ -161,6 +161,10 @@ class Replay{
     // L0 is now back at the present (the replay reached it); the sheet's pass restores and replays again
     return{entry:this.entry,endSteps:this.endSteps,t0Steps,window:this.endT-this.frames[0].t,obj,nObj,chain,proj,bbox:[x0,x1,y0,y1],pick:this.pick,idSpace:this.idSpace};}
 }
+// exp of the 2x2 matrix [[a,b],[c,d]] into E (row-major): e^t (cosh s I + sinh(s)/s N), N = M - t I, s^2 = -det N
+function expm2(a,b,c,d,E){const t=(a+d)/2,p=(a-d)/2,s2=p*p+b*c,et=Math.exp(t);let ch,sh;
+  if(s2>1e-14){const s=Math.sqrt(s2);ch=Math.cosh(s);sh=Math.sinh(s)/s;}else if(s2<-1e-14){const s=Math.sqrt(-s2);ch=Math.cos(s);sh=Math.sin(s)/s;}else{ch=1+s2/2;sh=1+s2/6;}
+  E[0]=et*(ch+sh*p);E[1]=et*sh*b;E[2]=et*sh*c;E[3]=et*(ch-sh*p);return E;}
 // azimuthal equidistant projection about `center` (unit vector) with axes ea (east), nr (north); x, y in km
 class Projection{
   constructor(c,ea,nr){this.c=c;this.ea=ea;this.nr=nr;}
@@ -236,6 +240,8 @@ class Sheet{
           X.push(xy[0]);Y.push(xy[1]);V.push(area);S0.push(s0);E0.push(e0);PID.push(id);PL.push(P.id);COL.push(col);STR.push(1+(this.o.cratonStrength-1)*craton);}}}
     const M=this.nm=X.length;this.mx=Float64Array.from(X);this.my=Float64Array.from(Y);this.mA=Float64Array.from(V);this.mS=Float64Array.from(S0);this.mS0=Float64Array.from(S0);this.mE0=Float64Array.from(E0);
     this.mPid=Int32Array.from(PID);this.mPlate=Int32Array.from(PL);this.mCol=COL;this.mStr=Float64Array.from(STR);this.mIn=new Uint8Array(M).fill(1);this.mUx=new Float64Array(M);this.mUy=new Float64Array(M);
+    // finite strain: each marker's 2x2 deformation gradient F (row-major, map plane), identity at t0; det F = area / area at t0
+    this.mF=new Float64Array(4*M);for(let k=0;k<M;k++){this.mF[4*k]=1;this.mF[4*k+3]=1;}this.mA0=Float64Array.from(V);
   }
   // the reference plate's orientation now (the reference plate, or its ancestor before it split off)
   refQ(){const w=this.world;for(const p of this.plan.chain){const P=w.plates[p];if(P&&P.alive)return Array.from(P.Q);}return Array.from(w.plates[this.plan.chain[0]].Q);}
@@ -318,11 +324,37 @@ class Sheet{
     out[1]=(1-fx)*(1-fy)*v[j*nx+i]+fx*(1-fy)*v[j*nx+i+1]+(1-fx)*fy*v[(j+1)*nx+i]+fx*fy*v[(j+1)*nx+i+1];return out;}
   // move markers with the sheet (midpoint rule) and strain them: the horizontal divergence there thins (or, negative,
   // thickens) the crust and grows (shrinks) the marker's area; markers leaving the grid leave the budget
-  advect(dt){const vel=[0,0],v2=[0,0],{nx,ny,o,u,v}=this,h=o.h,X1=this.x0+nx*h,Y1=this.y0+ny*h,div=this._div||(this._div=new Float64Array(nx*ny));
-    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i;div[c]=this.act[c]?(u[j*(nx+1)+i+1]-u[j*(nx+1)+i]+v[(j+1)*nx+i]-v[j*nx+i])/h:0;}
-    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const x=this.mx[k],y=this.my[k];this.velAt(x,y,vel);this.velAt(x+0.5*dt*vel[0],y+0.5*dt*vel[1],v2);
+  // The velocity gradient: du/dx and dv/dy at cell centres (their sum is the divergence), du/dy and dv/dx at cell
+  // corners where all four cells around are crust (zero elsewhere, as at the traction-free edges).
+  velGrad(){const {nx,ny,o,u,v,act}=this,h=o.h,nc=nx*ny,nn=(nx+1)*(ny+1);
+    const G=this._vg||(this._vg={ux:new Float64Array(nc),vy:new Float64Array(nc),uy:new Float64Array(nn),vx:new Float64Array(nn)});G.uy.fill(0);G.vx.fill(0);
+    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i;G.ux[c]=act[c]?(u[j*(nx+1)+i+1]-u[j*(nx+1)+i])/h:0;G.vy[c]=act[c]?(v[(j+1)*nx+i]-v[j*nx+i])/h:0;}
+    for(let j=1;j<ny;j++)for(let i=1;i<nx;i++){const a=(j-1)*nx+i-1;if(!(act[a]&&act[a+1]&&act[a+nx]&&act[a+nx+1]))continue;const q=j*(nx+1)+i;
+      G.uy[q]=(u[j*(nx+1)+i]-u[(j-1)*(nx+1)+i])/h;G.vx[q]=(v[j*nx+i]-v[j*nx+i-1])/h;}
+    return G;}
+  // move markers with the sheet (midpoint rule) and strain them by the velocity gradient there: F <- exp(L dt) F.
+  // The divergence (trace of L) thins (or, negative, thickens) the crust and grows (shrinks) the marker's area, so
+  // det F stays equal to the area ratio; markers leaving the grid leave the budget
+  advect(dt){const vel=[0,0],v2=[0,0],{nx,ny,o}=this,h=o.h,X1=this.x0+nx*h,Y1=this.y0+ny*h,G=this.velGrad(),E=[0,0,0,0],F=this.mF;
+    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const x=this.mx[k],y=this.my[k];this.velAt(x,y,vel);const xm=x+0.5*dt*vel[0],ym=y+0.5*dt*vel[1];this.velAt(xm,ym,v2);
       const nxk=x+dt*v2[0],nyk=y+dt*v2[1];if(nxk<this.x0||nyk<this.y0||nxk>=X1||nyk>=Y1){this.mIn[k]=0;this.budget.left+=this.mS[k]*this.mA[k];continue;}
-      const d=this.sample(div,x+0.5*dt*vel[0],y+0.5*dt*vel[1]),g=Math.exp(d*dt);this.mS[k]/=g;this.mA[k]*=g;this.mx[k]=nxk;this.my[k]=nyk;}}
+      const a=this.sample(G.ux,xm,ym),d=this.sample(G.vy,xm,ym),b=this.sampleN(G.uy,xm,ym),c=this.sampleN(G.vx,xm,ym);expm2(a*dt,b*dt,c*dt,d*dt,E);
+      const f0=F[4*k],f1=F[4*k+1],f2=F[4*k+2],f3=F[4*k+3];F[4*k]=E[0]*f0+E[1]*f2;F[4*k+1]=E[0]*f1+E[1]*f3;F[4*k+2]=E[2]*f0+E[3]*f2;F[4*k+3]=E[2]*f1+E[3]*f3;
+      const g=Math.exp((a+d)*dt);this.mS[k]/=g;this.mA[k]*=g;this.mx[k]=nxk;this.my[k]=nyk;}}
+  // bilinear sample of a corner (node) field
+  sampleN(f,x,y){const {nx,ny,o}=this,gx=(x-this.x0)/o.h,gy=(y-this.y0)/o.h,i=Math.max(0,Math.min(nx-1,Math.floor(gx))),j=Math.max(0,Math.min(ny-1,Math.floor(gy))),fx=Math.min(1,Math.max(0,gx-i)),fy=Math.min(1,Math.max(0,gy-j)),W=nx+1;
+    return(1-fx)*(1-fy)*f[j*W+i]+fx*(1-fy)*f[j*W+i+1]+(1-fx)*fy*f[(j+1)*W+i]+fx*fy*f[(j+1)*W+i+1];}
+  // Finite strain on the grid: per cell, the marker-weighted mean of the left Cauchy-Green tensor B = F F^T and of
+  // the rotation, then B's principal stretches. lmin < 1 is horizontal shortening along the angle dir (radians from
+  // map east); rot is the rotation about the vertical (counter-clockwise positive). Cached until the sheet moves.
+  strainField(){const key=this.steps+":"+this.t;if(this._sf&&this._sf.key===key)return this._sf;const {nx,ny,o}=this,h=o.h,nc=nx*ny,F=this.mF;
+    const bxx=new Float64Array(nc),bxy=new Float64Array(nc),byy=new Float64Array(nc),rot=new Float64Array(nc),ws=new Float64Array(nc);
+    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const i=Math.floor((this.mx[k]-this.x0)/h),j=Math.floor((this.my[k]-this.y0)/h),c=j*nx+i,w=this.mA0[k];
+      const f0=F[4*k],f1=F[4*k+1],f2=F[4*k+2],f3=F[4*k+3];bxx[c]+=w*(f0*f0+f1*f1);bxy[c]+=w*(f0*f2+f1*f3);byy[c]+=w*(f2*f2+f3*f3);rot[c]+=w*Math.atan2(f2-f1,f0+f3);ws[c]+=w;}
+    const lmin=new Float64Array(nc).fill(NaN),lmax=new Float64Array(nc).fill(NaN),dir=new Float64Array(nc);
+    for(let c=0;c<nc;c++){if(!(ws[c]>0)||!this.act[c])continue;const xx=bxx[c]/ws[c],xy=bxy[c]/ws[c],yy=byy[c]/ws[c],m=(xx+yy)/2,r=Math.hypot((xx-yy)/2,xy);
+      lmax[c]=Math.sqrt(m+r);lmin[c]=Math.sqrt(Math.max(0,m-r));dir[c]=0.5*Math.atan2(-2*xy,-(xx-yy));rot[c]/=ws[c];}
+    return this._sf={key,lmin,lmax,dir,rot};}
   // bilinear sample of a cell-centred field (inactive cells count as zero)
   sample(f,x,y){const {nx,ny,o}=this,gx=(x-this.x0)/o.h-0.5,gy=(y-this.y0)/o.h-0.5,i=Math.max(0,Math.min(nx-2,Math.floor(gx))),j=Math.max(0,Math.min(ny-2,Math.floor(gy))),fx=Math.min(1,Math.max(0,gx-i)),fy=Math.min(1,Math.max(0,gy-j));
     return(1-fx)*(1-fy)*f[j*nx+i]+fx*(1-fy)*f[j*nx+i+1]+(1-fx)*fy*f[(j+1)*nx+i]+fx*fy*f[(j+1)*nx+i+1];}
@@ -407,6 +439,6 @@ function basins(sheet,o){
   const sizes=[...size.values()].sort((a,b)=>b-a);
   return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A:Float64Array.from(S.A),rec:Int32Array.from(S.rec),basin,nBasins:size.size,sizes,landCells:land.reduce((a,v)=>a+v,0),S};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap};
+return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
 })();
 // ===== L1-END =====

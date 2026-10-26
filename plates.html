@@ -189,6 +189,7 @@ button:disabled{opacity:.5;cursor:default}
       <div class="seg" role="group" aria-label="L1 view" id="l1views">
         <button data-v="terrain" aria-pressed="true">Terrain</button>
         <button data-v="thick" aria-pressed="false">Thickening</button>
+        <button data-v="finite" aria-pressed="false">Finite strain</button>
         <button data-v="strain" aria-pressed="false">Strain rate</button>
         <button data-v="rock" aria-pressed="false">Surface rock</button>
         <button data-v="basins" aria-pressed="false" disabled>Drainage basins</button>
@@ -1027,6 +1028,10 @@ class Replay{
     // L0 is now back at the present (the replay reached it); the sheet's pass restores and replays again
     return{entry:this.entry,endSteps:this.endSteps,t0Steps,window:this.endT-this.frames[0].t,obj,nObj,chain,proj,bbox:[x0,x1,y0,y1],pick:this.pick,idSpace:this.idSpace};}
 }
+// exp of the 2x2 matrix [[a,b],[c,d]] into E (row-major): e^t (cosh s I + sinh(s)/s N), N = M - t I, s^2 = -det N
+function expm2(a,b,c,d,E){const t=(a+d)/2,p=(a-d)/2,s2=p*p+b*c,et=Math.exp(t);let ch,sh;
+  if(s2>1e-14){const s=Math.sqrt(s2);ch=Math.cosh(s);sh=Math.sinh(s)/s;}else if(s2<-1e-14){const s=Math.sqrt(-s2);ch=Math.cos(s);sh=Math.sin(s)/s;}else{ch=1+s2/2;sh=1+s2/6;}
+  E[0]=et*(ch+sh*p);E[1]=et*sh*b;E[2]=et*sh*c;E[3]=et*(ch-sh*p);return E;}
 // azimuthal equidistant projection about `center` (unit vector) with axes ea (east), nr (north); x, y in km
 class Projection{
   constructor(c,ea,nr){this.c=c;this.ea=ea;this.nr=nr;}
@@ -1102,6 +1107,8 @@ class Sheet{
           X.push(xy[0]);Y.push(xy[1]);V.push(area);S0.push(s0);E0.push(e0);PID.push(id);PL.push(P.id);COL.push(col);STR.push(1+(this.o.cratonStrength-1)*craton);}}}
     const M=this.nm=X.length;this.mx=Float64Array.from(X);this.my=Float64Array.from(Y);this.mA=Float64Array.from(V);this.mS=Float64Array.from(S0);this.mS0=Float64Array.from(S0);this.mE0=Float64Array.from(E0);
     this.mPid=Int32Array.from(PID);this.mPlate=Int32Array.from(PL);this.mCol=COL;this.mStr=Float64Array.from(STR);this.mIn=new Uint8Array(M).fill(1);this.mUx=new Float64Array(M);this.mUy=new Float64Array(M);
+    // finite strain: each marker's 2x2 deformation gradient F (row-major, map plane), identity at t0; det F = area / area at t0
+    this.mF=new Float64Array(4*M);for(let k=0;k<M;k++){this.mF[4*k]=1;this.mF[4*k+3]=1;}this.mA0=Float64Array.from(V);
   }
   // the reference plate's orientation now (the reference plate, or its ancestor before it split off)
   refQ(){const w=this.world;for(const p of this.plan.chain){const P=w.plates[p];if(P&&P.alive)return Array.from(P.Q);}return Array.from(w.plates[this.plan.chain[0]].Q);}
@@ -1184,11 +1191,37 @@ class Sheet{
     out[1]=(1-fx)*(1-fy)*v[j*nx+i]+fx*(1-fy)*v[j*nx+i+1]+(1-fx)*fy*v[(j+1)*nx+i]+fx*fy*v[(j+1)*nx+i+1];return out;}
   // move markers with the sheet (midpoint rule) and strain them: the horizontal divergence there thins (or, negative,
   // thickens) the crust and grows (shrinks) the marker's area; markers leaving the grid leave the budget
-  advect(dt){const vel=[0,0],v2=[0,0],{nx,ny,o,u,v}=this,h=o.h,X1=this.x0+nx*h,Y1=this.y0+ny*h,div=this._div||(this._div=new Float64Array(nx*ny));
-    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i;div[c]=this.act[c]?(u[j*(nx+1)+i+1]-u[j*(nx+1)+i]+v[(j+1)*nx+i]-v[j*nx+i])/h:0;}
-    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const x=this.mx[k],y=this.my[k];this.velAt(x,y,vel);this.velAt(x+0.5*dt*vel[0],y+0.5*dt*vel[1],v2);
+  // The velocity gradient: du/dx and dv/dy at cell centres (their sum is the divergence), du/dy and dv/dx at cell
+  // corners where all four cells around are crust (zero elsewhere, as at the traction-free edges).
+  velGrad(){const {nx,ny,o,u,v,act}=this,h=o.h,nc=nx*ny,nn=(nx+1)*(ny+1);
+    const G=this._vg||(this._vg={ux:new Float64Array(nc),vy:new Float64Array(nc),uy:new Float64Array(nn),vx:new Float64Array(nn)});G.uy.fill(0);G.vx.fill(0);
+    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const c=j*nx+i;G.ux[c]=act[c]?(u[j*(nx+1)+i+1]-u[j*(nx+1)+i])/h:0;G.vy[c]=act[c]?(v[(j+1)*nx+i]-v[j*nx+i])/h:0;}
+    for(let j=1;j<ny;j++)for(let i=1;i<nx;i++){const a=(j-1)*nx+i-1;if(!(act[a]&&act[a+1]&&act[a+nx]&&act[a+nx+1]))continue;const q=j*(nx+1)+i;
+      G.uy[q]=(u[j*(nx+1)+i]-u[(j-1)*(nx+1)+i])/h;G.vx[q]=(v[j*nx+i]-v[j*nx+i-1])/h;}
+    return G;}
+  // move markers with the sheet (midpoint rule) and strain them by the velocity gradient there: F <- exp(L dt) F.
+  // The divergence (trace of L) thins (or, negative, thickens) the crust and grows (shrinks) the marker's area, so
+  // det F stays equal to the area ratio; markers leaving the grid leave the budget
+  advect(dt){const vel=[0,0],v2=[0,0],{nx,ny,o}=this,h=o.h,X1=this.x0+nx*h,Y1=this.y0+ny*h,G=this.velGrad(),E=[0,0,0,0],F=this.mF;
+    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const x=this.mx[k],y=this.my[k];this.velAt(x,y,vel);const xm=x+0.5*dt*vel[0],ym=y+0.5*dt*vel[1];this.velAt(xm,ym,v2);
       const nxk=x+dt*v2[0],nyk=y+dt*v2[1];if(nxk<this.x0||nyk<this.y0||nxk>=X1||nyk>=Y1){this.mIn[k]=0;this.budget.left+=this.mS[k]*this.mA[k];continue;}
-      const d=this.sample(div,x+0.5*dt*vel[0],y+0.5*dt*vel[1]),g=Math.exp(d*dt);this.mS[k]/=g;this.mA[k]*=g;this.mx[k]=nxk;this.my[k]=nyk;}}
+      const a=this.sample(G.ux,xm,ym),d=this.sample(G.vy,xm,ym),b=this.sampleN(G.uy,xm,ym),c=this.sampleN(G.vx,xm,ym);expm2(a*dt,b*dt,c*dt,d*dt,E);
+      const f0=F[4*k],f1=F[4*k+1],f2=F[4*k+2],f3=F[4*k+3];F[4*k]=E[0]*f0+E[1]*f2;F[4*k+1]=E[0]*f1+E[1]*f3;F[4*k+2]=E[2]*f0+E[3]*f2;F[4*k+3]=E[2]*f1+E[3]*f3;
+      const g=Math.exp((a+d)*dt);this.mS[k]/=g;this.mA[k]*=g;this.mx[k]=nxk;this.my[k]=nyk;}}
+  // bilinear sample of a corner (node) field
+  sampleN(f,x,y){const {nx,ny,o}=this,gx=(x-this.x0)/o.h,gy=(y-this.y0)/o.h,i=Math.max(0,Math.min(nx-1,Math.floor(gx))),j=Math.max(0,Math.min(ny-1,Math.floor(gy))),fx=Math.min(1,Math.max(0,gx-i)),fy=Math.min(1,Math.max(0,gy-j)),W=nx+1;
+    return(1-fx)*(1-fy)*f[j*W+i]+fx*(1-fy)*f[j*W+i+1]+(1-fx)*fy*f[(j+1)*W+i]+fx*fy*f[(j+1)*W+i+1];}
+  // Finite strain on the grid: per cell, the marker-weighted mean of the left Cauchy-Green tensor B = F F^T and of
+  // the rotation, then B's principal stretches. lmin < 1 is horizontal shortening along the angle dir (radians from
+  // map east); rot is the rotation about the vertical (counter-clockwise positive). Cached until the sheet moves.
+  strainField(){const key=this.steps+":"+this.t;if(this._sf&&this._sf.key===key)return this._sf;const {nx,ny,o}=this,h=o.h,nc=nx*ny,F=this.mF;
+    const bxx=new Float64Array(nc),bxy=new Float64Array(nc),byy=new Float64Array(nc),rot=new Float64Array(nc),ws=new Float64Array(nc);
+    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const i=Math.floor((this.mx[k]-this.x0)/h),j=Math.floor((this.my[k]-this.y0)/h),c=j*nx+i,w=this.mA0[k];
+      const f0=F[4*k],f1=F[4*k+1],f2=F[4*k+2],f3=F[4*k+3];bxx[c]+=w*(f0*f0+f1*f1);bxy[c]+=w*(f0*f2+f1*f3);byy[c]+=w*(f2*f2+f3*f3);rot[c]+=w*Math.atan2(f2-f1,f0+f3);ws[c]+=w;}
+    const lmin=new Float64Array(nc).fill(NaN),lmax=new Float64Array(nc).fill(NaN),dir=new Float64Array(nc);
+    for(let c=0;c<nc;c++){if(!(ws[c]>0)||!this.act[c])continue;const xx=bxx[c]/ws[c],xy=bxy[c]/ws[c],yy=byy[c]/ws[c],m=(xx+yy)/2,r=Math.hypot((xx-yy)/2,xy);
+      lmax[c]=Math.sqrt(m+r);lmin[c]=Math.sqrt(Math.max(0,m-r));dir[c]=0.5*Math.atan2(-2*xy,-(xx-yy));rot[c]/=ws[c];}
+    return this._sf={key,lmin,lmax,dir,rot};}
   // bilinear sample of a cell-centred field (inactive cells count as zero)
   sample(f,x,y){const {nx,ny,o}=this,gx=(x-this.x0)/o.h-0.5,gy=(y-this.y0)/o.h-0.5,i=Math.max(0,Math.min(nx-2,Math.floor(gx))),j=Math.max(0,Math.min(ny-2,Math.floor(gy))),fx=Math.min(1,Math.max(0,gx-i)),fy=Math.min(1,Math.max(0,gy-j));
     return(1-fx)*(1-fy)*f[j*nx+i]+fx*(1-fy)*f[j*nx+i+1]+(1-fx)*fy*f[(j+1)*nx+i]+fx*fy*f[(j+1)*nx+i+1];}
@@ -1273,7 +1306,7 @@ function basins(sheet,o){
   const sizes=[...size.values()].sort((a,b)=>b-a);
   return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A:Float64Array.from(S.A),rec:Int32Array.from(S.rec),basin,nBasins:size.size,sizes,landCells:land.reduce((a,v)=>a+v,0),S};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap};
+return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
 })();
 // ===== L1-END =====
 // ---------- rendering ----------
@@ -1584,7 +1617,8 @@ function snapTick(){if(!world)return;const last=snaps[snaps.length-1];
 const l1Busy=()=>!!(l1St&&/^(replay|forward|run|basins)$/.test(l1St.phase));
 const THICK_DIV=[[-15,"#2c5aa0"],[-5,"#9db8de"],[0,"#f2f0ea"],[5,"#e6a07a"],[15,"#b8322a"],[30,"#5e0f12"]];
 const STRAIN_STOPS=[[-3,"#f3f1ea"],[-2,"#d9e2c0"],[-1.25,"#9cc38c"],[-0.5,"#3f9b8a"],[0,"#265c8f"],[0.5,"#2b1f5c"]];
-const LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
+const FIN_STOPS=[[-0.5,"#2c5aa0"],[-0.2,"#9db8de"],[0,"#f2f0ea"],[0.15,"#e9b08a"],[0.35,"#c4452f"],[0.6,"#5e0f12"]];
+const LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
 function l1Reset(){l1Picking=false;l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
   $("l1Info").innerHTML=`<div class="muted">No landmass picked yet.</div>`;}
@@ -1654,7 +1688,7 @@ function l1Fields(){const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,n=W*H,h=sh.o.h,{n
     else{P.e[q]=NaN;P.back[q]=sh.l0ElevAt(x,y,tmp);}}}
 function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
   const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,E=P.e,ex=10/l1Geo.s,rivers=$("l1Rivers").checked;
-  const rock=l1View==="rock"?sh.surfaceRock():null,fAmin=2e4;
+  const rock=l1View==="rock"?sh.surfaceRock():null,sf=l1View==="finite"?sh.strainField():null,fAmin=2e4;
   const bcol=new Map(),bsize=bs?l1BasinSizes():null;
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,c=P.cell[q],f=P.fine[q];let r,g,b;
     if(isNaN(E[q])){// outside L1's crust: L0's own surface, land greyed
@@ -1667,6 +1701,10 @@ function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
     const gx=(eR-eL)*ex/2,gy=(eU-eD)*ex/2,nl=1/Math.sqrt(1+gx*gx+gy*gy);let sh_=land?Math.max(0.35,Math.min(1.25,(0.55*-gx+0.55*gy+0.63)*nl/0.63)):1;
     if(l1View==="terrain"||!land&&l1View!=="thick"&&l1View!=="strain"){let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3]*sh_;g=LUT_E[k*3+1]*sh_;b=LUT_E[k*3+2]*sh_;}
     else if(l1View==="thick"){const v=c>=0?sh.dS[c]:0;let k=Math.round((v+15)/45*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_DS[k*3]*s2;g=LUT_DS[k*3+1]*s2;b=LUT_DS[k*3+2]*s2;}
+    // finite strain: shortening (1 - least stretch) in reds; extension in blues only where there is next to no
+    // shortening (crust squeezed out sideways stretches as much as it shortens, and counts as shortened)
+    else if(l1View==="finite"){let v=0;if(c>=0&&!isNaN(sf.lmin[c])){const sh1=1-sf.lmin[c],ex=sf.lmax[c]-1;v=sh1>=0.05?sh1:ex>0.05?-ex:0;}
+      let k=Math.round((v+0.5)/1.1*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_FIN[k*3]*s2;g=LUT_FIN[k*3+1]*s2;b=LUT_FIN[k*3+2]*s2;}
     else if(l1View==="strain"){const v=c>=0?Math.log10(Math.max(1e-3,sh.eps[c])):-3;let k=Math.round((v+3)/3.5*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_EPS[k*3]*s2;g=LUT_EPS[k*3+1]*s2;b=LUT_EPS[k*3+2]*s2;}
     else if(l1View==="rock"){const R=ROCK_RGB[c>=0?rock[c]:0]||[128,128,128];r=R[0]*sh_;g=R[1]*sh_;b=R[2]*sh_;}
     else if(l1View==="basins"){if(f>=0&&bs.land[f]){const id=bs.basin[f];let col=bcol.get(id);
@@ -1677,20 +1715,30 @@ function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
     if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins")){const A=bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
       if(a>0){r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
-  $("l1map").getContext("2d").putImageData(l1Img,0,0);}
+  const ctx=$("l1map").getContext("2d");ctx.putImageData(l1Img,0,0);
+  // ticks along the shortening axis where crust has shortened by 10% or more, on a lattice of cells about 26 px apart
+  if(sf){const {nx,ny}=sh,h=sh.o.h,step=Math.max(1,Math.round(26*l1Geo.s/h)),len=0.42*step*h/l1Geo.s,dpr=l1PW/$("l1wrap").clientWidth;
+    ctx.lineCap="round";for(const [col,wd] of [["rgba(255,255,255,.75)",3.2],["rgba(20,20,20,.9)",1.4]]){ctx.strokeStyle=col;ctx.lineWidth=wd*dpr;ctx.beginPath();
+      for(let j=Math.floor(step/2);j<ny;j+=step)for(let i=Math.floor(step/2);i<nx;i+=step){const c=j*nx+i;if(isNaN(sf.lmin[c])||1-sf.lmin[c]<0.1)continue;
+        const x=sh.x0+(i+.5)*h,y=sh.y0+(j+.5)*h,px=(x-l1Geo.cx)/l1Geo.s+l1PW/2,py=-(y-l1Geo.cy)/l1Geo.s+l1PH/2,dx=Math.cos(sf.dir[c])*len/2,dy=-Math.sin(sf.dir[c])*len/2;
+        if(px<0||py<0||px>l1PW||py>l1PH)continue;ctx.moveTo(px-dx,py-dy);ctx.lineTo(px+dx,py+dy);}ctx.stroke();}}}
+// an axis's bearing, e.g. N40°E (angle in radians from map east, counter-clockwise; axes have no sense)
+function l1Bearing(a){let az=(90-a*180/Math.PI)%180;if(az<0)az+=180;return az<=90?`N${Math.round(az)}°E`:`N${Math.round(180-az)}°W`;}
 // basins worth a colour of their own: at least 10,000 km² (100 cells of 10 km)
 const l1BasinMin=()=>Math.round(1e4/(l1St.bs.h*l1St.bs.h));
 function l1BasinSizes(){const bs=l1St.bs;if(bs._size)return bs._size;const m=new Map();for(let f=0;f<bs.land.length;f++)if(bs.land[f]){const id=bs.basin[f];m.set(id,(m.get(id)||0)+1);}return bs._size=m;}
 function l1Legend(){const L=$("l1legend");
   if(l1View==="terrain")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span><span>Shaded relief. Outside the landmass’s crust: L0’s own surface, dimmed (land greyed).</span>`;
   else if(l1View==="thick")L.innerHTML=`<span class="num">−15</span><span class="bar" style="background:${gradCss(THICK_DIV,-15,30)}"></span><span class="num">+30 km</span><span>Crust thickened (red) or thinned (blue) since the window began: shortening, spreading, volcanism and erosion together.</span>`;
+  else if(l1View==="finite")L.innerHTML=`<span class="num">50% ext.</span><span class="bar" style="background:${gradCss(FIN_STOPS,-0.5,0.6)}"></span><span class="num">60% short.</span><span>Total horizontal shortening of the crust since the window began (red), and extension (blue) where it has not shortened. Ticks lie along the shortening direction where it exceeds 10%.</span>`;
   else if(l1View==="strain")L.innerHTML=`<span class="num">0.001</span><span class="bar" style="background:${gradCss(STRAIN_STOPS,-3,0.5)}"></span><span class="num">3 /Myr</span><span>How fast the sheet deforms now (log scale). 0.1 per Myr is 10% shortening or stretching every million years.</span>`;
   else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Topmost unit of the markers in each cell, by volume.</span>`;
   else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast (or one inland sink). Smaller coastal basins are grey. These are the tiles for L2.</span>`;}
+function l1MaxShort(sh){const sf=sh.strainField();let m=0;for(let c=0;c<sf.lmin.length;c++)if(!isNaN(sf.lmin[c])&&1-sf.lmin[c]>m)m=1-sf.lmin[c];return Math.round(100*m);}
 function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[sh.history.length-1],h0=sh.history[0],b=sh.budget,bal=sh.balance(),M=v=>`${(v/1e6).toFixed(2)} M km³`;
   $("l1stats").innerHTML=`<div>L1 time<b class="num">${sh.t.toFixed(1)} / ${S.plan.window.toFixed(1)} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
     <div>Mean / max elevation<b class="num">${h.meanElevKm.toFixed(2)} / ${h.maxElevKm.toFixed(1)} km</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>
-    <div>Most thickening<b class="num">${h.maxThickeningKm.toFixed(1)} km</b></div><div>Peak strain rate<b class="num">${h.maxStrainRate.toFixed(2)} /Myr</b></div>
+    <div>Most thickening<b class="num">${h.maxThickeningKm.toFixed(1)} km</b></div><div>Peak strain rate<b class="num">${h.maxStrainRate.toFixed(2)} /Myr</b></div><div>Most shortening<b class="num">${l1MaxShort(sh)}%</b></div>
     <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>Markers<b class="num">${sh.nm.toLocaleString("en-US")}</b></div>`;
   let html=`<div><b>Crust budget</b>: started ${M(b.initial)}; ${M(b.arcsHotspots)} added by arcs and hotspots, ${M(b.eroded)} eroded, ${M(b.left)} carried off the grid; now ${M(bal.now)}, off by ${(Math.abs(bal.error)*100).toExponential(1)}%.</div>`;
   if(S.bs){const bs=S.bs,sz=l1BasinSizes(),min=l1BasinMin(),big=[...sz.values()].filter(v=>v>=min).sort((a,b2)=>b2-a),cell=bs.h*bs.h,inBig=big.reduce((a,v)=>a+v,0);
@@ -1709,7 +1757,7 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
   if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,c=l1Pix.cell[q],f=l1Pix.fine[q],sh=l1St.sh,bs=l1St.bs,box=$("l1inspect"),h=l1Pix.e[q];
   if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb))return;box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
-    if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;}
+    if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
     if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km²`;}
     box.textContent=t;}
   box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}
