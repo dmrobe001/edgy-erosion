@@ -196,7 +196,7 @@ class Projection{
 // definite, and it is solved by conjugate gradients with a diagonal preconditioner and Picard iteration on viscosity.
 class Sheet{
   constructor(world,plan,o){
-    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
+    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,rateMyr:3,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
     this.world=world;this.plan=plan;this.proj=plan.proj;this.t=0;this.steps=0;this.t0=world.t;
     const h=o.h,[bx0,bx1,by0,by1]=plan.bbox,mg=o.marginKm;
     this.x0=Math.floor((bx0-mg)/h)*h;this.y0=Math.floor((by0-mg)/h)*h;this.nx=Math.ceil((bx1+mg-this.x0)/h);this.ny=Math.ceil((by1+mg-this.y0)/h);
@@ -209,6 +209,7 @@ class Sheet{
     this.u=new Float64Array((nx+1)*ny);this.v=new Float64Array(nx*(ny+1));this.dS=new Float64Array(nc);this.eroded=new Float64Array(nc);this.rockTop=new Uint8Array(nc);
     this.budget={initial:0,arcsHotspots:0,eroded:0,left:0};this.history=[];
     this.seed();this.budget.initial=this.volume();this.deposit();this.solve();this.elevation();this.stats(0);
+    this.ePrev=Float64Array.from(this.e);this.uRate=new Float64Array(nc);
   }
   // markers: m x m per parcel of the object present at t0, one at a random point (a fixed hash) in each of m x m
   // sub-cells of its body cell (stratified, so marker rows don't alias with the grid or bunch into lines under shortening)
@@ -401,8 +402,12 @@ class Sheet{
     let vmax=1;for(let k=0;k<this.nm;k++)if(this.mIn[k]){const s=Math.hypot(this.mUx[k],this.mUy[k]);if(s>vmax)vmax=s;}
     const ns=Math.max(1,Math.ceil(dt*vmax/(0.5*this.o.h)));
     for(let s=0;s<ns;s++){this.plateVelocities();this.deposit();this.solve();this.advect(dt/ns);}
-    this.deposit();this.addVolcanism(rec);this.deposit();this.elevation();this.erode(dt);this.deposit();this.elevation();
-    this.t+=dt;this.steps++;this.stats(dt,ns);}
+    this.deposit();this.addVolcanism(rec);this.deposit();this.elevation();this.tectonicRate(dt);this.erode(dt);this.deposit();this.elevation();
+    this.ePrev.set(this.e);this.t+=dt;this.steps++;this.stats(dt,ns);}
+  // The present rate of elevation change from tectonics alone (deformation, volcanism and their isostasy; not
+  // erosion): this step's change before erosion, averaged over the last rateMyr. The drainage pass applies it.
+  tectonicRate(dt){const {e,ePrev,uRate}=this,a=Math.min(1,dt/this.o.rateMyr);
+    for(let c=0;c<e.length;c++){const r=isNaN(e[c])||isNaN(ePrev[c])?0:(e[c]-ePrev[c])/dt;uRate[c]=(1-a)*uRate[c]+a*r;}}
   stats(dt,ns){const {nx,ny,o,act,e,S,dS,eps}=this,nc=nx*ny;let land=0,se=0,mx=-1e9,smax=0,dsmax=0,emax=0;
     for(let c=0;c<nc;c++){if(!act[c])continue;if(S[c]>smax)smax=S[c];if(dS[c]>dsmax)dsmax=dS[c];if(eps[c]>emax)emax=eps[c];if(e[c]>0){land++;se+=e[c];if(e[c]>mx)mx=e[c];}}
     this.history.push({t:this.t,landKm2:land*o.h*o.h,meanElevKm:land?se/land:0,maxElevKm:land?mx:0,maxThicknessKm:smax,maxThickeningKm:dsmax,maxStrainRate:emax,substeps:ns||0,cg:this.cgIters||0});}
@@ -466,61 +471,86 @@ function climate(sheet,nx,ny,h,e,land,o){
     const r=E[c]/Math.max(1e-6,P[c]),aet=P[c]*(1+r-Math.pow(1+Math.pow(r,o.fuW),1/o.fuW));R[c]=Math.max(0,P[c]-aet);}
   return{lat,P,E,R};
 }
+// Langbein and Schumm (1958): sediment yield against rain rises from deserts to a peak in semi-arid climates (about
+// 0.3 m/yr) and falls as vegetation closes in; scaled to 1 at the peak
+function langbeinSchumm(P){const f=x=>Math.pow(x,2.3)/(1+Math.pow(x,3.33));return f(1.273*P/0.3)/f(1.273);}
 // ---------- the drainage pass ----------
-// With tectonics frozen at the end, the sheet's surface is refined (bilinear, plus relief the sheet cannot resolve,
-// fixed to the planet) and eroded for a few Myr by stream power on a finer grid, only to settle the network; then
-// every land cell is labelled by where it drains. With climate on, discharge (runoff, not area) drives erosion, and
-// each lake the depression filling makes is tested by its water balance: it overflows only if its inflow beats net
-// evaporation over its full surface; otherwise its basin ends there (drains inland) and the lake shrinks to the area
-// that balances its inflow, the rest of the depression a dry lake floor.
+// With the sheet's present tectonic rates (uplift, subsidence) kept running, its surface is refined (bilinear, plus
+// relief the sheet cannot resolve, fixed to the planet) and eroded for a few Myr by stream power on a finer grid, to
+// settle the network. Then the water is followed down it:
+// - Discharge is runoff (with climate on), and it also weights erosion.
+// - Lakes trap sediment: a depression its catchment's sediment can fill within the pass (river erosion plus
+//   background denudation) becomes a flat the water crosses. Depressions survive where they subside or are big.
+// - A surviving lake overflows only if its inflow beats evaporation minus rain over its full surface; otherwise
+//   its basin ends there (drains inland), and it shrinks to the area its inflow can supply (the rest a dry floor).
+// - In dry country rivers lose water into their beds and floodplains, about the same per km whatever their size
+//   (so small rivers die and big ones cross deserts); where a river runs dry the basin ends at a terminal fan.
+// - Sea cut off from the open ocean (and land below sea level) is inland water, under the same rules as lakes.
+// - Land none of whose water reaches the coast (dry country where no river forms) is areic: it drains nowhere.
 function basins(sheet,o){
-  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4,climate:true,Lr:3000,He:3,orogMax:5,fuW:2.6,rainSmoothKm:30,lakeMinKm:0.002,basinMinKm:0.01},o);
-  const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),es=new Float64Array(nc),land=new Uint8Array(nc);
-  const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins"+(o.salt||""))|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4;
+  o=Object.assign({km:10,myr:5,steps:5,K:0.1,m:0.5,relief:0.15,jitter:0.4,climate:true,Lr:3000,He:3,orogMax:5,fuW:2.6,rainSmoothKm:30,lakeMinKm:0.002,
+    bgDenudation:0.02,rates:true,lossMax:0.3,riverMin:30},o);
+  const f=Math.max(1,Math.round(sheet.o.h/o.km)),nx=sheet.nx*f,ny=sheet.ny*f,h=sheet.o.h/f,nc=nx*ny,e=new Float64Array(nc),land=new Uint8Array(nc),U=new Float64Array(nc);
+  const nz=makeNoise3(hashStr(String(sheet.world.opts.seed)+"|L1basins"+(o.salt||""))|0),b=[0,0,0],H=sheet.o.h,snx=sheet.nx,sny=sheet.ny,se=sheet.e,f0=R_KM/(3*H),oct=4,ur=o.rates&&sheet.uRate;
+  const open=new Uint8Array(nc);
   for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){const x=sheet.x0+(i+.5)*h,y=sheet.y0+(j+.5)*h,gx=(x-sheet.x0)/H-0.5,gy=(y-sheet.y0)/H-0.5;
-    let i0=Math.floor(gx),j0=Math.floor(gy);const fx=gx-i0,fy=gy-j0;let s=0,w=0;
-    for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=snx||jj>=sny)continue;const v=se[jj*snx+ii];if(isNaN(v))continue;s+=ww*v;w+=ww;}
-    const c=j*nx+i;if(w<0.5){e[c]=-1;es[c]=-1;continue;}let v=s/w;es[c]=v;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
+    let i0=Math.floor(gx),j0=Math.floor(gy);const fx=gx-i0,fy=gy-j0;let s=0,w=0,u=0;
+    for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=snx||jj>=sny)continue;const v=se[jj*snx+ii];if(isNaN(v))continue;s+=ww*v;w+=ww;if(ur)u+=ww*ur[jj*snx+ii];}
+    const c=j*nx+i;if(w<0.5){e[c]=-1;open[c]=1;continue;}let v=s/w;U[c]=u/w;sheet.proj.inv(x,y,b);const n=nz(b[0],b[1],b[2],f0,oct);v+=(o.relief+o.relief*Math.max(0,v))*2*(n-0.5);e[c]=v;land[c]=v>0?1:0;}
+  // the open ocean: sea connected to the crust's outside or the grid's edge; other sea is inland water
+  {const q=[];for(let c=0;c<nc;c++){const i=c%nx,j=(c/nx)|0;if(open[c]||(!land[c]&&(i===0||j===0||i===nx-1||j===ny-1))){open[c]=1;q.push(c);}}
+    for(let k=0;k<q.length;k++){const c=q[k],i=c%nx,j=(c/nx)|0;for(const d of [i>0?-1:0,i<nx-1?1:0,j>0?-nx:0,j<ny-1?nx:0]){const n=c+d;if(d&&!open[n]&&!land[n]){open[n]=1;q.push(n);}}}}
+  const inlandSea=new Uint8Array(nc);let nSea=0;for(let c=0;c<nc;c++)if(!land[c]&&!open[c]){inlandSea[c]=1;land[c]=1;nSea++;}
   const G=planarGrid(nx,ny,h,o.jitter,Math.round(sheet.x0/h),Math.round(sheet.y0/h),hashStr(String(sheet.world.opts.seed)+"|L1nodes")|0),S=scratch(nc),alive=new Uint8Array(nc).fill(1),out=new Uint8Array(nc);
   for(let c=0;c<nc;c++)out[c]=land[c]?0:1;
   // climate from the surface as it starts (the network settles on it); erosion weights runoff by its land mean
   const cl=o.climate?climate(sheet,nx,ny,h,e,land,o):null;let wgt=null;
   if(cl){let sr=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){sr+=cl.R[c];nl++;}const mr=sr/(nl||1)||1;wgt=new Float32Array(nc);for(let c=0;c<nc;c++)wgt[c]=cl.R[c]/mr;}
-  // Depressions of the resolved surface (the sheet's, before the fine relief is added) are information; hollows that
-  // exist only in the fine relief are stand-in texture, filled as sediment would fill them.
-  // The sheet resolves nothing narrower than about three of its cells, so its surface is first smoothed over one cell.
-  const esm=Float64Array.from(blurGrid(es,nx,ny,f)),deep=new Uint8Array(nc);route(G,esm,alive,out,S,null);for(let c=0;c<nc;c++)deep[c]=land[c]&&S.f[c]-esm[c]>o.basinMinKm?1:0;
   // erodibility: uniform, or o.Kmul, a multiplier per sheet cell, interpolated in log
   let Kc=o.K;if(o.Kmul){Kc=new Float64Array(nc);const lk=Float64Array.from(o.Kmul,v=>Math.log(v));
     for(let j=0;j<ny;j++)for(let i=0;i<nx;i++)Kc[j*nx+i]=o.K*Math.exp(sheet.sample(lk,sheet.x0+(i+.5)*h,sheet.y0+(j+.5)*h));}
-  const dt=o.myr/o.steps;for(let s=0;s<o.steps;s++){route(G,e,alive,out,S,wgt);const hN=streamPower(e,S,Kc,o.m,dt);for(let c=0;c<nc;c++)if(!out[c])e[c]=hN[c];}
+  // the pass: tectonic rates, then erosion, each step; ero records the rock each cell lost (sediment supply)
+  const ero=new Float64Array(nc),dt=o.myr/o.steps;
+  for(let s=0;s<o.steps;s++){for(let c=0;c<nc;c++)if(!out[c])e[c]+=U[c]*dt;route(G,e,alive,out,S,wgt);const hN=streamPower(e,S,Kc,o.m,dt);
+    for(let c=0;c<nc;c++)if(!out[c]){ero[c]+=Math.max(0,e[c]-hN[c]);e[c]=hN[c];}}
   route(G,e,alive,out,S,null);
-  const rec=Int32Array.from(S.rec),stack=S.stack.subarray(0,S.ns),A=new Float64Array(nc),Q=new Float64Array(nc),lake=new Uint8Array(nc);let nClosed=0;
-  // lakes: cells the filling raised by more than lakeMinKm; each lake's exit is a lake cell draining out of the lake
-  const fl=S.f,isLake=c=>land[c]&&fl[c]-e[c]>o.lakeMinKm;
-  const lakeArea=new Float64Array(nc),lakeLoss=new Float64Array(nc),exitOf=new Int32Array(nc).fill(-1);
+  const rec=Int32Array.from(S.rec),stack=S.stack.subarray(0,S.ns),A=new Float64Array(nc),Q=new Float64Array(nc),lake=new Uint8Array(nc);let nClosed=0,nDry=0;
+  // lakes: cells the filling raised by more than lakeMinKm (or inland sea); each lake's exit is a lake cell draining out
+  const fl=S.f,isLake=c=>land[c]&&(fl[c]-e[c]>o.lakeMinKm||inlandSea[c]);
+  const lakeArea=new Float64Array(nc),lakeLoss=new Float64Array(nc),lakeVol=new Float64Array(nc),exitOf=new Int32Array(nc).fill(-1),sed=new Float64Array(nc);
   for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];if(!isLake(l))continue;exitOf[l]=r!==l&&isLake(r)?exitOf[r]:l;}
-  for(let c=0;c<nc;c++)if(exitOf[c]>=0){const x=exitOf[c];lakeArea[x]+=h*h;if(cl)lakeLoss[x]+=(cl.E[c]-cl.P[c])*h*h;lake[c]=1;}
-  // A lake none of whose cells lies in a resolved depression is filled (a sediment flat the water crosses).
-  // Accumulate area and discharge from the top of the network down; a lake that cannot overflow ends its basin.
-  const filled=new Uint8Array(nc),real=new Uint8Array(nc);for(let c=0;c<nc;c++)if(exitOf[c]>=0&&deep[c])real[exitOf[c]]=1;
-  for(let c=0;c<nc;c++)if(lakeArea[c]>0&&!real[c])filled[c]=1;
-  for(let q=stack.length-1;q>=0;q--){const l=stack[q];A[l]+=h*h;if(cl)Q[l]+=cl.R[l]*h*h;
-    const lk=lakeArea[l]>0&&rec[l]!==l&&!filled[l];
+  for(let c=0;c<nc;c++)if(exitOf[c]>=0){const x=exitOf[c];lakeArea[x]+=h*h;lakeVol[x]+=Math.max(0,fl[c]-e[c])*h*h;if(cl)lakeLoss[x]+=(cl.E[c]-cl.P[c])*h*h;lake[c]=1;}
+  // Down the network from the top: area, discharge (runoff, minus channel losses) and sediment
+  const filled=new Uint8Array(nc),qOut=new Float64Array(nc);
+  for(let q=stack.length-1;q>=0;q--){const l=stack[q];A[l]+=h*h;
+    if(land[l]){if(cl)Q[l]+=cl.R[l]*h*h;sed[l]+=(ero[l]+o.bgDenudation*(cl?langbeinSchumm(cl.P[l]):1)*o.myr)*h*h;}
+    let lk=lakeArea[l]>0&&rec[l]!==l;
+    if(lk){if(sed[l]>=lakeVol[l]&&!inlandSea[l]){sed[l]-=lakeVol[l];filled[l]=1;lk=false;}else sed[l]=0;}
     if(lk&&cl&&Q[l]<=lakeLoss[l]){rec[l]=l;nClosed++;lake[l]=2;continue;}
-    const r=rec[l];if(r!==l){A[r]+=A[l];Q[r]+=lk&&cl?Math.max(0,Q[l]-lakeLoss[l]):Q[l];}}
+    let qs=lk&&cl?Math.max(0,Q[l]-lakeLoss[l]):Q[l];
+    // channel losses in dry country: flood pulses soak into beds and floodplains, about the same per km whatever the
+    // river's size (small rivers die, big ones cross deserts), rising from 0 at an aridity index (P/E) of 0.65
+    const r=rec[l];
+    if(cl&&r!==l&&land[l]&&!lake[l]){const ai=cl.P[l]/Math.max(1e-6,cl.E[l]),k=o.lossMax*Math.max(0,1-ai/0.65);
+      if(k>0){const qin=qs;qs=Math.max(0,qs-k*S.rdist[l]);
+        if(qin>=o.riverMin&&qs<o.riverMin){rec[l]=l;nDry++;lake[l]=4;continue;}}}
+    qOut[l]=qs;if(r!==l){A[r]+=A[l];sed[r]+=sed[l];Q[r]+=qs;}}
   // filled depressions become sediment flats at their spill level
   let nFilled=0;for(let c=0;c<nc;c++){const x=exitOf[c];if(x>=0&&filled[x]){lake[c]=0;e[c]=fl[c];if(c===x)nFilled++;}}
   // labels, now that some basins end inland; closed lakes shrink to the area their inflow can supply
   const basin=new Int32Array(nc).fill(-1),size=new Map(),closedB=new Uint8Array(nc);
   for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];basin[l]=r===l?l:basin[r];}
   if(cl){const cells=new Map();for(let c=0;c<nc;c++)if(exitOf[c]>=0&&lake[exitOf[c]]===2){const x=exitOf[c];if(!cells.has(x))cells.set(x,[]);cells.get(x).push(c);}
-    for(const [x,cs] of cells){cs.sort((a,b2)=>e[a]-e[b2]);let need=Q[x],wet=0;
-      for(const c of cs){const loss=(cl.E[c]-cl.P[c])*h*h;if(need>0&&loss>0){need-=loss;lake[c]=2;wet++;}else lake[c]=3;}lake[x]=lake[x]||2;}
-    for(let c=0;c<nc;c++)if(land[c]&&lake[basin[c]]>=2&&!out[basin[c]])closedB[c]=1;}
+    for(const [x,cs] of cells){cs.sort((a,b2)=>e[a]-e[b2]);let need=Q[x];
+      for(const c of cs){const loss=(cl.E[c]-cl.P[c])*h*h;if(need>0&&loss>0){need-=loss;lake[c]=2;}else lake[c]=3;}lake[x]=lake[x]===3?2:lake[x];}
+    // Land drains inland if its basin ends in a lake with no outlet or where a river runs dry (endorheic, 1). Otherwise
+    // it is areic (2) if its water never reaches the coast: some cell on its way passes on no water at all (the
+    // wash dies in the desert before it joins a river that reaches the sea). Receivers come first in the stack.
+    const dead=new Uint8Array(nc);for(let q=0;q<stack.length;q++){const l=stack[q],r=rec[l];if(!land[l])continue;dead[l]=!(qOut[l]>0)||(r!==l&&land[r]&&dead[r])?1:0;}
+    for(let c=0;c<nc;c++){if(!land[c])continue;const t=basin[c];if(!out[t]&&lake[t]>=2)closedB[c]=1;else if(dead[c])closedB[c]=2;}}
   for(let c=0;c<nc;c++)if(land[c]){const id=basin[c];size.set(id,(size.get(id)||0)+1);}
-  const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;}
-  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,A,Q,rec,basin,lake,closedB,climate:cl,nClosed,nFilled,inlandFrac:inland/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
+  const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,areic=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;if(closedB[c]===2)areic++;}
+  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,rec,basin,lake,closedB,inlandSea,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
 return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
 })();
