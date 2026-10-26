@@ -82,6 +82,20 @@ for (const [label, lat, floor, sub, plain, ok] of [["bowl, wet tropics", 5, 0.4,
   check(ok(res), "inland drainage: " + label);
 }
 
+// 2d. dynamic topography: one slab bin, 5 Myr old (sunk 100 km), recorded in a single cell, must give a depression of
+//     width 300 + 0.8 x 100 = 380 km: at that distance the deflection (less the far field) is exp(-1/2) of its depth.
+//     The field averages zero over the sphere (return flow lifts the surface away from slabs).
+{ const n = 96, cube = SIM.getCube(n), N = cube.N, nB = SIM.C.SLAB_BINS, fake = { n, N, cube, t: 100, slab: new Float32Array(nB * N), slabT: new Float64Array(nB).fill(-1e9) };
+  const c0 = cube.lookup(0.3, 0.2, Math.sqrt(1 - 0.13)); fake.slabT[0] = 90; fake.slab[c0] = 1e6;
+  const D = L1.dynTopo(fake), out = [0, 0, 0], p = [cube.pos[3 * c0], cube.pos[3 * c0 + 1], cube.pos[3 * c0 + 2]], at = (ang, dir) => {
+    const e1 = [-p[1], p[0], 0], l = Math.hypot(...e1); e1[0] /= l; e1[1] /= l; const e2 = [p[1] * e1[2] - p[2] * e1[1], p[2] * e1[0] - p[0] * e1[2], p[0] * e1[1] - p[1] * e1[0]];
+    const u = [Math.cos(dir) * e1[0] + Math.sin(dir) * e2[0], Math.cos(dir) * e1[1] + Math.sin(dir) * e2[1], Math.cos(dir) * e1[2] + Math.sin(dir) * e2[2]];
+    return L1.dynAt(D, p[0] * Math.cos(ang) + u[0] * Math.sin(ang), p[1] * Math.cos(ang) + u[1] * Math.sin(ang), p[2] * Math.cos(ang) + u[2] * Math.sin(ang), out); };
+  const far = at(Math.PI / 2, 0), peak = at(0, 0) - far; let r = 0; for (let k = 0; k < 8; k++) r += (at(380 / SIM.R_KM, k * Math.PI / 4) - far) / peak / 8;
+  let sm = 0, sa = 0; for (let c = 0; c < D.g.cube2.N; c++) { sm += D.F[c] * D.g.area2[c]; sa += D.g.area2[c]; }
+  console.log(`dynamic topography, one slab: depth ${(peak * 1000).toFixed(0)} m; at 380 km ${r.toFixed(3)} of it (Gaussian: ${Math.exp(-0.5).toFixed(3)}); mean over the sphere ${(sm / sa * 1000).toExponential(1)} m`);
+  check(Math.abs(r - Math.exp(-0.5)) < 0.06 && peak < 0 && Math.abs(sm / sa) < 1e-9, "dynamic topography kernel"); }
+
 // 3. a real landmass: snapshots every 10 Myr, pick at the present, replay, sheet, drainage pass
 const n = +arg("n", 64), W = +arg("win", 10), T0 = +arg("t0", 400), H = +arg("h", 70), target = +arg("land", 200);
 const w = new SIM.World({ n, seed: "genesis", nPlates: 10, mode: "scatter", contTarget: 0.5 }), snaps = [];

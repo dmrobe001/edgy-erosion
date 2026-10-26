@@ -192,6 +192,7 @@ button:disabled{opacity:.5;cursor:default}
         <button data-v="finite" aria-pressed="false">Finite strain</button>
         <button data-v="strain" aria-pressed="false">Strain rate</button>
         <button data-v="rock" aria-pressed="false">Surface rock</button>
+        <button data-v="dyn" aria-pressed="false">Mantle pull</button>
         <button data-v="rain" aria-pressed="false" disabled>Rainfall</button>
         <button data-v="basins" aria-pressed="false" disabled>Drainage basins</button>
       </div>
@@ -248,7 +249,7 @@ const ROCK_NAMES=["none","ocean-ridge basalt","hotspot or flood basalt","arc vol
 const FK={NONE:0,THRUST:1,NORMAL:2,STRIKE:3}, FK_NAMES=["none","thrust","normal","strike-slip"];
 const C={OCEAN_T:7,CONT_BASE:33,ISO:0.16,CAP:75,ARC:0.6,ARCW:[0,0.5,0.3,0.2],COLL:0.5,COLLW:[0.35,0.3,0.2,0.15],
   KE:0.03,KD:0.03,VOLC_DECAY:0.02,SED_CONV:5,ARC_CONV:17,COLLAPSE:48,HOT:0.7,CONT_TARGET:0.40,MERGE:180,COLL_LOG:30,SPLIT_TAU:40,VMAX:8,VMIN:0.5,
-  UNIT_MERGE:150,COVER_DEPTH:1,SPEED_TAU:40,FAULT_GAP:10,FAULT_SWITCH:10};
+  UNIT_MERGE:150,SLAB_BINS:25,SLAB_DT:10,SLAB_INBOARD:3,COVER_DEPTH:1,SPEED_TAU:40,FAULT_GAP:10,FAULT_SWITCH:10};
 function mulberry32(a){const f=function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
   f.getState=()=>a;f.setState=v=>{a=v;};return f;} // state exposed so a world can be saved and restored exactly
 function hashStr(s){let h=1779033703^s.length;for(let i=0;i<s.length;i++){h=Math.imul(h^s.charCodeAt(i),3432918353);h=h<<13|h>>>19;}h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909);return(h^h>>>16)>>>0;}
@@ -357,7 +358,11 @@ class World{
     this.wT=new F(N);this.wB=new F(N);this.wS=new F(N);this.wK=new Uint8Array(N);this.wCol=new Int32Array(N);
     this.wR=new Uint8Array(N);this.wRA=new F(N);this.bn=new F(3*N);
     this.elev=new F(N);this.dT=new F(N);this.arcAdd=new F(N);this.arcPlate=new Int16Array(N);this.collAdd=new F(N);this.collPlate=new Int16Array(N);
-    this._cw=[0,0,0,0];this.trench=new F(N);this.gaps=new Int32Array(N);this.rest=new Int32Array(N);
+    this._cw=[0,0,0,0];this.trench=new F(N);
+    // slabs (recording only): oceanic area consumed at trenches, weighted by the slab's age, in 10 Myr bins on the fixed
+    // (mantle) grid, about 300 km beneath the overriding plate; the last SLAB_BINS bins are kept. L1 turns it into
+    // dynamic topography.
+    this.slab=new F(C.SLAB_BINS*N);this.slabT=new Float64Array(C.SLAB_BINS).fill(-1e9);this.gaps=new Int32Array(N);this.rest=new Int32Array(N);
     this.pool=new ColumnPool(Math.ceil(N*1.6));this.fpool=new FaultPool(Math.ceil(N*0.4));
     this.plates=[];this.pairs=new Map();this.pairLoc=new Map();this.collLogged=new Set();this.events=[];this.nEvents=0;this.t=0;this.steps=0;this.targetPlates=o.nPlates;
     this.init(o);
@@ -436,6 +441,7 @@ class World{
       if(!Pl.K[kl]){
         this.deposit(this.arcAdd,this.arcPlate,Pw.id,x,y,z,rx,ry,rz,C.ARC+0.4*Pl.S[kl],C.ARCW,1);
         const d=this.cellRad;this.trench[this.cube.lookup(x-rx*d,y-ry*d,z-rz*d)]=1;
+        {const age=this.t-Pl.B[kl],c=this.cube.lookup(x+rx*d*C.SLAB_INBOARD,y+ry*d*C.SLAB_INBOARD,z+rz*d*C.SLAB_INBOARD);this.slab[this.slabQ*this.N+c]+=this.cube.area[i]*R_KM*R_KM*Math.min(1,Math.sqrt(Math.max(0,age)/80));}
       } else {
         // thickening scales with the share of motion across the boundary: head-on stacks crust, sideways sliding barely does
         const bn=this.bn,nl=Math.hypot(bn[3*i],bn[3*i+1],bn[3*i+2]);
@@ -465,6 +471,7 @@ class World{
     }
     // 2. coverage and overlaps
     nOwner.fill(-1);this.arcAdd.fill(0);this.collAdd.fill(0);
+    {const b=Math.floor(this.t/C.SLAB_DT),q=((b%C.SLAB_BINS)+C.SLAB_BINS)%C.SLAB_BINS;if(this.slabT[q]!==b*C.SLAB_DT){this.slabT[q]=b*C.SLAB_DT;this.slab.fill(0,q*N,(q+1)*N);}this.slabQ=q;}
     const cand=new Int16Array(5);let ng=0;
     for(let i=0;i<N;i++){
       const x=pos[3*i],y=pos[3*i+1],z=pos[3*i+2];
@@ -872,7 +879,7 @@ return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3,makeLoo
 // resolution, carried by markers with L0's rock columns. A short frozen erosion pass then settles its drainage
 // basins, the tiles for L2.
 const L1 = (() => {
-const {R_KM,C,makeLookup,elevOf,makeNoise3,hashStr}=SIM;
+const {R_KM,C,makeLookup,elevOf,makeNoise3,hashStr,getCube}=SIM;
 const ROOT=1-C.ISO, EPS=1e-6; // share of a thickness change taken by the root under full isostasy; priority-flood step (km)
 
 // ---------- generic graph tools (also used on a planar grid by the tests) ----------
@@ -1062,9 +1069,44 @@ class Projection{
 // Discretization: staggered (MAC) grid, u on vertical faces, v on horizontal faces, thickness and viscosity at cell
 // centres, shear at corners; the operator is the gradient of a discrete dissipation, so it is symmetric positive
 // definite, and it is solved by conjugate gradients with a diagonal preconditioner and Picard iteration on viscosity.
+// ---------- dynamic topography from L0's slab record ----------
+// Slabs sinking into the mantle pull the surface above them down. L0 records the oceanic area consumed at trenches
+// (weighted by slab age) in 10 Myr bins on its fixed, mantle grid. A bin of age a has sunk to depth d(a): 20 km/Myr
+// to 660 km, then 10 km/Myr. Its pull spreads over a Gaussian of width 300 km + 0.8 d and weakens as exp(-d/1200 km).
+// The deflection is -ampKm times the sum of the spread, weighted slab densities (consumed area per area), less its
+// mean over the sphere (return flow lifts the surface away from slabs). This is a calibrated stand-in, not mantle flow: amplitudes of about 1 km over 1,000-3,000 km, as observed over subduction.
+// Computed on a cube grid of half L0's resolution, but at least 48 cells a face (about 210 km; the narrowest kernel is
+// 300 km); blurs are diffusion steps, applied
+// oldest bin first so each bin receives exactly its own total width (Gaussians compose by adding variances).
+const DYN={ampKm:0.6,vUpper:20,vLower:10,zTrans:660,sigma0:300,sigmaPerKm:0.8,decayKm:1200};
+const dynCache=new Map();
+function dynGrid(world){const n=world.n;let g=dynCache.get(n);if(g)return g;
+  const n2=Math.max(48,Math.round(n/2)),cube2=getCube(n2),N=world.N,map=new Int32Array(N),pos=world.cube.pos;
+  for(let i=0;i<N;i++)map[i]=cube2.lookup(pos[3*i],pos[3*i+1],pos[3*i+2]);
+  const area2=Float64Array.from(cube2.area,a=>a*R_KM*R_KM),h2=Math.PI/2/n2*R_KM;
+  g={cube2,map,area2,h2};dynCache.set(n,g);return g;}
+const dynDepth=a=>{const tU=DYN.zTrans/DYN.vUpper;return a<=tU?DYN.vUpper*a:DYN.zTrans+DYN.vLower*(a-tU);};
+// the deflection (km, negative down) on the half-resolution grid at the world's present time
+function dynTopo(world){const g=dynGrid(world),{cube2,map,area2,h2}=g,N2=cube2.N,nb=cube2.nb,N=world.N,t=world.t,nB=world.slabT.length;
+  if(!world.slab)return{g,F:new Float64Array(N2)};
+  const bins=[];for(let q=0;q<nB;q++){const t0=world.slabT[q];if(!(t0>-1e8))continue;const mid=Math.min(t,t0+C.SLAB_DT/2),d=dynDepth(Math.max(0,t-mid));
+    bins.push({q,d,sig:DYN.sigma0+DYN.sigmaPerKm*d,k:Math.exp(-d/DYN.decayKm)});}
+  bins.sort((a,b)=>b.sig-a.sig);
+  let F=new Float64Array(N2),T=new Float64Array(N2);const m=new Float64Array(N2),varStep=h2*h2/2;
+  // lazy steps (at most half the neighbours' mean) so the kernel does not checkerboard
+  const blur=v=>{let it=v/varStep;while(it>1e-6){const al=Math.min(0.5,it);for(let c=0;c<N2;c++){const s=F[nb[4*c]]+F[nb[4*c+1]]+F[nb[4*c+2]]+F[nb[4*c+3]];T[c]=F[c]+al*(s/4-F[c]);}[F,T]=[T,F];it-=al;}};
+  for(let b=0;b<bins.length;b++){const {q,k}=bins[b];m.fill(0);for(let i=0;i<N;i++){const v=world.slab[q*N+i];if(v)m[map[i]]+=v;}
+    for(let c=0;c<N2;c++)F[c]+=k*m[c]/area2[c];
+    const next=b+1<bins.length?bins[b+1].sig:0;blur(bins[b].sig*bins[b].sig-next*next);}
+  // mass conservation: where slabs sink, return flow rises elsewhere, so the deflection averages zero over the sphere
+  let sm=0,sa=0;for(let c=0;c<N2;c++){sm+=F[c]*area2[c];sa+=area2[c];}const mean=sm/sa;
+  for(let c=0;c<N2;c++)F[c]=-DYN.ampKm*(F[c]-mean);return{g,F};}
+// sample a half-resolution field at a world point (bilinear)
+function dynAt(D,x,y,z,out){const {cube2}=D.g,nb=cube2.nb;cube2.lookupFrac(x,y,z,out);const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty),F=D.F;
+  return(1-ax)*(1-ay)*F[c]+ax*(1-ay)*F[cB]+(1-ax)*ay*F[cC]+ax*ay*F[cD];}
 class Sheet{
   constructor(world,plan,o){
-    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,rateMyr:3,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
+    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,rateMyr:3,dyn:true,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
     this.world=world;this.plan=plan;this.proj=plan.proj;this.t=0;this.steps=0;this.t0=world.t;
     const h=o.h,[bx0,bx1,by0,by1]=plan.bbox,mg=o.marginKm;
     this.x0=Math.floor((bx0-mg)/h)*h;this.y0=Math.floor((by0-mg)/h)*h;this.nx=Math.ceil((bx1+mg-this.x0)/h);this.ny=Math.ceil((by1+mg-this.y0)/h);
@@ -1076,7 +1118,7 @@ class Sheet{
     this.wsum=new Float64Array(nc);this.act=new Uint8Array(nc);this.eta=new Float64Array(nc).fill(this.eta0);this.e=new Float64Array(nc).fill(NaN);this.eps=new Float64Array(nc);
     this.u=new Float64Array((nx+1)*ny);this.v=new Float64Array(nx*(ny+1));this.dS=new Float64Array(nc);this.eroded=new Float64Array(nc);this.rockTop=new Uint8Array(nc);
     this.budget={initial:0,arcsHotspots:0,eroded:0,left:0};this.history=[];
-    this.seed();this.budget.initial=this.volume();this.deposit();this.solve();this.elevation();this.stats(0);
+    this.dyn=new Float64Array(nc);this.seed();this.budget.initial=this.volume();this.deposit();this.solve();this.updateDyn();this.elevation();this.stats(0);
     this.ePrev=Float64Array.from(this.e);this.uRate=new Float64Array(nc);
   }
   // markers: m x m per parcel of the object present at t0, one at a random point (a fixed hash) in each of m x m
@@ -1232,7 +1274,7 @@ class Sheet{
   elevation(){const {nx,ny,o,S,Sref,eref,act,e,dS}=this,nc=nx*ny,sig=1.18*o.flexKm/o.h;
     for(let c=0;c<nc;c++)dS[c]=act[c]?S[c]-Sref[c]:0;
     const F=this.blur(dS,act,sig),lim=o.strengthKm;
-    for(let c=0;c<nc;c++){if(!act[c]){e[c]=NaN;continue;}let rt=ROOT*F[c];const air=ROOT*dS[c];if(rt<air-lim)rt=air-lim;else if(rt>air+lim)rt=air+lim;e[c]=eref[c]+dS[c]-rt;}}
+    for(let c=0;c<nc;c++){if(!act[c]){e[c]=NaN;continue;}let rt=ROOT*F[c];const air=ROOT*dS[c];if(rt<air-lim)rt=air-lim;else if(rt>air+lim)rt=air+lim;e[c]=eref[c]+dS[c]-rt+this.dyn[c];}}
   // separable Gaussian blur of f over cells with mask set (normalized by the mask's own blur)
   blur(f,mask,sig){const {nx,ny}=this,nc=nx*ny,R=Math.max(1,Math.ceil(3*sig)),w=[];for(let k=-R;k<=R;k++)w.push(Math.exp(-k*k/(2*sig*sig)));
     const a=new Float64Array(nc),b=new Float64Array(nc),ma=new Float64Array(nc),mb=new Float64Array(nc);
@@ -1270,8 +1312,11 @@ class Sheet{
     let vmax=1;for(let k=0;k<this.nm;k++)if(this.mIn[k]){const s=Math.hypot(this.mUx[k],this.mUy[k]);if(s>vmax)vmax=s;}
     const ns=Math.max(1,Math.ceil(dt*vmax/(0.5*this.o.h)));
     for(let s=0;s<ns;s++){this.plateVelocities();this.deposit();this.solve();this.advect(dt/ns);}
-    this.deposit();this.addVolcanism(rec);this.deposit();this.elevation();this.tectonicRate(dt);this.erode(dt);this.deposit();this.elevation();
+    this.deposit();this.addVolcanism(rec);this.deposit();this.updateDyn();this.elevation();this.tectonicRate(dt);this.erode(dt);this.deposit();this.elevation();
     this.ePrev.set(this.e);this.t+=dt;this.steps++;this.stats(dt,ns);}
+  // dynamic topography on the sheet's cells, from L0's slab record now (the mantle frame moves under the map)
+  updateDyn(){if(!this.o.dyn)return;const D=dynTopo(this.world),{nx,ny,o}=this,h=o.h,b=[0,0,0],t=[0,0,0],out=[0,0,0],Qr=this.Qref;this.dynD=D;
+    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){this.proj.inv(this.x0+(i+.5)*h,this.y0+(j+.5)*h,b);mv(Qr,b[0],b[1],b[2],t);this.dyn[j*nx+i]=dynAt(D,t[0],t[1],t[2],out);}}
   // The present rate of elevation change from tectonics alone (deformation, volcanism and their isostasy; not
   // erosion): this step's change before erosion, averaged over the last rateMyr. The drainage pass applies it.
   tectonicRate(dt){const {e,ePrev,uRate}=this,a=Math.min(1,dt/this.o.rateMyr);
@@ -1420,7 +1465,7 @@ function basins(sheet,o){
   const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,areic=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;if(closedB[c]===2)areic++;}
   return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,rec,basin,lake,closedB,inlandSea,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
+return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
 })();
 // ===== L1-END =====
 // ---------- rendering ----------
@@ -1732,7 +1777,8 @@ const l1Busy=()=>!!(l1St&&/^(replay|forward|run|basins)$/.test(l1St.phase));
 const THICK_DIV=[[-15,"#2c5aa0"],[-5,"#9db8de"],[0,"#f2f0ea"],[5,"#e6a07a"],[15,"#b8322a"],[30,"#5e0f12"]];
 const STRAIN_STOPS=[[-3,"#f3f1ea"],[-2,"#d9e2c0"],[-1.25,"#9cc38c"],[-0.5,"#3f9b8a"],[0,"#265c8f"],[0.5,"#2b1f5c"]];
 const FIN_STOPS=[[-0.5,"#2c5aa0"],[-0.2,"#9db8de"],[0,"#f2f0ea"],[0.15,"#e9b08a"],[0.35,"#c4452f"],[0.6,"#5e0f12"]];
-const RAIN_STOPS=[[-1.3,"#96703c"],[-0.7,"#dcc88c"],[-0.3,"#b4dc96"],[0.1,"#3ca078"],[0.5,"#145a8c"]];
+const DYN_STOPS=[[-1,"#2c5aa0"],[-0.4,"#9db8de"],[0,"#f2f0ea"],[0.3,"#e9b08a"],[0.6,"#b8322a"]];
+const LUT_DYN=buildLut(DYN_STOPS,256,-1,0.6),RAIN_STOPS=[[-1.3,"#96703c"],[-0.7,"#dcc88c"],[-0.3,"#b4dc96"],[0.1,"#3ca078"],[0.5,"#145a8c"]];
 const LUT_RAIN=buildLut(RAIN_STOPS,256,-1.3,0.5),LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
 function l1Reset(){l1Picking=false;l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;$("l1Pick").disabled=false;
   document.body.classList.remove("pick");$("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
@@ -1822,6 +1868,7 @@ function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
       let k=Math.round((v+0.5)/1.1*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_FIN[k*3]*s2;g=LUT_FIN[k*3+1]*s2;b=LUT_FIN[k*3+2]*s2;}
     else if(l1View==="strain"){const v=c>=0?Math.log10(Math.max(1e-3,sh.eps[c])):-3;let k=Math.round((v+3)/3.5*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_EPS[k*3]*s2;g=LUT_EPS[k*3+1]*s2;b=LUT_EPS[k*3+2]*s2;}
     else if(l1View==="rock"){const R=ROCK_RGB[c>=0?rock[c]:0]||[128,128,128];r=R[0]*sh_;g=R[1]*sh_;b=R[2]*sh_;}
+    else if(l1View==="dyn"){const v=c>=0?sh.dyn[c]:0;let k=Math.round((v+1)/1.6*255);k=k<0?0:k>255?255:k;const s2=0.8+0.2*sh_;r=LUT_DYN[k*3]*s2;g=LUT_DYN[k*3+1]*s2;b=LUT_DYN[k*3+2]*s2;}
     else if(l1View==="rain"){if(f>=0&&bs.land[f]){let k=Math.round((Math.log10(Math.max(0.05,bs.climate.P[f]))+1.3)/1.8*255);k=k<0?0:k>255?255:k;r=LUT_RAIN[k*3]*sh_;g=LUT_RAIN[k*3+1]*sh_;b=LUT_RAIN[k*3+2]*sh_;}
       else{let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];}}
     else if(l1View==="basins"){if(f>=0&&bs.land[f]){const id=bs.closedB[f]===2?-2:bs.basin[f];let col=bcol.get(id);
@@ -1833,7 +1880,7 @@ function l1Render(){if(!l1St||!l1St.sh)return;l1Size();if(!l1Pix)l1Fields();
     // has none), and lakes: open (blue), closed (pale blue), dry lake floors (white)
     if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins"||l1View==="rain")){const A=bs.climate?bs.Q[f]/0.3:bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
       if(a>0){r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}}
-    if(land&&f>=0&&bs.lake[f]&&l1View!=="thick"&&l1View!=="strain"&&l1View!=="finite"){const L=[null,[52,104,190],[120,196,214],[238,234,222],[214,178,112]][bs.lake[f]];r=L[0];g=L[1];b=L[2];}
+    if(land&&f>=0&&bs.lake[f]&&l1View!=="thick"&&l1View!=="strain"&&l1View!=="finite"&&l1View!=="dyn"){const L=[null,[52,104,190],[120,196,214],[238,234,222],[214,178,112]][bs.lake[f]];r=L[0];g=L[1];b=L[2];}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
   const ctx=$("l1map").getContext("2d");ctx.putImageData(l1Img,0,0);
   // ticks along the shortening axis where crust has shortened by 10% or more, on a lattice of cells about 26 px apart
@@ -1853,6 +1900,7 @@ function l1Legend(){const L=$("l1legend");
   else if(l1View==="finite")L.innerHTML=`<span class="num">50% ext.</span><span class="bar" style="background:${gradCss(FIN_STOPS,-0.5,0.6)}"></span><span class="num">60% short.</span><span>Total horizontal shortening of the crust since the window began (red), and extension (blue) where it has not shortened. Ticks lie along the shortening direction where it exceeds 10%.</span>`;
   else if(l1View==="strain")L.innerHTML=`<span class="num">0.001</span><span class="bar" style="background:${gradCss(STRAIN_STOPS,-3,0.5)}"></span><span class="num">3 /Myr</span><span>How fast the sheet deforms now (log scale). 0.1 per Myr is 10% shortening or stretching every million years.</span>`;
   else if(l1View==="rock")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("")+`<span>Topmost unit of the markers in each cell, by volume.</span>`;
+  else if(l1View==="dyn")L.innerHTML=`<span class="num">−1 km</span><span class="bar" style="background:${gradCss(DYN_STOPS,-1,0.6)}"></span><span class="num">+0.6 km</span><span>Dynamic topography: slabs sinking into the mantle beneath recent subduction pull the surface down; return flow lifts it elsewhere. Included in the elevation.</span>`;
   else if(l1View==="rain")L.innerHTML=`<span class="num">50 mm</span><span class="bar" style="background:${gradCss(RAIN_STOPS,-1.3,0.5)}"></span><span class="num">3 m/yr</span><span>Yearly rain from a crude climate: latitude belts, zonal winds, moisture raining out inland and over relief (wet windward slopes, rain shadows).</span>`;
   else L.innerHTML=`<span>Each colour is one drainage basin of at least 10,000 km²: all the land draining to one outlet on the coast; basins that drain inland, to a lake with no outlet or where their river runs dry, are in muted earth tones, and desert whose water never reaches a river is sand-coloured. Smaller coastal basins are grey. Lakes: blue if they overflow, pale blue if they have no outlet, white for dry lake floors; tan dots where rivers run dry in the desert. These are the tiles for L2.</span>`;}
 function l1MaxShort(sh){const sf=sh.strainField();let m=0;for(let c=0;c<sf.lmin.length;c++)if(!isNaN(sf.lmin[c])&&1-sf.lmin[c]>m)m=1-sf.lmin[c];return Math.round(100*m);}
@@ -1878,7 +1926,7 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
   if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,c=l1Pix.cell[q],f=l1Pix.fine[q],sh=l1St.sh,bs=l1St.bs,box=$("l1inspect"),h=l1Pix.e[q];
   if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb))return;box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
-    if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
+    if(c>=0){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr, mantle pull ${Math.round(sh.dyn[c]*1000)} m${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
     if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km² that ${["reaches the sea","drains inland","never reaches a river (desert)"][bs.closedB[f]]}`;if(bs.climate)t+=`; rain ${Math.round(bs.climate.P[f]*1000)} mm/yr, runoff ${Math.round(bs.climate.R[f]*1000)} mm/yr`;if(bs.lake[f])t+=["","; a lake that overflows","; a lake with no outlet","; a dry lake floor","; where a river runs dry"][bs.lake[f]];if(bs.inlandSea[f])t+=" (a sea cut off from the ocean)";}
     box.textContent=t;}
   box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}

@@ -4,7 +4,7 @@
 // resolution, carried by markers with L0's rock columns. A short frozen erosion pass then settles its drainage
 // basins, the tiles for L2.
 const L1 = (() => {
-const {R_KM,C,makeLookup,elevOf,makeNoise3,hashStr}=SIM;
+const {R_KM,C,makeLookup,elevOf,makeNoise3,hashStr,getCube}=SIM;
 const ROOT=1-C.ISO, EPS=1e-6; // share of a thickness change taken by the root under full isostasy; priority-flood step (km)
 
 // ---------- generic graph tools (also used on a planar grid by the tests) ----------
@@ -194,9 +194,44 @@ class Projection{
 // Discretization: staggered (MAC) grid, u on vertical faces, v on horizontal faces, thickness and viscosity at cell
 // centres, shear at corners; the operator is the gradient of a discrete dissipation, so it is symmetric positive
 // definite, and it is solved by conjugate gradients with a diagonal preconditioner and Picard iteration on viscosity.
+// ---------- dynamic topography from L0's slab record ----------
+// Slabs sinking into the mantle pull the surface above them down. L0 records the oceanic area consumed at trenches
+// (weighted by slab age) in 10 Myr bins on its fixed, mantle grid. A bin of age a has sunk to depth d(a): 20 km/Myr
+// to 660 km, then 10 km/Myr. Its pull spreads over a Gaussian of width 300 km + 0.8 d and weakens as exp(-d/1200 km).
+// The deflection is -ampKm times the sum of the spread, weighted slab densities (consumed area per area), less its
+// mean over the sphere (return flow lifts the surface away from slabs). This is a calibrated stand-in, not mantle flow: amplitudes of about 1 km over 1,000-3,000 km, as observed over subduction.
+// Computed on a cube grid of half L0's resolution, but at least 48 cells a face (about 210 km; the narrowest kernel is
+// 300 km); blurs are diffusion steps, applied
+// oldest bin first so each bin receives exactly its own total width (Gaussians compose by adding variances).
+const DYN={ampKm:0.6,vUpper:20,vLower:10,zTrans:660,sigma0:300,sigmaPerKm:0.8,decayKm:1200};
+const dynCache=new Map();
+function dynGrid(world){const n=world.n;let g=dynCache.get(n);if(g)return g;
+  const n2=Math.max(48,Math.round(n/2)),cube2=getCube(n2),N=world.N,map=new Int32Array(N),pos=world.cube.pos;
+  for(let i=0;i<N;i++)map[i]=cube2.lookup(pos[3*i],pos[3*i+1],pos[3*i+2]);
+  const area2=Float64Array.from(cube2.area,a=>a*R_KM*R_KM),h2=Math.PI/2/n2*R_KM;
+  g={cube2,map,area2,h2};dynCache.set(n,g);return g;}
+const dynDepth=a=>{const tU=DYN.zTrans/DYN.vUpper;return a<=tU?DYN.vUpper*a:DYN.zTrans+DYN.vLower*(a-tU);};
+// the deflection (km, negative down) on the half-resolution grid at the world's present time
+function dynTopo(world){const g=dynGrid(world),{cube2,map,area2,h2}=g,N2=cube2.N,nb=cube2.nb,N=world.N,t=world.t,nB=world.slabT.length;
+  if(!world.slab)return{g,F:new Float64Array(N2)};
+  const bins=[];for(let q=0;q<nB;q++){const t0=world.slabT[q];if(!(t0>-1e8))continue;const mid=Math.min(t,t0+C.SLAB_DT/2),d=dynDepth(Math.max(0,t-mid));
+    bins.push({q,d,sig:DYN.sigma0+DYN.sigmaPerKm*d,k:Math.exp(-d/DYN.decayKm)});}
+  bins.sort((a,b)=>b.sig-a.sig);
+  let F=new Float64Array(N2),T=new Float64Array(N2);const m=new Float64Array(N2),varStep=h2*h2/2;
+  // lazy steps (at most half the neighbours' mean) so the kernel does not checkerboard
+  const blur=v=>{let it=v/varStep;while(it>1e-6){const al=Math.min(0.5,it);for(let c=0;c<N2;c++){const s=F[nb[4*c]]+F[nb[4*c+1]]+F[nb[4*c+2]]+F[nb[4*c+3]];T[c]=F[c]+al*(s/4-F[c]);}[F,T]=[T,F];it-=al;}};
+  for(let b=0;b<bins.length;b++){const {q,k}=bins[b];m.fill(0);for(let i=0;i<N;i++){const v=world.slab[q*N+i];if(v)m[map[i]]+=v;}
+    for(let c=0;c<N2;c++)F[c]+=k*m[c]/area2[c];
+    const next=b+1<bins.length?bins[b+1].sig:0;blur(bins[b].sig*bins[b].sig-next*next);}
+  // mass conservation: where slabs sink, return flow rises elsewhere, so the deflection averages zero over the sphere
+  let sm=0,sa=0;for(let c=0;c<N2;c++){sm+=F[c]*area2[c];sa+=area2[c];}const mean=sm/sa;
+  for(let c=0;c<N2;c++)F[c]=-DYN.ampKm*(F[c]-mean);return{g,F};}
+// sample a half-resolution field at a world point (bilinear)
+function dynAt(D,x,y,z,out){const {cube2}=D.g,nb=cube2.nb;cube2.lookupFrac(x,y,z,out);const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty),F=D.F;
+  return(1-ax)*(1-ay)*F[c]+ax*(1-ay)*F[cB]+(1-ax)*ay*F[cC]+ax*ay*F[cD];}
 class Sheet{
   constructor(world,plan,o){
-    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,rateMyr:3,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
+    o=Object.assign({h:50,Ar:3,n:3,ellKm:500,U0:50,S0:35,ero5:0.5,eroExp:1.4,flexKm:40,strengthKm:3,cratonStrength:10,markers:6,markerJitter:1,rateMyr:3,dyn:true,picard:2,marginKm:400,cgTol:1e-4,cgMax:200},o);this.o=o;
     this.world=world;this.plan=plan;this.proj=plan.proj;this.t=0;this.steps=0;this.t0=world.t;
     const h=o.h,[bx0,bx1,by0,by1]=plan.bbox,mg=o.marginKm;
     this.x0=Math.floor((bx0-mg)/h)*h;this.y0=Math.floor((by0-mg)/h)*h;this.nx=Math.ceil((bx1+mg-this.x0)/h);this.ny=Math.ceil((by1+mg-this.y0)/h);
@@ -208,7 +243,7 @@ class Sheet{
     this.wsum=new Float64Array(nc);this.act=new Uint8Array(nc);this.eta=new Float64Array(nc).fill(this.eta0);this.e=new Float64Array(nc).fill(NaN);this.eps=new Float64Array(nc);
     this.u=new Float64Array((nx+1)*ny);this.v=new Float64Array(nx*(ny+1));this.dS=new Float64Array(nc);this.eroded=new Float64Array(nc);this.rockTop=new Uint8Array(nc);
     this.budget={initial:0,arcsHotspots:0,eroded:0,left:0};this.history=[];
-    this.seed();this.budget.initial=this.volume();this.deposit();this.solve();this.elevation();this.stats(0);
+    this.dyn=new Float64Array(nc);this.seed();this.budget.initial=this.volume();this.deposit();this.solve();this.updateDyn();this.elevation();this.stats(0);
     this.ePrev=Float64Array.from(this.e);this.uRate=new Float64Array(nc);
   }
   // markers: m x m per parcel of the object present at t0, one at a random point (a fixed hash) in each of m x m
@@ -364,7 +399,7 @@ class Sheet{
   elevation(){const {nx,ny,o,S,Sref,eref,act,e,dS}=this,nc=nx*ny,sig=1.18*o.flexKm/o.h;
     for(let c=0;c<nc;c++)dS[c]=act[c]?S[c]-Sref[c]:0;
     const F=this.blur(dS,act,sig),lim=o.strengthKm;
-    for(let c=0;c<nc;c++){if(!act[c]){e[c]=NaN;continue;}let rt=ROOT*F[c];const air=ROOT*dS[c];if(rt<air-lim)rt=air-lim;else if(rt>air+lim)rt=air+lim;e[c]=eref[c]+dS[c]-rt;}}
+    for(let c=0;c<nc;c++){if(!act[c]){e[c]=NaN;continue;}let rt=ROOT*F[c];const air=ROOT*dS[c];if(rt<air-lim)rt=air-lim;else if(rt>air+lim)rt=air+lim;e[c]=eref[c]+dS[c]-rt+this.dyn[c];}}
   // separable Gaussian blur of f over cells with mask set (normalized by the mask's own blur)
   blur(f,mask,sig){const {nx,ny}=this,nc=nx*ny,R=Math.max(1,Math.ceil(3*sig)),w=[];for(let k=-R;k<=R;k++)w.push(Math.exp(-k*k/(2*sig*sig)));
     const a=new Float64Array(nc),b=new Float64Array(nc),ma=new Float64Array(nc),mb=new Float64Array(nc);
@@ -402,8 +437,11 @@ class Sheet{
     let vmax=1;for(let k=0;k<this.nm;k++)if(this.mIn[k]){const s=Math.hypot(this.mUx[k],this.mUy[k]);if(s>vmax)vmax=s;}
     const ns=Math.max(1,Math.ceil(dt*vmax/(0.5*this.o.h)));
     for(let s=0;s<ns;s++){this.plateVelocities();this.deposit();this.solve();this.advect(dt/ns);}
-    this.deposit();this.addVolcanism(rec);this.deposit();this.elevation();this.tectonicRate(dt);this.erode(dt);this.deposit();this.elevation();
+    this.deposit();this.addVolcanism(rec);this.deposit();this.updateDyn();this.elevation();this.tectonicRate(dt);this.erode(dt);this.deposit();this.elevation();
     this.ePrev.set(this.e);this.t+=dt;this.steps++;this.stats(dt,ns);}
+  // dynamic topography on the sheet's cells, from L0's slab record now (the mantle frame moves under the map)
+  updateDyn(){if(!this.o.dyn)return;const D=dynTopo(this.world),{nx,ny,o}=this,h=o.h,b=[0,0,0],t=[0,0,0],out=[0,0,0],Qr=this.Qref;this.dynD=D;
+    for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){this.proj.inv(this.x0+(i+.5)*h,this.y0+(j+.5)*h,b);mv(Qr,b[0],b[1],b[2],t);this.dyn[j*nx+i]=dynAt(D,t[0],t[1],t[2],out);}}
   // The present rate of elevation change from tectonics alone (deformation, volcanism and their isostasy; not
   // erosion): this step's change before erosion, averaged over the last rateMyr. The drainage pass applies it.
   tectonicRate(dt){const {e,ePrev,uRate}=this,a=Math.min(1,dt/this.o.rateMyr);
@@ -552,6 +590,6 @@ function basins(sheet,o){
   const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,areic=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;if(closedB[c]===2)areic++;}
   return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,rec,basin,lake,closedB,inlandSea,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2};
+return {Replay,Sheet,Projection,landmassAt,basins,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
 })();
 // ===== L1-END =====

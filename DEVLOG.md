@@ -156,6 +156,10 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
   2. Classifying whole coastal basins by whether any water reaches the sea counted desert hillslopes as draining to the sea when wetter headwaters fed the same basin.
   3. Classifying per cell, by whether the cell's own flow path keeps carrying water to the coast, separates areic desert. Arid land then drains 88–89% inland on two landmasses, semi-arid 19–25%, humid none.
   4. With present tectonic rates in the pass, the sediment-fill rule is consistent again (it failed while tectonics was frozen) and replaces the resolved-depression rule.
+- **Dynamic topography.**
+  - **Zero mean.** The first field only pulled down, so every continent sank by about 200 m on average; it now averages zero, the return flow of the slabs lifting the rest.
+  - **Kernel check.** Against the designed Gaussian it came out too wide (0.69 instead of 0.61 of the depth at one width) for two reasons. The test's grid (417 km cells) was coarser than its 380 km kernel, so the blur grid now has at least 48 cells a face. And full-weight neighbour averaging checkerboards over the few steps a narrow kernel needs; lazy half-steps fixed it (0.603 against 0.607).
+  - **Robustness.** It barely made basins less contingent, which I had predicted. Measuring that properly needed a second metric: outlet shift per land cell, since label agreement penalises every moved divide.
 
 ---
 

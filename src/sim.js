@@ -6,7 +6,7 @@ const ROCK_NAMES=["none","ocean-ridge basalt","hotspot or flood basalt","arc vol
 const FK={NONE:0,THRUST:1,NORMAL:2,STRIKE:3}, FK_NAMES=["none","thrust","normal","strike-slip"];
 const C={OCEAN_T:7,CONT_BASE:33,ISO:0.16,CAP:75,ARC:0.6,ARCW:[0,0.5,0.3,0.2],COLL:0.5,COLLW:[0.35,0.3,0.2,0.15],
   KE:0.03,KD:0.03,VOLC_DECAY:0.02,SED_CONV:5,ARC_CONV:17,COLLAPSE:48,HOT:0.7,CONT_TARGET:0.40,MERGE:180,COLL_LOG:30,SPLIT_TAU:40,VMAX:8,VMIN:0.5,
-  UNIT_MERGE:150,COVER_DEPTH:1,SPEED_TAU:40,FAULT_GAP:10,FAULT_SWITCH:10};
+  UNIT_MERGE:150,SLAB_BINS:25,SLAB_DT:10,SLAB_INBOARD:3,COVER_DEPTH:1,SPEED_TAU:40,FAULT_GAP:10,FAULT_SWITCH:10};
 function mulberry32(a){const f=function(){a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};
   f.getState=()=>a;f.setState=v=>{a=v;};return f;} // state exposed so a world can be saved and restored exactly
 function hashStr(s){let h=1779033703^s.length;for(let i=0;i<s.length;i++){h=Math.imul(h^s.charCodeAt(i),3432918353);h=h<<13|h>>>19;}h=Math.imul(h^h>>>16,2246822507);h=Math.imul(h^h>>>13,3266489909);return(h^h>>>16)>>>0;}
@@ -115,7 +115,11 @@ class World{
     this.wT=new F(N);this.wB=new F(N);this.wS=new F(N);this.wK=new Uint8Array(N);this.wCol=new Int32Array(N);
     this.wR=new Uint8Array(N);this.wRA=new F(N);this.bn=new F(3*N);
     this.elev=new F(N);this.dT=new F(N);this.arcAdd=new F(N);this.arcPlate=new Int16Array(N);this.collAdd=new F(N);this.collPlate=new Int16Array(N);
-    this._cw=[0,0,0,0];this.trench=new F(N);this.gaps=new Int32Array(N);this.rest=new Int32Array(N);
+    this._cw=[0,0,0,0];this.trench=new F(N);
+    // slabs (recording only): oceanic area consumed at trenches, weighted by the slab's age, in 10 Myr bins on the fixed
+    // (mantle) grid, about 300 km beneath the overriding plate; the last SLAB_BINS bins are kept. L1 turns it into
+    // dynamic topography.
+    this.slab=new F(C.SLAB_BINS*N);this.slabT=new Float64Array(C.SLAB_BINS).fill(-1e9);this.gaps=new Int32Array(N);this.rest=new Int32Array(N);
     this.pool=new ColumnPool(Math.ceil(N*1.6));this.fpool=new FaultPool(Math.ceil(N*0.4));
     this.plates=[];this.pairs=new Map();this.pairLoc=new Map();this.collLogged=new Set();this.events=[];this.nEvents=0;this.t=0;this.steps=0;this.targetPlates=o.nPlates;
     this.init(o);
@@ -194,6 +198,7 @@ class World{
       if(!Pl.K[kl]){
         this.deposit(this.arcAdd,this.arcPlate,Pw.id,x,y,z,rx,ry,rz,C.ARC+0.4*Pl.S[kl],C.ARCW,1);
         const d=this.cellRad;this.trench[this.cube.lookup(x-rx*d,y-ry*d,z-rz*d)]=1;
+        {const age=this.t-Pl.B[kl],c=this.cube.lookup(x+rx*d*C.SLAB_INBOARD,y+ry*d*C.SLAB_INBOARD,z+rz*d*C.SLAB_INBOARD);this.slab[this.slabQ*this.N+c]+=this.cube.area[i]*R_KM*R_KM*Math.min(1,Math.sqrt(Math.max(0,age)/80));}
       } else {
         // thickening scales with the share of motion across the boundary: head-on stacks crust, sideways sliding barely does
         const bn=this.bn,nl=Math.hypot(bn[3*i],bn[3*i+1],bn[3*i+2]);
@@ -223,6 +228,7 @@ class World{
     }
     // 2. coverage and overlaps
     nOwner.fill(-1);this.arcAdd.fill(0);this.collAdd.fill(0);
+    {const b=Math.floor(this.t/C.SLAB_DT),q=((b%C.SLAB_BINS)+C.SLAB_BINS)%C.SLAB_BINS;if(this.slabT[q]!==b*C.SLAB_DT){this.slabT[q]=b*C.SLAB_DT;this.slab.fill(0,q*N,(q+1)*N);}this.slabQ=q;}
     const cand=new Int16Array(5);let ng=0;
     for(let i=0;i<N;i++){
       const x=pos[3*i],y=pos[3*i+1],z=pos[3*i+2];
