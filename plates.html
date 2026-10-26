@@ -928,10 +928,13 @@ function planarGrid(nx,ny,dx){const nC=nx*ny,nbr=new Int32Array(8*nC),dist=new F
 // ---------- refined cube-sphere over a set of L0 cells ----------
 // Each L0 cell c in the domain gets a slot s; its r x r children have local index s*r*r + jj*r + ii.
 // Equal-angle subdivision nests exactly, so every fine cell has one parent and positions are analytic.
+// With jitter > 0, each cell's node (used for distances, hence slopes) is displaced within the cell by up to
+// jitter x cell width, by a fixed hash of its global index, so the 8 neighbour directions differ from cell to
+// cell and rivers are not locked to the lattice's 0 and 45 degree directions. pos stays at the cell centre.
 const D8=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]]; // E W N S NE NW SE SW
 function faceDir(f,a,b,t){let x,y,z;switch(f){case 0:x=1;y=a;z=b;break;case 1:x=-1;y=a;z=b;break;case 2:x=a;y=1;z=b;break;case 3:x=a;y=-1;z=b;break;case 4:x=a;y=b;z=1;break;default:x=a;y=b;z=-1;}
   const L=Math.hypot(x,y,z);t[0]=x/L;t[1]=y/L;t[2]=z/L;return t;}
-function buildGrid(n,slots,slotOf,r){
+function buildGrid(n,slots,slotOf,r,jitter){
   const nS=slots.length,rr=r*r,nC=nS*rr,NR=n*r,nn=n*n,q=Math.PI/4,lk=makeLookup(NR),t=[0,0,0];
   const pos=new Float32Array(3*nC),area=new Float32Array(nC),nbr=new Int32Array(8*nC),dist=new Float32Array(8*nC),gid=new Int32Array(nC);
   const dA=(Math.PI/2/NR)**2*R_KM*R_KM,ang=v=>Math.tan(((v+.5)/NR*2-1)*q);
@@ -943,8 +946,13 @@ function buildGrid(n,slots,slotOf,r){
         if(I2>=0&&J2>=0&&I2<NR&&J2<NR){const s2=slotOf[f*nn+((J2/r)|0)*n+((I2/r)|0)];m=s2<0?-1:s2*rr+(J2%r)*r+(I2%r);}
         else{faceDir(f,ang(I2),ang(J2),t);m=localOf(lk(t[0],t[1],t[2]));if(m===l)m=-1;}
         nbr[8*l+k]=m;}}}
+  let node=pos;
+  if(jitter>0){node=new Float32Array(3*nC);
+    for(let l=0;l<nC;l++){const g=gid[l],f=(g/(NR*NR))|0,rem=g-f*NR*NR,J=(rem/NR)|0,I=rem-J*NR;
+      let h=Math.imul(g^(g>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);h^=h>>>16;const u=(h&0xffff)/65536-0.5,v=(h>>>16)/65536-0.5;
+      faceDir(f,ang(I+2*jitter*u),ang(J+2*jitter*v),t);node[3*l]=t[0];node[3*l+1]=t[1];node[3*l+2]=t[2];}}
   for(let l=0;l<nC;l++)for(let k=0;k<8;k++){const m=nbr[8*l+k];if(m<0)continue;
-    dist[8*l+k]=Math.hypot(pos[3*l]-pos[3*m],pos[3*l+1]-pos[3*m+1],pos[3*l+2]-pos[3*m+2])*R_KM;}
+    dist[8*l+k]=Math.hypot(node[3*l]-node[3*m],node[3*l+1]-node[3*m+1],node[3*l+2]-node[3*m+2])*R_KM;}
   return{n,r,rr,nS,nC,NR,pos,area,nbr,dist,gid,lookup:lk,localOf};
 }
 
@@ -964,7 +972,7 @@ function select(world,cell,margin){
 
 class Region{
   constructor(world,o){
-    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,window:100},o);this.o=o;this.world=world;
+    o=Object.assign({r:8,margin:3,K:0.1,m:0.5,flexKm:40,flowKm2PerMyr:300,strengthKm:3,jitter:0.4,window:100},o);this.o=o;this.world=world;
     const sel=select(world,o.cell,o.margin);if(!sel)throw new Error("not a continental cell");
     const n=world.n,N=world.N,cube=world.cube,nb=cube.nb,P=world.plates[sel.plate],t0=world.t;
     this.t0=t0;this.t=0;this.steps=0;this.plate0=P.id;this.Q0=Float64Array.from(P.Q);
@@ -978,7 +986,7 @@ class Region{
     this.quad=new Int32Array(12*nS);
     for(let s=0;s<nS;s++){const c=slots[s];for(let qd=0;qd<4;qd++){const cB=nb[4*c+(qd&1?1:0)],cC=nb[4*c+(qd&2?3:2)],cD=nb[4*cB+(qd&2?3:2)];
       this.quad[12*s+3*qd]=slotOf[cB];this.quad[12*s+3*qd+1]=slotOf[cC];this.quad[12*s+3*qd+2]=slotOf[cD];}}
-    const r=o.r,G=this.G=buildGrid(n,slots,slotOf,r),nC=G.nC,rr=r*r;
+    const r=o.r,G=this.G=buildGrid(n,slots,slotOf,r,o.jitter),nC=G.nC,rr=r*r;
     this.subQ=new Uint8Array(rr);this.subW=new Float32Array(2*rr);
     for(let jj=0;jj<r;jj++)for(let ii=0;ii<r;ii++){const tx=(ii+.5)/r-.5,ty=(jj+.5)/r-.5,sb=jj*r+ii;this.subQ[sb]=(tx<0?1:0)+(ty<0?2:0);this.subW[2*sb]=Math.abs(tx);this.subW[2*sb+1]=Math.abs(ty);}
     // flexure and crustal flow run on a coarser nested grid (b x b fine cells per mid cell), then are interpolated back
@@ -1061,28 +1069,32 @@ class Region{
     for(let l=0;l<nC;l++){if(!alive[l])continue;let rt=ROOT*F[l];
       const air=ROOT*dT[l];if(rt<air-lim)rt=air-lim;else if(rt>air+lim)rt=air+lim;root[l]=rt;e[l]=cont[l]?e0[l]+dT[l]-rt:eOcean[l];}
   }
-  // Lower-crustal flow: thick crust spreads sideways. At L0's scale its thickness diffusion stands in for this;
+  // Lower-crustal flow: thickened crust spreads sideways. At L0's scale its thickness diffusion stands in for this;
   // here it acts only at long wavelengths (on the mid grid), so it relaxes collision piles without filling valleys.
+  // It diffuses the thickness change since the start, not the thickness itself: inherited contrasts (thin rifted
+  // margins against a thick interior) are part of the equilibrium state, as in flexure(). Diffusing total
+  // thickness pumped interior crust out to the margins and raised a ring of islands along the shelf edge.
   // Fluxes between mid cells are symmetric (volume-conserving); interpolating the change back to fine cells is
   // not exactly so, and that residue is booked as budget.flowResidual.
   crustFlow(dt){
     const kappa=this.o.flowKm2PerMyr;if(!(kappa>0))return;
-    const {G,T,cont,alive}=this,nC=G.nC,X=this.midBuf("_FX"),W=this.midBuf("_FW"),V=this.midBuf("_FV"),nb=this.Gm.nbr,mC=X.length,dx=this.world.cellKm/this.rf;
+    const {G,T,T0,cont,alive}=this,nC=G.nC,X=this.midBuf("_FX"),W=this.midBuf("_FW"),V=this.midBuf("_FV"),Tm=this.midBuf("_FT"),nb=this.Gm.nbr,mC=X.length,dx=this.world.cellKm/this.rf;
     const use=this._cu||(this._cu=new Uint8Array(nC));for(let l=0;l<nC;l++)use[l]=alive[l]&&cont[l]?1:0;
-    this.toMid(T,use,X,W);const X0=this.midBuf("_FX0");X0.set(X);
+    const dT=this.fineBuf("_FdT");for(let l=0;l<nC;l++)dT[l]=T[l]-T0[l];
+    this.toMid(T,use,Tm,W);this.toMid(dT,use,X,W);const X0=this.midBuf("_FX0");X0.set(X);
     // channel flux grows with the cube of channel thickness (Poiseuille flow), so hot thick crust spreads much faster;
     // edge coefficients are fixed for the step (thickness barely changes within it), then explicit substeps
     const eI=this._eI||(this._eI=new Int32Array(4*mC)),eJ=this._eJ||(this._eJ=new Int32Array(4*mC)),eC=this._eC||(this._eC=new Float64Array(4*mC));
     let ne=0,cmax=0;
     for(let m=0;m<mC;m++){if(!(W[m]>0))continue;for(let k=0;k<4;k++){const j=nb[8*m+k];if(j<=m||!(W[j]>0))continue;
-      const t=(X[m]+X[j])/(2*C.CONT_BASE),c=kappa*t*t*t;eI[ne]=m;eJ[ne]=j;eC[ne]=c*Math.min(W[m],W[j]);ne++;
+      const t=(Tm[m]+Tm[j])/(2*C.CONT_BASE),c=kappa*t*t*t;eI[ne]=m;eJ[ne]=j;eC[ne]=c*Math.min(W[m],W[j]);ne++;
       if(c>cmax)cmax=c;}}
     const D=cmax*dt/(dx*dx),nsub=Math.max(1,Math.ceil(D/0.2)),h=dt/nsub/(dx*dx);
     for(let it=0;it<nsub;it++){V.fill(0);
       for(let q=0;q<ne;q++){const m=eI[q],j=eJ[q],f=h*eC[q]*(X[j]-X[m]);V[m]+=f;V[j]-=f;}
       for(let m=0;m<mC;m++)if(W[m]>0)X[m]+=V[m]/W[m];}
     for(let m=0;m<mC;m++)X[m]-=X0[m];
-    const dT=this.fromMid(X,W,use,this.fineBuf("_F"));let res=0;for(let l=0;l<nC;l++){if(!use[l])continue;T[l]+=dT[l];res+=dT[l]*G.area[l];}
+    const add=this.fromMid(X,W,use,this.fineBuf("_F"));let res=0;for(let l=0;l<nC;l++){if(!use[l])continue;T[l]+=add[l];res+=add[l]*G.area[l];}
     this.budget.flowResidual+=res;
   }
   // Outlets are sea: ocean cells and drowned continental cells. A land edge of the domain (consumed parcels, or crust

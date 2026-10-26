@@ -107,6 +107,9 @@ A recurring lesson: **measure before tuning.** Several problems had a different 
 - **A checkerboard of tiny seas.** A parcel momentarily absent from its plate was searched for on every descendant plate, including ones split off long before t0, whose grids had refilled the same body index with unrelated crust. Parcels jumped plates and every jump opened a "rift". Splits are now caught in the step they happen. (A majority filter tried first could not fix a checkerboard: it just inverted it.)
 - **Terraced shading when zoomed.** Pixel-space differences over nearest-sampled cells step at every cell edge. Shading is now per cell, from a least-squares plane through the land neighbours.
 
+- **A ring of islands along the shelf edge** (reported from the page: hundreds of metres to 2 km tall, with no tectonic input). Two guesses were wrong: the fractal noise (±100 m at most) and arc input (none there). Instrumenting perimeter cells showed lower-crustal flow had added 12–26 km of crust to them: it diffused *total* thickness, so the thin inherited rifted margin read as a gradient to flatten, crust was pumped outward, piled against the static ocean (no flux across), and the narrow strip was then held up flexurally. Flow now diffuses the thickness change since t0, as flexure already did; emerged shelf cells fell from 2,244 to 139, all but 2 of them under real tectonic input.
+- **Lattice-aligned rivers.** Node jitter (above) cut the share of channel length in straight runs of 4+ identical steps from 53% to 29%.
+
 **Speed:** the first version took ~430 ms per coupled step at 483k cells. Per-cell closures in the coarse↔fine transfers (flexure, crustal flow) were replaced by precomputed stencils, crustal-flow edge coefficients are computed once per step, and Priority-Flood uses the Zhou et al. (2016) variant (bit-identical filled surface, receivers and areas compared with the plain algorithm). Now ~250 ms in Chromium.
 
 ---

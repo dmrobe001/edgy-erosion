@@ -287,7 +287,7 @@ L1 follows the plan agreed when it was started: rather than forcing a refined co
 ### 5.1 Domain, grid and lineage
 
 - **Domain:** the connected continental crust of the picked cell's plate, in that plate's body frame, plus every cell of the same plate within three L0 cells (the ocean margin, which is base level).
-- **Grid:** the same equal-angle cube-sphere, each L0 cell split r × r (r = 4, 8 or 16; ~13 km at r = 8 on the medium L0 grid). Equal-angle subdivision nests exactly, so each fine cell has exactly one parent and positions, areas and neighbours are analytic. Fine cell index = slot × r² + jj × r + ii, where slot numbers the domain's L0 cells. Neighbours are 8-connected; across cube faces they come from the fine-grid lookup.
+- **Grid:** the same equal-angle cube-sphere, each L0 cell split r × r (r = 4, 8 or 16; ~13 km at r = 8 on the medium L0 grid). Equal-angle subdivision nests exactly, so each fine cell has exactly one parent and positions, areas and neighbours are analytic. Fine cell index = slot × r² + jj × r + ii, where slot numbers the domain's L0 cells. Neighbours are 8-connected; across cube faces they come from the fine-grid lookup. Each cell's *node* (used for distances, hence slopes) is jittered within the cell by up to 0.4 cell widths, by a fixed hash of its global index, so neighbour directions vary from cell to cell; areas, indexing and drawing stay on the regular grid.
 - **Lineage:** each L0 parcel (slot) is followed as L0 runs. Through a weld it is mapped into the surviving plate's frame. A split is caught in the step it happens: the new plate holds exactly the parcels that moved, at the same body indices. A parcel whose body cell is empty afterwards was consumed; its fine cells leave the domain. Where neighbouring parcels end up on different plates (judged on a majority-filtered plate map, so single flips from L0's resampling noise don't count), the cells along the break become sea.
 
 ### 5.2 Each step
@@ -295,7 +295,7 @@ L1 follows the plan agreed when it was started: rather than forcing a refined co
 One L1 step per L0 step (Δt ≈ 0.9 Myr at the medium grid):
 
 1. **L0 steps** with a recorder on: the thickness each fixed cell gains from arcs, collisions, hotspots and orogenic collapse (not diffusion or erosion, which L1 replaces). These are mapped onto the domain's parcels, smoothed once (volume-conserving) against resampling noise, and interpolated bilinearly onto fine cells as a thickening rate. Thickening that lands on (static) ocean cells is booked, not applied.
-2. **Lower-crustal flow:** thick crust spreads sideways, as a diffusion of thickness with coefficient 300 km²/Myr × (T / 33 km)³ (channel flux grows with the cube of channel thickness). It runs on a coarser nested grid (~26 km), so it relaxes collision piles without filling river valleys.
+2. **Lower-crustal flow:** thickened crust spreads sideways, as a diffusion of the thickness *change since t0* (inherited contrasts such as thin rifted margins are part of the equilibrium state) with coefficient 300 km²/Myr × (T / 33 km)³ (channel flux grows with the cube of channel thickness). It runs on a coarser nested grid (~26 km), so it relaxes collision piles without filling river valleys.
 3. **Thickness cap** at L0's 75 km.
 4. **Elevation** from thickness by flexural isostasy applied to changes since t0 (the inherited state is taken as in equilibrium): e = e₀ + ΔT − 0.84·F[ΔT], with F a Gaussian of width 1.18 × flexural length (40 km), which matches the half-power point of an elastic plate's response 1/(1 + (kα)⁴). Long wavelengths follow L0's Airy relation; narrow loads are held up by the plate, but by no more than 3 km away from local balance (the plate yields).
 5. **Routing:** sea cells (ocean and drowned continent) are outlets; a land edge of the domain is a closed boundary (drainage divide). Depressions are filled with Priority-Flood+ε (Barnes et al. 2014) in the Zhou et al. (2016) variant, receivers are steepest descent (D8) on the filled surface, and land the flood can't reach (cut off by consumed parcels) becomes an inland basin draining to its lowest cell.
@@ -310,7 +310,8 @@ The crust budget (continental crust in the domain) tracks the initial volume, te
 Measured (seed "genesis", Node.js unless stated):
 
 - **Solver:** on a planar grid with uniform uplift, the steady state satisfies S·A^m = U/K at every cell to 5 × 10⁻¹⁵, so the slope–area exponent is exactly −m.
-- **Networks:** Hack's law (length ∝ area^h) comes out at h ≈ 0.53–0.54 with no tuning (Earth's rivers: roughly 0.5–0.6).
+- **Networks:** Hack's law (length ∝ area^h) comes out at h ≈ 0.56–0.57 at ~13 km cells with no tuning (Earth's rivers: roughly 0.5–0.6); the coarse test setting gives about 0.47.
+- **Lattice alignment** (100 Myr, ~13 km cells): without node jitter, 53% of channel length lies in straight runs of four or more identical D8 steps; with jitter 0.4, 29%. Over 6-cell reaches, channel directions are close to isotropic either way (the bin nearest a lattice direction holds 14% without jitter, 12% with, against 11% for uniform), so the lattice look was at the scale of single steps.
 - **Choosing K.** Over 100 Myr on one continent (n = 64, r = 4), mean land elevation and how far L1's coarse-grained crust drifts from L0's own:
 
   | K | L1 mean elevation, start → 100 Myr | L0 over the same parcels | mean / rms thickness difference (L1 − L0) |
