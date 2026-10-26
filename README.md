@@ -390,13 +390,14 @@ Built so far: section 5. The current plan, organised around the L1→L2 handoff 
 **A. L1 work, in order**
 1. ~~**Finite strain per marker.**~~ Done (section 5.2): total horizontal shortening, its direction and vertical-axis rotation, with a map view.
 2. ~~**Closed basins.**~~ Done (section 5.3). A water balance on the depressions the drainage pass finds, with a crude aridity field (latitude belts plus a rain shadow from the sheet's topography and a prevailing wind): a hollow overflows only if inflow beats evaporation over its lake. This decides basins that drain inland versus to the sea.
-3. **Erodibility test (a decision gate).** Compare basin maps (adjusted Rand index) with uniform K against K driven by variables that actually predict rock strength:
-   - rock type;
-   - consolidation with age (young sediment soft, old lithified: ×10–100);
-   - fault damage from L0's fault records (crushed zones erode fast, which also gives fault-guided valleys);
-   - metamorphic grade.
+3. ~~**Erodibility test (a decision gate).**~~ Done; **detailed erodibility goes to L2.** `tests/exp_erodibility.js` compares L1's basin map under uniform K with K from:
+   - rock type (×0.9–2.2 between the 5th and 95th percentiles);
+   - type plus consolidation with age and fault damage from L0's fault records (×0.5–3.5, 40× overall);
+   - the same squared (×0.25–12, 1,600× overall).
 
-   Add a threshold hillslope angle as a stand-in for landsliding, so strong contrasts don't build walls. If grounded contrasts of ×100 or more still don't move the major basins, detailed erodibility belongs to L2. Contrasts from type labels alone stay modest (×3–10): within-class variation exceeds the difference between classes, and contacts are blocky at L0's resolution.
+   On the 1 Gyr test landmass, the adjusted Rand index against the uniform-K map (1 = identical) is 0.98, 0.92 and 0.89; switching off the climate weighting gives 0.94. Re-drawing only the synthetic fine relief with another seed gives 0.35 (two seeds), and the same within the major basins.
+
+   So L1's lowland drainage divides are set mainly by relief at scales the sheet cannot resolve, not by erodibility. That relief is not too loud: its 53 m RMS on lowlands continues the sheet's own spectrum (75 m at 100–200 km, 109 m at 200–400 km). Lowland divides are genuinely contingent; coasts and range crests are what L1 determines. The `Kmul` and `salt` options of the drainage pass remain for such tests.
 4. **Glacial overprint (optional).** Gated by a world setting: whether there was recent ice, and how long ago it left. Only what is regional and permanent: the glaciated-region mask with its age, river diversions, large troughs and lake basins. It shares the lake logic of item 2 and gets the same basin-map test. No glacial buzzsaw: it is indistinguishable from older mountains.
 
 **B. The L1→L2 handoff**
