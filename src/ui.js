@@ -211,7 +211,7 @@ function build(){
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
   const t=world.t;$("clock").innerHTML=t>=1000?fmtT(t)+"<small>billion years</small>":fmtT(t)+"<small>million years</small>";
-  $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";
+  $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";$("sDxDt").textContent=`${Math.round(world.cellKm)} km / ${+world.dt.toFixed(2)} Myr`;
   $("sMs").textContent=msEma?msEma.toFixed(1)+" ms":"–";
   const ev=world.events,last=world._lastN||0;
   if(ev.length&&ev[ev.length-1].n>last){
@@ -514,6 +514,7 @@ function l1Stats(){const S=l1St;if(!S||!S.sh)return;const sh=S.sh,h=sh.history[s
   $("l1stats").innerHTML=`<div>L1 time<b class="num">${sh.t.toFixed(1)} / ${S.plan.window.toFixed(1)} Myr</b></div><div>Land<b class="num">${(h.landKm2/1e6).toFixed(1)} M km²</b></div>
     <div>Mean / max elevation<b class="num">${h.meanElevKm.toFixed(2)} / ${h.maxElevKm.toFixed(1)} km</b></div><div>At start<b class="num">${h0.meanElevKm.toFixed(2)} / ${h0.maxElevKm.toFixed(1)} km</b></div>
     <div>Most thickening<b class="num">${h.maxThickeningKm.toFixed(1)} km</b></div><div>Peak strain rate<b class="num">${h.maxStrainRate.toFixed(2)} /Myr</b></div><div>Most shortening<b class="num">${l1MaxShort(sh)}%</b></div>
+    <div>Sheet dx / dt<b class="num">${sh.o.h} km / ${+(sh.world.dt/Math.max(1,h.substeps||1)).toFixed(2)} Myr</b></div>${S.bs?`<div>Drainage pass dx / dt<b class="num">${S.bs.h} km / ${+(S.bs.myr/(S.bs.steps||5)).toFixed(2)} Myr</b></div>`:""}
     <div>Compute per step<b class="num">${l1Ms?Math.round(l1Ms)+" ms":"–"}</b></div><div>Markers<b class="num">${sh.nm.toLocaleString("en-US")}</b></div>`;
   let html=`<div><b>Crust budget</b>: started ${M(b.initial)}; ${M(b.arcsHotspots)} added by arcs and hotspots, ${M(b.eroded)} eroded, ${M(b.left)} carried off the grid; now ${M(bal.now)}, off by ${(Math.abs(bal.error)*100).toExponential(1)}%.</div>`;
   if(S.bs){const bs=S.bs,sz=l1BasinSizes(),min=l1BasinMin(),big=[...sz.values()].filter(v=>v>=min).sort((a,b2)=>b2-a),cell=bs.h*bs.h,inBig=big.reduce((a,v)=>a+v,0);

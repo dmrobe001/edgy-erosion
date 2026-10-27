@@ -645,7 +645,7 @@ function basins(sheet,o){
     for(let c=0;c<nc;c++){if(!land[c])continue;const t=basin[c];if(!out[t]&&lake[t]>=2)closedB[c]=1;else if(dead[c])closedB[c]=2;}}
   for(let c=0;c<nc;c++)if(land[c]){const id=basin[c];size.set(id,(size.get(id)||0)+1);}
   const sizes=[...size.values()].sort((a,b2)=>b2-a);let inland=0,areic=0,nl=0;for(let c=0;c<nc;c++)if(land[c]){nl++;if(closedB[c])inland++;if(closedB[c]===2)areic++;}
-  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,qOut,rec,basin,lake,closedB,inlandSea,exitOf,lakeVol,sedIn,K:o.K,m:o.m,myr:o.myr,relief:o.relief,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
+  return{nx,ny,h,x0:sheet.x0,y0:sheet.y0,e,land,U,A,Q,qOut,rec,basin,lake,closedB,inlandSea,exitOf,lakeVol,sedIn,K:o.K,m:o.m,myr:o.myr,steps:o.steps,relief:o.relief,climate:cl,nClosed,nDry,nFilled,nSea,inlandFrac:inland/(nl||1),areicFrac:areic/(nl||1),nBasins:size.size,sizes,landCells:nl,S};
 }
 // ---------- the L1 -> L2 handoff ----------
 // L1 hands L2 its landmass cut into tiles, with what L2 needs to refine each tile on its own:
