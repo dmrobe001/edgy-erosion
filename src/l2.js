@@ -302,7 +302,136 @@ function boundary(R,B,o){
       if(ci<0||cj<0||ci>=nx||cj>=ny){l0[q]=-2;continue;}const c=cj*nx+ci;if(i===0||j===0||i===nX-1||j===nY-1||z[q]<=0||sink(c))l0[q]=lab1[c];}
     return{z,lab:flood(z,nX,nY,l0).lab};}
   return{o,dx,f,lab1,tny,refine,refineSteps,putGraph,ensure:graph,workerInputs,full,graphs,stats};}
-return {relief,reliefInputs,reliefFrom,boundary,tileMaker,flood,floodSeeded,tileGraph,l1Labels,makeGrad2,gblur};
+// ---------- the L2 pass ----------
+// Erodibility from rock, per sheet cell (as tests/exp_erodibility.js grounded it): a factor by the rock at the surface
+// (sediments weak, cratonic basement strong), young sediments weaker still (up to 10x when fresh, e-folding over
+// 30 Myr), log-averaged over the cell's markers by volume and scaled to a geometric mean of 1 on land.
+const KTYPE=[1,0.7,0.7,1.5,0.5,0.7,3,3]; // none, ocean basalt, hotspot basalt, arc, craton, orogen, shelf, clastic
+function erodibility(sheet){const {nx,ny,o}=sheet,h=o.h,nc=nx*ny,s=new Float64Array(nc),ws=new Float64Array(nc),t=sheet.world.t,R=SIM.ROCK;
+  for(let k=0;k<sheet.nm;k++){if(!sheet.mIn[k])continue;const col=sheet.mCol[k];if(!col.length)continue;const u=col[col.length-1],i=Math.floor((sheet.mx[k]-sheet.x0)/h),j=Math.floor((sheet.my[k]-sheet.y0)/h),c=j*nx+i;
+    const young=u[0]===R.SHELF||u[0]===R.CLASTIC?1+9*Math.exp(-(t-u[1])/30):1,v=sheet.mS[k]*sheet.mA[k];s[c]+=v*Math.log((KTYPE[u[0]]||1)*young);ws[c]+=v;}
+  let g=0,n=0;for(let c=0;c<nc;c++)if(ws[c]>0&&sheet.act[c]&&sheet.e[c]>0){g+=s[c]/ws[c];n++;}g/=n||1;
+  const lnK=new Float64Array(nc);for(let c=0;c<nc;c++)lnK[c]=ws[c]>0?s[c]/ws[c]-g:0;
+  return{lnK,nx,ny,h,x0:sheet.x0,y0:sheet.y0};}
+// node positions jittered within their cells by a fixed hash of the global point index (as L1's drainage pass), so
+// steepest descent is not locked to the grid's 0 and 45 degree directions
+function jit(gx,gy,salt){let h=Math.imul(gx,0x27d4eb2d)^Math.imul(gy,0x165667b1)^salt;h=Math.imul(h^(h>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);h^=h>>>16;return[(h&0xffff)/65536-0.5,(h>>>16)/65536-0.5];}
+// The L2 pass on a selection whose outline is burnt in (bd: its boundary, ref: refine's result): landscape evolution at
+// 500 m for `myr` at present rates, a generator yielding after each step.
+// - Domain: the selected land points. Outlets: sea (land below sea level included) at sea level, and L1's inland sinks
+//   (lakes with no outlet, dry lake floors, rivers' dry ends) at their own height, as in the burn-in. The rest of the
+//   outline is a water divide held fixed.
+// - Each step: uplift at L1's present tectonic rate; routing (priority flood with an epsilon gradient, then steepest
+//   descent between jittered nodes); discharge, drainage area weighted by L1's runoff over its land mean; incision by
+//   stream power, implicit, n = 1: dh/dt = U - K k_rock A_w^m S (Braun and Willett 2013), K and m as L1's pass. A point
+//   lower than its receiver's new height (in a filled depression) is left alone.
+// - No hillslope diffusion: at 0.001-0.01 m^2/yr it changes a 500 m cell by D t / dx^2 = 0.4-4% of its relief in
+//   10 Myr; hillslopes are L3's.
+// - Depressions, as at L1: one its catchment's sediment can fill within the run (the run's incision plus background
+//   denudation, bgKmMyr) becomes a flat the water crosses; the others stay lakes.
+// - Then L1's scale is restored: the run's net change, averaged over each L1 cell, is interpolated (as the relief's
+//   base) and removed, so L2 changes only the band it owns. Its size before removal is reported.
+// Arrays hold only the points that matter (selected land and the outlets beside it), indexed through the box.
+function* runPass(R,B,bd,sel,ref,kin,o){
+  o=Object.assign({myr:2,dt:0.25,K:0.1,m:0.5,jitter:0.4,eps:1e-6,salt:0,channelKm2:1,bgKmMyr:0.02},o);
+  const t0=Date.now(),{nx,ny,h,land,lake}=B,f=bd.f,dx=bd.dx,lab1=bd.lab1,inS=new Set(sel.basins),cA=dx*dx;
+  // the box: L1 cells holding selected points, and a cell around
+  let i0=1e9,i1=-1,j0=1e9,j1=-1;
+  for(let c=0;c<nx*ny;c++){const L=ref.cells.get(c);let has=!L&&inS.has(lab1[c]);if(L)for(let q=0;q<L.length;q++)if(inS.has(L[q])){has=true;break;}
+    if(!has)continue;const i=c%nx,j=(c/nx)|0;if(i<i0)i0=i;if(i>i1)i1=i;if(j<j0)j0=j;if(j>j1)j1=j;}
+  i0=Math.max(0,i0-1);j0=Math.max(0,j0-1);i1=Math.min(nx-1,i1+1);j1=Math.min(ny-1,j1+1);
+  const W=(i1-i0+1)*f,H=(j1-j0+1)*f,gx0=i0*f,gy0=j0*f,X0=B.x0+i0*h,Y0=B.y0+j0*h;
+  const gxOf=q=>q%W,gyOf=q=>(q/W)|0,px=q=>X0+(q%W+.5)*dx,py=q=>Y0+(((q/W)|0)+.5)*dx,cellOf=q=>(j0+((((q/W)|0)/f)|0))*nx+i0+(((q%W)/f)|0);
+  const sink=c=>land[c]&&lake&&lake[c]>=2,T=bd.o.T,TW=T*f;
+  const zAt=q=>{const GX=gx0+q%W,GY=gy0+((q/W)|0),g=bd.graphs.get(Math.floor(GX/TW)*bd.tny+Math.floor(GY/TW));return g?g.z[(GY%TW)*TW+GX%TW]:R.z(px(q),py(q),R.o.lamMinKm);};
+  // selected land points, then the outlets beside them; idx maps a box point to its index here (or -1)
+  const idx=new Int32Array(W*H).fill(-1),pts=[],kd=[],zz=[];
+  // (yielding every 32 rows: setting up a large selection takes seconds)
+  for(let q=0;q<W*H;q++){if(q%(32*W)===0)yield{step:0,steps:0,setup:q/(W*H)};if(!ref.inside(px(q),py(q)))continue;const zq=zAt(q),c=cellOf(q);if(zq<=0||sink(c))continue;idx[q]=pts.length;pts.push(q);kd.push(1);zz.push(zq);}
+  const nAct0=pts.length;
+  for(let k=0;k<nAct0;k++){const q=pts[k],i=q%W,j=(q/W)|0;for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I<0||J<0||I>=W||J>=H)continue;const p=J*W+I;if(idx[p]>=0||idx[p]===-2)continue;
+    const zp=zAt(p),c=cellOf(p);if(zp<=0||sink(c)){idx[p]=pts.length;pts.push(p);kd.push(2);zz.push(zp);}else idx[p]=-2;}}
+  for(let q=0;q<W*H;q++)if(idx[q]===-2)idx[q]=-1;
+  const n=pts.length,kind=Uint8Array.from(kd),z=Float32Array.from(zz),z0=Float32Array.from(zz),base=k=>z[k]<=0?0:z[k];
+  // neighbours (8, as indices here, -1 none) and the jittered distances to them
+  const D8=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,1],[1,-1],[-1,-1]],nb=new Int32Array(8*n),nd=new Float32Array(8*n),jx=new Float32Array(n),jy=new Float32Array(n);
+  for(let k=0;k<n;k++){const [a,b]=jit(gx0+pts[k]%W,gy0+((pts[k]/W)|0),o.salt);jx[k]=2*o.jitter*a;jy[k]=2*o.jitter*b;}
+  for(let k=0;k<n;k++){const q=pts[k],i=q%W,j=(q/W)|0;for(let d=0;d<8;d++){const [di,dj]=D8[d],I=i+di,J=j+dj,m=I<0||J<0||I>=W||J>=H?-1:idx[J*W+I];nb[8*k+d]=m;if(m>=0)nd[8*k+d]=dx*Math.hypot(di+jx[m]-jx[k],dj+jy[m]-jy[k]);}}
+  yield{step:0,steps:0,setup:true};
+  // inputs per selected point: uplift (L1's present tectonic rate), runoff weight (L1's climate over its land mean),
+  // erodibility (rock; log-interpolated from the sheet's cells)
+  const bil=(F,x,y)=>{const gx=(x-B.x0)/h-0.5,gy=(y-B.y0)/h-0.5,i=Math.floor(gx),j=Math.floor(gy),tx=gx-i,ty=gy-j,at=(I,J)=>F[Math.max(0,Math.min(ny-1,J))*nx+Math.max(0,Math.min(nx-1,I))];
+    return(1-tx)*(1-ty)*at(i,j)+tx*(1-ty)*at(i+1,j)+(1-tx)*ty*at(i,j+1)+tx*ty*at(i+1,j+1);};
+  const cl=B.climate;let mr=1;if(cl){let s2=0,k2=0;for(let c=0;c<nx*ny;c++)if(land[c]){s2+=cl.R[c];k2++;}mr=s2/(k2||1)||1;}
+  const kAt=(x,y)=>{const gx=(x-kin.x0)/kin.h-0.5,gy=(y-kin.y0)/kin.h-0.5,i=Math.floor(gx),j=Math.floor(gy),tx=gx-i,ty=gy-j,at=(I,J)=>kin.lnK[Math.max(0,Math.min(kin.ny-1,J))*kin.nx+Math.max(0,Math.min(kin.nx-1,I))];
+    return Math.exp((1-tx)*(1-ty)*at(i,j)+tx*(1-ty)*at(i+1,j)+(1-tx)*ty*at(i,j+1)+tx*ty*at(i+1,j+1));};
+  const U=new Float32Array(n),wgt=new Float32Array(n).fill(1),Kp=new Float32Array(n),inc=new Float32Array(n);
+  for(let k=0;k<nAct0;k++){const x=px(pts[k]),y=py(pts[k]);U[k]=B.U?bil(B.U,x,y):0;if(cl)wgt[k]=Math.max(0,bil(cl.R,x,y))/mr;Kp[k]=o.K*kAt(x,y);}
+  const fz=new Float64Array(n),rec=new Int32Array(n),rlen=new Float32Array(n),stack=new Int32Array(n),A=new Float64Array(n),done=new Uint8Array(n),pushed=new Uint8Array(n),hp=new L1.Heap(8*n+8);
+  let ns=0,nAct=nAct0,firstRec=null;
+  // routing: priority flood from the outlets (epsilon gradient: every point drains), receivers by steepest descent on
+  // the filled surface between jittered nodes, the stack (outlets first) and discharge-weighted area
+  function route(){done.fill(0);pushed.fill(0);hp.n=0;
+    for(let k=0;k<n;k++){rec[k]=-1;if(kind[k]===2){fz[k]=base(k);pushed[k]=1;hp.push(k,fz[k]);}}
+    let left=nAct;
+    for(;;){while(hp.n){const k=hp.pop();if(done[k])continue;done[k]=1;if(kind[k]===1)left--;
+        for(let d=0;d<8;d++){const m=nb[8*k+d];if(m<0||kind[m]!==1||pushed[m])continue;fz[m]=Math.max(z[m],fz[k]+o.eps);pushed[m]=1;hp.push(m,fz[m]);}}
+      // points no outlet reaches (cut off by the fixed divide): their lowest point becomes a sink
+      if(left<=0)break;let lo=-1;for(let k=0;k<n;k++)if(kind[k]===1&&!done[k]&&(lo<0||z[k]<z[lo]))lo=k;if(lo<0)break;kind[lo]=2;nAct--;left--;fz[lo]=z[lo];pushed[lo]=1;hp.push(lo,fz[lo]);}
+    for(let k=0;k<n;k++){if(kind[k]!==1)continue;let best=-1,bs=0,bl=0;
+      for(let d=0;d<8;d++){const m=nb[8*k+d];if(m<0||!kind[m])continue;const fm=kind[m]===2?base(m):fz[m];if(fm>=fz[k])continue;const L=nd[8*k+d],sl=(fz[k]-fm)/L;if(sl>bs){bs=sl;best=m;bl=L;}}
+      rec[k]=best;rlen[k]=bl;}
+    const cnt=new Int32Array(n+1);for(let k=0;k<n;k++)if(kind[k]===1&&rec[k]>=0)cnt[rec[k]+1]++;for(let k=0;k<n;k++)cnt[k+1]+=cnt[k];
+    const don=new Int32Array(cnt[n]),fp=cnt.slice(0,n);for(let k=0;k<n;k++)if(kind[k]===1&&rec[k]>=0)don[fp[rec[k]]++]=k;
+    ns=0;for(let k=0;k<n;k++)if(kind[k]===2)stack[ns++]=k;for(let s2=0;s2<ns;s2++){const k=stack[s2];for(let p=cnt[k];p<cnt[k+1];p++)stack[ns++]=don[p];}
+    A.fill(0);for(let s2=ns-1;s2>=0;s2--){const k=stack[s2];if(kind[k]!==1)continue;A[k]+=cA*wgt[k];const r=rec[k];if(r>=0)A[r]+=A[k];}}
+  const steps=Math.max(1,Math.round(o.myr/o.dt)),dt=o.myr/steps;
+  for(let s2=0;s2<steps;s2++){
+    for(let k=0;k<n;k++)if(kind[k]===1)z[k]+=U[k]*dt;
+    route();if(!firstRec)firstRec=Int32Array.from(rec);
+    // implicit stream power, receivers first
+    for(let s3=0;s3<ns;s3++){const k=stack[s3];if(kind[k]!==1)continue;const r=rec[k];if(r<0)continue;const zr=kind[r]===2?base(r):z[r];if(z[k]<=zr)continue;
+      const F=Kp[k]*Math.pow(A[k],o.m)*dt/rlen[k],zn=(z[k]+F*zr)/(1+F);inc[k]+=z[k]-zn;z[k]=zn;}
+    yield{step:s2+1,steps};}
+  route();let changed=0;for(let k=0;k<n;k++)if(kind[k]===1&&rec[k]!==firstRec[k])changed++;
+  // depressions: connected flooded points; filled if their catchment's sediment (incision and background denudation
+  // over the run) reaches their volume
+  const lid=new Int32Array(n).fill(-1),vol=[],sed=[],lakes=[];
+  for(let k=0;k<n;k++){if(kind[k]!==1||lid[k]>=0||!(fz[k]>z[k]+1e-6))continue;const id=vol.length,q=[k];lid[k]=id;let v=0;
+    for(let a=0;a<q.length;a++){const u=q[a];v+=(fz[u]-z[u])*cA;for(let d=0;d<8;d++){const m=nb[8*u+d];if(m>=0&&kind[m]===1&&lid[m]<0&&fz[m]>z[m]+1e-6){lid[m]=id;q.push(m);}}}vol.push(v);sed.push(0);lakes.push(q);}
+  const qs=new Float64Array(n);for(let s3=ns-1;s3>=0;s3--){const k=stack[s3];if(kind[k]!==1)continue;qs[k]+=(inc[k]+o.bgKmMyr*o.myr)*cA;
+    if(lid[k]>=0){sed[lid[k]]+=qs[k];continue;}const r=rec[k];if(r>=0&&kind[r]===1)qs[r]+=qs[k];}
+  let filledN=0,filledKm2=0,lakeKm2=0,lakeN=0;const lakeFlag=new Uint8Array(n);
+  for(let id=0;id<vol.length;id++){if(sed[id]>=vol[id]){filledN++;for(const u of lakes[id]){z[u]=fz[u];filledKm2+=cA;}}else{lakeN++;for(const u of lakes[id]){lakeFlag[u]=1;lakeKm2+=cA;}}}
+  // L1's scale: the net change averaged per L1 cell (over the cell's selected points), interpolated, removed
+  const cw=i1-i0+1,ch=j1-j0+1,cm=new Float64Array(cw*ch),cn=new Float64Array(cw*ch);
+  for(let k=0;k<n;k++){if(kind[k]!==1)continue;const q=pts[k],ci=((q%W)/f)|0,cj=(((q/W)|0)/f)|0;cm[cj*cw+ci]+=z[k]-z0[k];cn[cj*cw+ci]++;}
+  let drift2=0,dn=0;for(let c=0;c<cw*ch;c++)if(cn[c]){cm[c]/=cn[c];drift2+=cm[c]*cm[c]*cn[c];dn+=cn[c];}
+  const crS=(p0,p1,p2,p3,t)=>p1+0.5*t*(p2-p0+t*(2*p0-5*p1+4*p2-p3+t*(3*(p1-p2)+p3-p0))),cat=(I,J)=>cm[Math.max(0,Math.min(ch-1,J))*cw+Math.max(0,Math.min(cw-1,I))];
+  for(let k=0;k<n;k++){if(kind[k]!==1)continue;const q=pts[k],gx=(q%W+.5)/f-0.5,gy=(((q/W)|0)+.5)/f-0.5,I=Math.floor(gx),J=Math.floor(gy),tx=gx-I,ty=gy-J,r4=[0,0,0,0];
+    for(let m2=0;m2<4;m2++)r4[m2]=crS(cat(I-1,J-1+m2),cat(I,J-1+m2),cat(I+1,J-1+m2),cat(I+2,J-1+m2),tx);z[k]-=crS(r4[0],r4[1],r4[2],r4[3],ty);}
+  route();
+  // after: change, Strahler order on the channels (weighted area at least channelKm2: a channel's order rises by one
+  // only where two of the highest order among its tributaries meet), main-stem length (longest flow path upstream)
+  const dz=new Float32Array(n);let er=0,maxInc=0;for(let k=0;k<n;k++)if(kind[k]===1){dz[k]=z[k]-z0[k];er+=dz[k];if(-dz[k]>maxInc)maxInc=-dz[k];}
+  const order=new Uint8Array(n),len=new Float32Array(n),mo=new Uint8Array(n),mc=new Uint8Array(n);
+  for(let s3=ns-1;s3>=0;s3--){const k=stack[s3];if(kind[k]!==1)continue;const r=rec[k];
+    if(A[k]>=o.channelKm2){order[k]=!mo[k]?1:mc[k]>=2?mo[k]+1:mo[k];if(r>=0&&kind[r]===1){if(order[k]>mo[r]){mo[r]=order[k];mc[r]=1;}else if(order[k]===mo[r])mc[r]++;}}
+    if(r>=0&&kind[r]===1){const L=len[k]+rlen[k];if(L>len[r])len[r]=L;}}
+  // Hack's law: main-stem length against (weighted) drainage area on the channels, least squares in logs
+  let sx=0,sy=0,sxx=0,sxy=0,nh=0;for(let k=0;k<n;k++){if(kind[k]!==1||A[k]<o.channelKm2||!(len[k]>0))continue;const a=Math.log(A[k]),l=Math.log(len[k]);sx+=a;sy+=l;sxx+=a*a;sxy+=a*l;nh++;}
+  const hack=nh>2?(sxy-sx*sy/nh)/(sxx-sx*sx/nh):NaN;let maxOrder=0;for(let k=0;k<n;k++)if(order[k]>maxOrder)maxOrder=order[k];
+  return{W,H,dx,X0,Y0,pts:Int32Array.from(pts),idx,kind,z,z0,dz,rec,A,order,len,lake:lakeFlag,steps,dt,myr:o.myr,nAct,o,
+    stats:{hack,maxOrder,meanChangeM:1000*er/nAct,maxIncisionM:1000*maxInc,l1DriftM:1000*Math.sqrt(drift2/(dn||1)),receiversChangedFrac:changed/nAct,depressions:vol.length,filled:filledN,filledKm2,lakes:lakeN,lakeKm2,activeKm2:nAct*cA,ms:Date.now()-t0},
+    at:(x,y)=>{const i=Math.floor((x-X0)/dx),j=Math.floor((y-Y0)/dx);return i<0||j<0||i>=W||j>=H?-1:idx[j*W+i];},
+    // the surface for drawing: bilinear between the selected points around (x, y) (drawn point by point, the
+    // hillshade lit only the points' edges)
+    zAt:(x,y)=>{const gx=(x-X0)/dx-0.5,gy=(y-Y0)/dx-0.5,i=Math.floor(gx),j=Math.floor(gy),tx=gx-i,ty=gy-j;let s=0,w=0;
+      for(let c=0;c<4;c++){const I=i+(c&1),J=j+(c>>1);if(I<0||J<0||I>=W||J>=H)continue;const k=idx[J*W+I];if(k<0||kind[k]!==1)continue;const ww=(c&1?tx:1-tx)*(c>>1?ty:1-ty);s+=ww*z[k];w+=ww;}
+      return w>0?s/w:NaN;}};}
+function pass(R,B,bd,sel,ref,kin,o){const it=runPass(R,B,bd,sel,ref,kin,o);let r;while(!(r=it.next()).done);return r.value;}
+
+return {relief,reliefInputs,reliefFrom,boundary,tileMaker,flood,floodSeeded,tileGraph,l1Labels,makeGrad2,gblur,erodibility,runPass,pass};
 }
 const L2=L2module(SIM,L1);
 // ===== L2-END =====

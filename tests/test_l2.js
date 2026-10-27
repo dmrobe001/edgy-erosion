@@ -9,7 +9,8 @@
 //    higher than the river's level at the upstream point;
 // 6. basin outlines burnt in by strips agree with routing the whole region at 500 m;
 // 7. two neighbouring selections, refined independently, agree on their shared outline;
-// 8. a worker built from the module's source makes the same tiles as the main thread.
+// 8. a worker built from the module's source makes the same tiles as the main thread;
+// 9. the L2 pass: every point drains, L1's scale is restored, Hack's exponent is plausible, runs are deterministic.
 const { loadSim, loadL1, loadL2, arg } = require("./lib");
 const SIM = loadSim(), L1 = loadL1(SIM), L2 = loadL2(SIM, L1);
 let ok = true; const check = (cond, msg) => { if (!cond) { ok = false; console.log("FAIL " + msg); } };
@@ -124,6 +125,19 @@ for (const [name, sel] of [["coastal cluster", selA], ["mid-size basin", selM]])
   // stitched domains depend on the selection, so a point balanced between two exits can resolve differently: allowed at
   // 1 in 10,000 shared points
   check(shared > 0 && differ <= 1e-4 * shared * 400 && both === 0, "burn-in: neighbouring selections agree on their shared outline"); }
+
+// 9. the L2 pass on the coastal cluster, 2 Myr: every point drains to an outlet; L1's scale restored (the change averaged
+//    over each L1 cell is near zero after removal, against its size before); Hack's exponent; deterministic
+{ const bd = L2.boundary(R, B), ref = bd.refine(selA), kin = L2.erodibility(sh), t = Date.now(), P = L2.pass(R, B, bd, selA, ref, kin, { myr: 2 }), ms = Date.now() - t, n = P.kind.length;
+  let stuck = 0; for (let k = 0; k < n; k++) { if (P.kind[k] !== 1) continue; let u = k, g = 0; while (u >= 0 && P.kind[u] === 1 && g++ < n) u = P.rec[u]; if (u < 0 || P.kind[u] !== 2) stuck++; }
+  const cm = new Map(); for (let k = 0; k < n; k++) { if (P.kind[k] !== 1) continue; const q = P.pts[k], c = Math.floor((q / P.W | 0) / bd.f) * 100000 + Math.floor((q % P.W) / bd.f), o = cm.get(c) || [0, 0]; o[0] += P.dz[k]; o[1]++; cm.set(c, o); }
+  let r2 = 0, rn = 0; for (const [, [sdz, cnt]] of cm) { r2 += (sdz / cnt) ** 2 * cnt; rn += cnt; } const resid = 1000 * Math.sqrt(r2 / rn), st = P.stats;
+  const P2 = L2.pass(R, B, bd, selA, ref, kin, { myr: 2 }); let same = true; for (let k = 0; k < n; k++) if (P2.z[k] !== P.z[k]) { same = false; break; }
+  console.log(`L2 pass: ${P.nAct.toLocaleString("en-US")} points, ${P.steps} steps of ${P.dt} Myr, ${ms} ms; deepest incision ${Math.round(st.maxIncisionM)} m; flow directions changed at ${(100 * st.receiversChangedFrac).toFixed(0)}% of points; ${st.filled} hollows filled (${Math.round(st.filledKm2)} km²), ${st.lakes} lakes; Hack's exponent ${st.hack.toFixed(2)}, highest order ${st.maxOrder}; L1-scale change ${st.l1DriftM.toFixed(1)} m RMS removed, ${resid.toFixed(2)} m left; ${stuck} points not draining; ${same ? "deterministic" : "NOT deterministic"}`);
+  check(stuck === 0, "L2 pass: every point drains to an outlet");
+  check(resid < 0.3 * st.l1DriftM || resid < 0.5, "L2 pass: L1's scale restored");
+  check(st.hack > 0.45 && st.hack < 0.75, "L2 pass: Hack's exponent in a plausible range (Earth's rivers: about 0.5-0.6)");
+  check(same, "L2 pass: deterministic"); }
 
 // 8. a worker built as the page builds it (the module's source and the relief's plain inputs) makes the same tiles
 //    as the main thread, bit for bit

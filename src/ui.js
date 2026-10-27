@@ -583,11 +583,29 @@ self.onmessage=e=>{const m=e.data;if(m.init){M=L2.tileMaker(L2.reliefFrom(m.init
     if(l2PoolLast)for(const w of l2PoolLast.workers)w.terminate();S.l2Pool=l2PoolLast={workers:ws,n,failed:false};URL.revokeObjectURL(url);}catch(err){S.l2Pool=null;}
   return S.l2Pool;}
 let l2PoolLast=null;
-function l2PrevHide(){l2V=null;l2Job++;$("l2wrap").hidden=true;$("l2stats").innerHTML="";$("l2Prev").disabled=!l2Sel;}
-$("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;let i0=1e9,i1=-1,j0=1e9,j1=-1;
+function l2PrevHide(){l2V=null;l2Job++;$("l2wrap").hidden=true;$("l2views").hidden=true;$("l2legend").innerHTML="";$("l2stats").innerHTML="";$("l2Prev").disabled=!l2Sel;$("l2Run").disabled=!l2Sel;}
+// the view: the selection's box (from its L1 cells), fitted to the canvas
+function l2ViewSetup(){const s=l2Sel,bs=l1St.bs;if(l2V&&l2V.sel===s)return;let i0=1e9,i1=-1,j0=1e9,j1=-1;
   for(let c=0;c<s.mask.length;c++)if(s.mask[c]){const i=c%bs.nx,j=(c/bs.nx)|0;if(i<i0)i0=i;if(i>i1)i1=i;if(j<j0)j0=j;if(j>j1)j1=j;}
-  const pad=10;l2V={x0:bs.x0+i0*bs.h-pad,x1:bs.x0+(i1+1)*bs.h+pad,y0:bs.y0+j0*bs.h-pad,y1:bs.y0+(j1+1)*bs.h+pad,zoom:1,pan:[0,0]};
-  logAction({a:"l2preview"});$("l2wrap").hidden=false;l2Burn(l2Draw);};
+  const pad=10;l2V={sel:s,x0:bs.x0+i0*bs.h-pad,x1:bs.x0+(i1+1)*bs.h+pad,y0:bs.y0+j0*bs.h-pad,y1:bs.y0+(j1+1)*bs.h+pad,zoom:1,pan:[0,0]};$("l2wrap").hidden=false;}
+$("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;l2ViewSetup();l2View="relief";l2Views();logAction({a:"l2preview"});l2Burn(l2Draw);};
+// Run L2: the outline burnt in first (if it isn't), then the pass, a step per frame
+let l2View="relief";
+const l2Myr=()=>+$("l2Myr").value;
+$("l2Myr").oninput=e=>$("l2MyrVal").textContent=e.target.value+" Myr";
+$("l2Run").onclick=()=>{const s=l2Sel,S=l1St;if(!s||!S||!S.bs)return;const myr=l2Myr();logAction({a:"l2run",myr});l2ViewSetup();$("l2Run").disabled=true;
+  l2Burn(()=>{const job=++l2Job,t0=performance.now(),it=L2.runPass(l2Relief(),S.bs,l2Boundary(),s,s.ref,S.l2K||(S.l2K=L2.erodibility(S.sh)),{myr});let r;
+    const step=()=>{if(job!==l2Job||s!==l2Sel)return;r=it.next();
+      if(!r.done){$("l2stats").innerHTML=`<div>Running L2<b class="num">${r.value.setup!==undefined?`setting up the grid, ${Math.round(100*(r.value.setup===true?1:r.value.setup))}%…`:`step ${r.value.step} of ${r.value.steps}…`}</b></div>`;requestAnimationFrame(step);return;}
+      s.run=r.value;s.run.wallMs=performance.now()-t0;$("l2Run").disabled=false;l2View="terrain";l2Views();l2Info();l2Draw();};
+    requestAnimationFrame(step);});};
+function l2Views(){const has=!!(l2Sel&&l2Sel.run);$("l2views").hidden=!has;document.querySelectorAll("#l2views button").forEach(b=>{b.setAttribute("aria-pressed",b.dataset.v===l2View?"true":"false");});
+  const L=$("l2legend");if(!has||l2View==="relief"){L.innerHTML="";return;}
+  L.innerHTML=l2View==="terrain"?`<span><i class="swatch" style="background:#285fb0"></i>rivers draining 5 km² and more</span><span><i class="swatch" style="background:#3468be"></i>lakes</span>`:
+    l2View==="change"?`<span class="num">−50 m</span><span class="bar" style="background:linear-gradient(90deg,#2c5aa0,#e8e6e0,#b8322a)"></span><span class="num">+50 m</span>`:
+    l2View==="area"?`<span class="num">0.25 km²</span><span class="bar" style="background:${gradCss(RAIN_STOPS,-1.3,0.5)}"></span><span class="num">10,000 km²</span>`:
+    `<span>Strahler order of the channels (1 km² and more): 1 pale to 7 dark</span>`;}
+document.querySelectorAll("#l2views button").forEach(b=>b.onclick=()=>{l2View=b.dataset.v;l2Views();if(l2V)l2Draw();});
 // the selection's outline burnt in at 500 m (L2.boundary): a tile routed per slice of a frame, then the outline
 function l2Boundary(){const S=l1St;if(!S.l2B)S.l2B=L2.boundary(l2Relief(),S.bs);return S.l2B;}
 // The burn-in's generator asks for tiles (pass A) in batches; the workers evaluate them in parallel, or, without
@@ -614,25 +632,40 @@ function l2Geo(){const V=l2V,wrap=$("l2wrap"),bw=V.x1-V.x0,bh=V.y1-V.y0,asp=Math
   const s0=Math.max(bw/W,bh/H);V.W=W;V.H=H;V.s0=s0;V.s=s0/V.zoom;V.cx=(V.x0+V.x1)/2+V.pan[0];V.cy=(V.y0+V.y1)/2+V.pan[1];}
 const l2XY=(px,py)=>[l2V.cx+(px+0.5-l2V.W/2)*l2V.s,l2V.cy-(py+0.5-l2V.H/2)*l2V.s];
 // drawn a band of rows per frame (about 40 ms each), then shaded
-function l2Draw(){if(!l2V)return;const job=++l2Job,R=l2Relief(),bs=l1St.bs,sel=l2Sel;l2Geo();const V=l2V,W=V.W,H=V.H,Z=new Float32Array(W*H),inS=new Uint8Array(W*H),minKm=Math.max(R.o.lamMinKm,2*V.s),t0=performance.now();let row=0;
+function l2Draw(){if(!l2V)return;const job=++l2Job,R=l2Relief(),bs=l1St.bs,sel=l2Sel;l2Geo();const V=l2V,W=V.W,H=V.H,Z=new Float32Array(W*H),inS=new Uint8Array(W*H),KK=new Int32Array(W*H),minKm=Math.max(R.o.lamMinKm,2*V.s),t0=performance.now();let row=0;
+  // after a run (and not viewing the starting relief), the run's 500 m surface on its points, the relief elsewhere
+  const P=sel.run&&l2View!=="relief"?sel.run:null;
   const step=()=>{if(job!==l2Job)return;const t1=performance.now();
     // at least one row per frame, however slow the frame
     do{for(let px=0;px<W;px++){const [x,y]=l2XY(px,row),q=row*W+px,fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);
-        Z[q]=R.z(x,y,minKm);inS[q]=sel.ref?(sel.ref.inside(x,y)?1:0):fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}while(row<H&&performance.now()-t1<40);
+        const k=P?P.at(x,y):-1;KK[q]=k>=0&&P.kind[k]===1?k:-1;
+        Z[q]=KK[q]>=0?P.zAt(x,y):R.z(x,y,minKm);inS[q]=sel.ref?(sel.ref.inside(x,y)?1:0):fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}while(row<H&&performance.now()-t1<40);
     $("l2stats").innerHTML=`<div>Drawing<b class="num">${Math.round(100*row/H)}%</b></div>`;
     if(row<H){requestAnimationFrame(step);return;}
-    V.Z=Z;V.inS=inS;V.minKm=minKm;V.ms=performance.now()-t0;l2Shade();};
+    V.Z=Z;V.inS=inS;V.KK=KK;V.P=P;V.minKm=minKm;V.ms=performance.now()-t0;l2Shade();};
   requestAnimationFrame(step);}
 function l2Shade(){const V=l2V,W=V.W,H=V.H,Z=V.Z,cv=$("l2map"),ctx=cv.getContext("2d"),img=ctx.createImageData(W,H),d=img.data,ex=10/V.s;
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,h=Z[q],land=h>0;let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;let r=LUT_E[k*3],g=LUT_E[k*3+1],b=LUT_E[k*3+2];
     if(land){const eL=px>0?Z[q-1]:h,eR=px<W-1?Z[q+1]:h,eU=py>0?Z[q-W]:h,eD=py<H-1?Z[q+W]:h,gx=(eR-eL)*ex/2,gy=(eU-eD)*ex/2,nl=1/Math.sqrt(1+gx*gx+gy*gy),s=Math.max(0.35,Math.min(1.25,(0.55*-gx+0.55*gy+0.63)*nl/0.63));r*=s;g*=s;b*=s;}
+    const pk=V.KK[q],P=V.P;
+    if(P&&pk>=0){const sh=land?(()=>{const eL=px>0?Z[q-1]:h,eR=px<W-1?Z[q+1]:h,eU=py>0?Z[q-W]:h,eD=py<H-1?Z[q+W]:h,gx=(eR-eL)*ex/2,gy=(eU-eD)*ex/2,nl=1/Math.sqrt(1+gx*gx+gy*gy);return Math.max(0.35,Math.min(1.25,(0.55*-gx+0.55*gy+0.63)*nl/0.63));})():1;
+      if(l2View==="terrain"){if(P.lake[pk]){r=52;g=104;b=190;}else if(P.A[pk]>=5){const a=Math.min(0.9,0.45+0.2*Math.log10(P.A[pk]/5));r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+176*a;}}
+      else if(l2View==="change"){const c=Math.max(-1,Math.min(1,P.dz[pk]/0.05)),lo=[44,90,160],mid=[232,230,224],hi=[184,50,42],t=Math.abs(c),e2=c<0?lo:hi;r=(mid[0]*(1-t)+e2[0]*t)*(0.8+0.2*sh);g=(mid[1]*(1-t)+e2[1]*t)*(0.8+0.2*sh);b=(mid[2]*(1-t)+e2[2]*t)*(0.8+0.2*sh);}
+      else if(l2View==="area"){let kk=Math.round((Math.log10(Math.max(0.25,P.A[pk]))+0.6)/4.6*255);kk=kk<0?0:kk>255?255:kk;r=LUT_RAIN[kk*3]*(0.8+0.2*sh);g=LUT_RAIN[kk*3+1]*(0.8+0.2*sh);b=LUT_RAIN[kk*3+2]*(0.8+0.2*sh);}
+      else if(l2View==="order"){const o2=P.order[pk];if(o2){const t=Math.min(1,(o2-1)/6);r=200*(1-t)+10*t;g=220*(1-t)+40*t;b=250*(1-t)+120*t;}else{r=r*0.35+150;g=g*0.35+150;b=b*0.35+150;}}}
     if(land&&!V.inS[q]){const m=(r+g+b)/3;r=0.3*r+0.35*m;g=0.3*g+0.35*m;b=0.3*b+0.35*m;}
     // the outline, on land
     if(land&&(px<W-1&&V.inS[q+1]!==V.inS[q]&&Z[q+1]>0||py<H-1&&V.inS[q+W]!==V.inS[q]&&Z[q+W]>0)){r=g=b=24;}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
   ctx.putImageData(img,0,0);l2Stats();}
 function l2Stats(){const V=l2V,S=l1St;if(!V)return;const R=S.l2R,fmt=v=>v<1?v.toFixed(2):v<10?v.toFixed(1):Math.round(v).toLocaleString("en-US");
-  $("l2stats").innerHTML=`<div>L2 grid dx / dt<b class="num">${R.o.lamMinKm/2} km / no run yet</b></div><div>Drawn at<b class="num">${fmt(V.s)} km per pixel</b></div>
+  const P=l2Sel&&l2Sel.run,st=P&&P.stats,m=v=>Math.round(v).toLocaleString("en-US");
+  $("l2stats").innerHTML=`<div>L2 grid dx / dt<b class="num">${R.o.lamMinKm/2} km / ${P?`${+P.dt.toFixed(3)} Myr`:"no run yet"}</b></div>
+    ${P?`<div>Run<b class="num">${P.myr} Myr in ${P.steps} steps, ${(P.wallMs/1000).toFixed(1)} s</b></div><div>Points<b class="num">${m(P.nAct)} (${m(st.activeKm2)} km²)</b></div>
+    <div>Deepest incision<b class="num">${m(st.maxIncisionM)} m</b></div><div>L1-scale change removed<b class="num">${st.l1DriftM.toFixed(1)} m RMS</b></div>
+    <div>Flow directions changed<b class="num">${(100*st.receiversChangedFrac).toFixed(0)}% of points</b></div><div>Hollows filled / lakes<b class="num">${m(st.filled)} (${m(st.filledKm2)} km²) / ${m(st.lakes)}</b></div>
+    <div>Hack’s exponent<b class="num">${st.hack.toFixed(2)}</b></div><div>Highest stream order<b class="num">${st.maxOrder}</b></div>`:""}
+    <div>Drawn at<b class="num">${fmt(V.s)} km per pixel</b></div>
     <div>Octaves drawn<b class="num">${R.octaves.filter(L=>L>=V.minKm).join(", ")} km</b></div><div>Relief built / drawn<b class="num">${Math.round(S.l2Ms)} / ${Math.round(V.ms)} ms</b></div>
     ${l2Sel&&l2Sel.ref?`<div>Outline burnt in<b class="num">${(l2Sel.ref.wallMs/1000).toFixed(1)} s: ${l2Sel.ref.evaluated} tiles evaluated${l2Sel.ref.workers?` on ${l2Sel.ref.workers} worker${l2Sel.ref.workers>1?"s":""}`:" on the main thread"}, stitched in ${(l2Sel.ref.stitchMs/1000).toFixed(1)} s</b></div>`:""}`;}
 gestures($("l2wrap"),{
@@ -642,8 +675,9 @@ gestures($("l2wrap"),{
     else{const s1=l2V.s0/l2V.zoom;l2V.pan=[x-(px+0.5-l2V.W/2)*s1-(l2V.x0+l2V.x1)/2,y+(py+0.5-l2V.H/2)*s1-(l2V.y0+l2V.y1)/2];}
     clearTimeout(l2V.t);l2V.t=setTimeout(l2Draw,120);},
   tap:e=>{const V=l2V;if(!V||!V.Z)return;const r=$("l2map").getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*V.W),py=Math.floor((e.clientY-r.top)/r.height*V.H);if(px<0||py<0||px>=V.W||py>=V.H)return;
-    const [x,y]=l2XY(px,py),R=l1St.l2R,h=R.z(x,y,V.minKm),st=R.strikeAt(x,y),box=$("l2inspect");
-    box.textContent=`${h>=0?"Elevation":"Depth"} ${Math.abs(h*1000).toFixed(0)} m; L1’s surface here ${Math.round(R.base(x,y)*1000)} m, L1 roughness ${Math.round(R.roughAt(x,y)*1000)} m${st&&st.stretch>1?`, relief stretched ${st.stretch.toFixed(2)}× along strike`:""}${V.inS[py*V.W+px]?"":" (outside the selection)"}`;
+    const [x,y]=l2XY(px,py),R=l1St.l2R,h=R.z(x,y,V.minKm),st=R.strikeAt(x,y),box=$("l2inspect"),k=V.KK[py*V.W+px],P=V.P;
+    if(P&&k>=0)box.textContent=`Elevation ${Math.round(P.z[k]*1000)} m (${P.dz[k]>=0?"+":"−"}${Math.abs(Math.round(P.dz[k]*1000))} m in the run${P.lake[k]?", a lake":""}); drains ${P.A[k]<10?P.A[k].toFixed(1):Math.round(P.A[k]).toLocaleString("en-US")} km² (weighted by rainfall)${P.order[k]?`, a channel of order ${P.order[k]}`:""}; main stem upstream ${P.len[k].toFixed(1)} km`;
+    else box.textContent=`${h>=0?"Elevation":"Depth"} ${Math.abs(h*1000).toFixed(0)} m; L1’s surface here ${Math.round(R.base(x,y)*1000)} m, L1 roughness ${Math.round(R.roughAt(x,y)*1000)} m${st&&st.stretch>1?`, relief stretched ${st.stretch.toFixed(2)}× along strike`:""}${V.inS[py*V.W+px]?"":" (outside the selection)"}`;
     box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}});
 // the L1 -> L2 handoff: the selected tile's summary, and downloads of the landmass summary and of one tile's fields
 let l1TileSel=-1;
@@ -680,7 +714,8 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
     checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
       L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
         basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null,
-      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells,reliefAtTap:l2Relief().z(l2Sel.x,l2Sel.y),outlineKm2:l2Sel.ref?l2Sel.ref.areaKm2:null}:null},
+      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells,reliefAtTap:l2Relief().z(l2Sel.x,l2Sel.y),outlineKm2:l2Sel.ref?l2Sel.ref.areaKm2:null,
+        run:l2Sel.run?{myr:l2Sel.run.myr,points:l2Sel.run.nAct,maxIncisionM:l2Sel.run.stats.maxIncisionM,receiversChangedFrac:l2Sel.run.stats.receiversChangedFrac,hack:l2Sel.run.stats.hack}:null}:null},
     viewports:{
       L0:{colorMode:view,projection:proj,marks:$("marks").checked,faultTraces:!!handoff&&$("traces").checked,canvasPx:[pixW,pixH],
         globe:{yaw,pitch,zoom:gZoom},map:{zoom:mZoom,centre:mC,goode:goode&&{centreLonDeg:goode.lc*180/Math.PI,edgeLonDeg:goode.edgeLonDeg,

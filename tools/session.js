@@ -45,7 +45,9 @@ function check(sess, r) {
   const L2 = sess.reproduce.L2;
   if (c.L2 && L2 && r.basins) { const s = r.L1.basinSelection(r.basins, r.plan.proj, L2.xKm, L2.yKm, L2.radiusKm); eq("L2 tapped basin", c.L2.tapped, s.tapped); eq("L2 basins", c.L2.basins, s.basins.length); eq("L2 cells", c.L2.cells, s.cells);
     if (c.L2.reliefAtTap != null && r.L2) { const Rl = r.L2.relief(r.sheet, r.basins); eq("L2 relief at the tap", c.L2.reliefAtTap, Rl.z(L2.xKm, L2.yKm));
-      if (c.L2.outlineKm2 != null) eq("L2 outline area", c.L2.outlineKm2, r.L2.boundary(Rl, r.basins).refine(s).areaKm2); } }
+      if (c.L2.outlineKm2 != null) { const bd = r.L2.boundary(Rl, r.basins), ref = bd.refine(s); eq("L2 outline area", c.L2.outlineKm2, ref.areaKm2);
+        if (c.L2.run) { const P = r.L2.pass(Rl, r.basins, bd, s, ref, r.L2.erodibility(r.sheet), { myr: c.L2.run.myr });
+          eq("L2 run points", c.L2.run.points, P.nAct); eq("L2 run deepest incision", c.L2.run.maxIncisionM, P.stats.maxIncisionM); eq("L2 run Hack exponent", c.L2.run.hack, P.stats.hack); } } } }
   return res;
 }
 // Stash: the rerun's states on disk (v8 serialization), so later work can skip the rerun

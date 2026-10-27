@@ -64,6 +64,14 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
     console.log("PASS ui smoke L2 outline: " + Math.round(s.ref.areaKm2) + " km² at 500 m (L1: " + Math.round(s.ref.areaL1Km2) + "), " + s.ref.nTiles + " tiles (" + s.ref.evaluated + " evaluated, " + s.ref.rounds + " rounds), " + frames + " frames under a clock running 100 ms per reading");
     let zl = Infinity, zh = -Infinity; for (const v of l2V.Z) { zl = Math.min(zl, v); zh = Math.max(zh, v); }
     console.log("PASS ui smoke L2 relief preview: " + l2V.W + "x" + l2V.H + " px at " + l2V.s.toFixed(2) + " km/px, " + zl.toFixed(2) + " to " + zh.toFixed(2) + " km");
+    // the L2 pass, 1 Myr, the same way
+    { const raf2 = global.requestAnimationFrame, now2 = performance.now, queue2 = []; let fake2 = now2.call(performance), fr2 = 0;
+      global.requestAnimationFrame = f => queue2.push(f); performance.now = () => (fake2 += 100);
+      try { const el = document.getElementById("l2Myr"); el.value = 1; document.getElementById("l2Run").onclick(); while (queue2.length) { if (++fr2 > 20000) throw new Error("L2 run makes no progress"); queue2.shift()(); } }
+      finally { global.requestAnimationFrame = raf2; performance.now = now2; }
+      if (!s.run || !document.getElementById("l2stats").innerHTML.includes("Hack")) throw new Error("L2 run not done");
+      for (const v of ["terrain", "change", "area", "order"]) { l2View = v; l2Draw(); }
+      console.log("PASS ui smoke L2 run: " + s.run.nAct + " points, " + s.run.steps + " steps, deepest incision " + Math.round(s.run.stats.maxIncisionM) + " m, Hack " + s.run.stats.hack.toFixed(2)); }
     console.log("PASS ui smoke L2 selection: " + s.basins.length + " basins (" + s.nWithin + " within 200 km, " + s.nEnclosed + " enclosed), " + (s.areaKm2 / 1e3).toFixed(0) + " thousand km², " + s.ms.toFixed(0) + " ms"); }
   if (!document.getElementById("l1budget").innerHTML.includes("Drainage basins")) throw new Error("L1 summary not rendered");
   const sh = l1St.sh, bal = sh.balance(); if (Math.abs(bal.error) > 1e-9) throw new Error("L1 crust budget does not close: " + bal.error);
@@ -72,7 +80,7 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
   // session export: the log reruns in a fresh simulation to the same state, checked against the recorded values
   selCell = land; l1View = "tiles"; l1TileSel = 0; const file = path.join(os.tmpdir(), "edgy-session-test.json"); fs.writeFileSync(file, JSON.stringify(sessionData()));
   const sess = SESSION.load(file), S2 = loadSim(), L2 = loadL1(S2), r = SESSION.reproduce(sess, S2, L2, () => {}, loadL2(S2, L2)), bad = r.checks.filter(c => !c.ok);
-  if (bad.length || r.checks.length < 13) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
+  if (bad.length || r.checks.length < 16) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
   if (!sess.viewports.L1.visible || sess.viewports.L2.selectedTile !== 0 || sess.viewports.L1.colorMode !== "tiles") throw new Error("viewports not recorded");
   const sf = file.replace(".json", ".stash"); SESSION.stash(r, sf); const u = SESSION.unstash(sf, S2, L2, sess), a = u.sheet.strainField(), b = l1St.sh.strainField();
   for (let c = 0; c < a.lmin.length; c++) if (!(a.lmin[c] === b.lmin[c] || isNaN(a.lmin[c]) && isNaN(b.lmin[c]))) throw new Error("stashed sheet differs");
