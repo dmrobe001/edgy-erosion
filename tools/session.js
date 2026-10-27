@@ -17,8 +17,8 @@ function load(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
 function l0Hash(w) { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; }
 function newWorld(sess, SIM) { const s = sess.settings; return new SIM.World({ n: s.resolution, seed: s.seed, nPlates: s.initialPlates, mode: s.start, nnr: true, contTarget: s.continentalTarget }); }
 
-function reproduce(sess, SIM, L1, log = () => {}) {
-  const w = newWorld(sess, SIM), R = sess.reproduce, L = R.L1, out = { world: w, L1 };
+function reproduce(sess, SIM, L1, log = () => {}, L2 = null) {
+  const w = newWorld(sess, SIM), R = sess.reproduce, L = R.L1, out = { world: w, L1, L2 };
   const to = steps => { while (w.steps < steps) w.step(); };
   if (L) {
     to(L.entrySteps); const entry = { t: w.t, steps: w.steps, snap: w.snapshot() }; out.entry = entry; log(`L0 at the saved state: ${w.t.toFixed(2)} Myr, ${w.steps} steps`);
@@ -43,7 +43,8 @@ function check(sess, r) {
     if (c.L1.basins && r.basins) { eq("basins", c.L1.basins.nBasins, r.basins.nBasins); eq("inland share", c.L1.basins.inlandFrac, r.basins.inlandFrac); }
     if (c.L1.tiles != null && r.handoff) eq("tiles", c.L1.tiles, r.handoff.tiles.length); }
   const L2 = sess.reproduce.L2;
-  if (c.L2 && L2 && r.basins) { const s = r.L1.basinSelection(r.basins, r.plan.proj, L2.xKm, L2.yKm, L2.radiusKm); eq("L2 tapped basin", c.L2.tapped, s.tapped); eq("L2 basins", c.L2.basins, s.basins.length); eq("L2 cells", c.L2.cells, s.cells); }
+  if (c.L2 && L2 && r.basins) { const s = r.L1.basinSelection(r.basins, r.plan.proj, L2.xKm, L2.yKm, L2.radiusKm); eq("L2 tapped basin", c.L2.tapped, s.tapped); eq("L2 basins", c.L2.basins, s.basins.length); eq("L2 cells", c.L2.cells, s.cells);
+    if (c.L2.reliefAtTap != null && r.L2) eq("L2 relief at the tap", c.L2.reliefAtTap, r.L2.relief(r.sheet, r.basins).z(L2.xKm, L2.yKm)); }
   return res;
 }
 // Stash: the rerun's states on disk (v8 serialization), so later work can skip the rerun
@@ -60,7 +61,8 @@ function unstash(file, SIM, L1, sess) {
   return out;
 }
 // the commit whose sources hash to the session's build id (as build.sh computes it)
-function srcHash(get) { const h = crypto.createHash("sha1"); for (const f of ["src/head.html", "src/sim.js", "src/l1.js", "src/ui.js"]) h.update(get(f)); return h.digest("hex").slice(0, 12); }
+// (src/l2.js joined the page later; a commit without it hashes the other four, as build.sh did then)
+function srcHash(get) { const h = crypto.createHash("sha1"); for (const f of ["src/head.html", "src/sim.js", "src/l1.js", "src/l2.js", "src/ui.js"]) { let d; try { d = get(f); } catch (_) { continue; } h.update(d); } return h.digest("hex").slice(0, 12); }
 function findBuild(id) {
   if (srcHash(f => fs.readFileSync(path.join(ROOT, f))) === id) return "the working tree";
   let commits = [];
@@ -80,8 +82,8 @@ if (require.main === module) {
   console.log(`viewports: L0 ${V.L0.colorMode} on the ${V.L0.projection}; L1 ${V.L1 ? `${V.L1.colorMode} at ${V.L1.zoom.toFixed(2)}x` : "-"}; L2 tile ${V.L2 ? V.L2.selectedTile : "-"}`);
   console.log(`${s.actions.length} actions: ${s.actions.map(a => a.a).join(" ")}`);
   if (process.argv.includes("--rerun")) {
-    const { loadSim, loadL1 } = require(path.join(ROOT, "tests", "lib.js")), SIM = loadSim(), L1 = loadL1(SIM);
-    const r = reproduce(s, SIM, L1, m => console.log("  " + m));
+    const { loadSim, loadL1, loadL2 } = require(path.join(ROOT, "tests", "lib.js")), SIM = loadSim(), L1 = loadL1(SIM), L2 = loadL2(SIM, L1);
+    const r = reproduce(s, SIM, L1, m => console.log("  " + m), L2);
     for (const c of r.checks) console.log(`  ${c.ok ? "ok  " : "DIFF"} ${c.name}: recorded ${c.recorded}, rerun ${c.rerun}`);
     const sf = file.replace(/\.json$/, "") + ".stash"; stash(r, sf); console.log(`stashed to ${sf}`);
   }

@@ -551,9 +551,9 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
 // ---------- L2: selecting drainage basins on the L1 map ----------
 // a tap picks the tapped basin (whole), every basin wholly within the radius and every basin the selection encloses
 let l2Sel=null;const l2Rad=()=>+$("l2Rad").value;
-function l2Reset(){l2Sel=null;$("l2Clear").disabled=true;$("l2Info").innerHTML=`<div class="muted">Refine a landmass at L1, then tap its map to select drainage basins for L2.</div>`;}
+function l2Reset(){l2Sel=null;$("l2Clear").disabled=true;l2PrevHide();$("l2Info").innerHTML=`<div class="muted">Refine a landmass at L1, then tap its map to select drainage basins for L2.</div>`;}
 function l2Select(x,y,log){const S=l1St;if(!S||!S.bs)return;const t0=performance.now();l2Sel=L1.basinSelection(S.bs,S.plan.proj,x,y,l2Rad());l2Sel.ms=performance.now()-t0;
-  if(log)logAction({a:"l2select",xKm:+x.toFixed(2),yKm:+y.toFixed(2),radiusKm:l2Sel.radiusKm});$("l2Clear").disabled=false;l2Info();l1Render();}
+  if(log)logAction({a:"l2select",xKm:+x.toFixed(2),yKm:+y.toFixed(2),radiusKm:l2Sel.radiusKm});$("l2Clear").disabled=false;l2PrevHide();l2Info();l1Render();}
 function l2Info(){const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;const fmt=v=>Math.round(v).toLocaleString("en-US"),sz=l1BasinSizes(),cell=bs.h*bs.h;
   const tap=s.tapped>=0?`the tapped basin (${fmt(sz.get(s.tapped)*cell)} km²${["",", draining inland",", areic desert"][bs.closedB[s.tapped]]})`:"no basin tapped (the tap is at sea)";
   const n2=s.basins.length;
@@ -562,6 +562,48 @@ function l2Info(){const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;const fmt=v=>
 $("l2Rad").oninput=e=>{$("l2RadVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";if(l2Sel)l2Select(l2Sel.x,l2Sel.y,false);};
 $("l2Rad").onchange=()=>{if(l2Sel)logAction({a:"l2radius",radiusKm:l2Rad()});};
 $("l2Clear").onclick=()=>{logAction({a:"l2clear"});l2Reset();l1Render();};
+// ---------- L2: the relief L2 starts from, drawn for the selection ----------
+// The relief is a function of position, so the view samples it per pixel, leaving out octaves shorter than 2 pixels.
+let l2V=null,l2Job=0;
+function l2Relief(){const S=l1St;if(!S||!S.bs)return null;if(!S.l2R){const t0=performance.now();S.l2R=L2.relief(S.sh,S.bs);S.l2Ms=performance.now()-t0;}return S.l2R;}
+function l2PrevHide(){l2V=null;l2Job++;$("l2wrap").hidden=true;$("l2stats").innerHTML="";$("l2Prev").disabled=!l2Sel;}
+$("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;let i0=1e9,i1=-1,j0=1e9,j1=-1;
+  for(let c=0;c<s.mask.length;c++)if(s.mask[c]){const i=c%bs.nx,j=(c/bs.nx)|0;if(i<i0)i0=i;if(i>i1)i1=i;if(j<j0)j0=j;if(j>j1)j1=j;}
+  const pad=10;l2V={x0:bs.x0+i0*bs.h-pad,x1:bs.x0+(i1+1)*bs.h+pad,y0:bs.y0+j0*bs.h-pad,y1:bs.y0+(j1+1)*bs.h+pad,zoom:1,pan:[0,0]};
+  logAction({a:"l2preview"});$("l2wrap").hidden=false;l2Draw();};
+// geometry: the selection's box fitted to the canvas, zoomed and panned
+function l2Geo(){const V=l2V,wrap=$("l2wrap"),bw=V.x1-V.x0,bh=V.y1-V.y0,asp=Math.min(1.2,Math.max(0.5,bh/bw));wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";
+  const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp),cv=$("l2map");if(cv.width!==W||cv.height!==H){cv.width=W;cv.height=H;}
+  const s0=Math.max(bw/W,bh/H);V.W=W;V.H=H;V.s0=s0;V.s=s0/V.zoom;V.cx=(V.x0+V.x1)/2+V.pan[0];V.cy=(V.y0+V.y1)/2+V.pan[1];}
+const l2XY=(px,py)=>[l2V.cx+(px+0.5-l2V.W/2)*l2V.s,l2V.cy-(py+0.5-l2V.H/2)*l2V.s];
+// drawn a band of rows per frame (about 40 ms each), then shaded
+function l2Draw(){if(!l2V)return;const job=++l2Job,R=l2Relief(),bs=l1St.bs,sel=l2Sel;l2Geo();const V=l2V,W=V.W,H=V.H,Z=new Float32Array(W*H),inS=new Uint8Array(W*H),minKm=Math.max(R.o.lamMinKm,2*V.s),t0=performance.now();let row=0;
+  const step=()=>{if(job!==l2Job)return;const t1=performance.now();
+    while(row<H&&performance.now()-t1<40){for(let px=0;px<W;px++){const [x,y]=l2XY(px,row),q=row*W+px,fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);
+        Z[q]=R.z(x,y,minKm);inS[q]=fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}
+    $("l2stats").innerHTML=`<div>Drawing<b class="num">${Math.round(100*row/H)}%</b></div>`;
+    if(row<H){requestAnimationFrame(step);return;}
+    V.Z=Z;V.inS=inS;V.minKm=minKm;V.ms=performance.now()-t0;l2Shade();};
+  requestAnimationFrame(step);}
+function l2Shade(){const V=l2V,W=V.W,H=V.H,Z=V.Z,cv=$("l2map"),ctx=cv.getContext("2d"),img=ctx.createImageData(W,H),d=img.data,ex=10/V.s;
+  for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,h=Z[q],land=h>0;let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;let r=LUT_E[k*3],g=LUT_E[k*3+1],b=LUT_E[k*3+2];
+    if(land){const eL=px>0?Z[q-1]:h,eR=px<W-1?Z[q+1]:h,eU=py>0?Z[q-W]:h,eD=py<H-1?Z[q+W]:h,gx=(eR-eL)*ex/2,gy=(eU-eD)*ex/2,nl=1/Math.sqrt(1+gx*gx+gy*gy),s=Math.max(0.35,Math.min(1.25,(0.55*-gx+0.55*gy+0.63)*nl/0.63));r*=s;g*=s;b*=s;}
+    if(!V.inS[q]){const m=(r+g+b)/3;r=0.3*r+0.35*m;g=0.3*g+0.35*m;b=0.3*b+0.35*m;}
+    d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
+  ctx.putImageData(img,0,0);l2Stats();}
+function l2Stats(){const V=l2V,S=l1St;if(!V)return;const R=S.l2R,fmt=v=>v<1?v.toFixed(2):v<10?v.toFixed(1):Math.round(v).toLocaleString("en-US");
+  $("l2stats").innerHTML=`<div>L2 grid dx / dt<b class="num">${R.o.lamMinKm/2} km / no run yet</b></div><div>Drawn at<b class="num">${fmt(V.s)} km per pixel</b></div>
+    <div>Octaves drawn<b class="num">${R.octaves.filter(L=>L>=V.minKm).join(", ")} km</b></div><div>Relief built / drawn<b class="num">${Math.round(S.l2Ms)} / ${Math.round(V.ms)} ms</b></div>`;}
+gestures($("l2wrap"),{
+  drag:(dx,dy)=>{if(!l2V||l2V.zoom<=1)return;const k=l2V.s*l2V.W/$("l2wrap").clientWidth;l2V.pan[0]-=dx*k;l2V.pan[1]+=dy*k;clearTimeout(l2V.t);l2V.t=setTimeout(l2Draw,120);},
+  zoom:(f,cx,cy)=>{if(!l2V||!l2V.W)return;const r=$("l2map").getBoundingClientRect(),px=(cx-r.left)/r.width*l2V.W,py=(cy-r.top)/r.height*l2V.H,[x,y]=l2XY(px,py);
+    l2V.zoom=Math.max(1,Math.min(64,l2V.zoom*f));if(l2V.zoom===1)l2V.pan=[0,0];
+    else{const s1=l2V.s0/l2V.zoom;l2V.pan=[x-(px+0.5-l2V.W/2)*s1-(l2V.x0+l2V.x1)/2,y+(py+0.5-l2V.H/2)*s1-(l2V.y0+l2V.y1)/2];}
+    clearTimeout(l2V.t);l2V.t=setTimeout(l2Draw,120);},
+  tap:e=>{const V=l2V;if(!V||!V.Z)return;const r=$("l2map").getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*V.W),py=Math.floor((e.clientY-r.top)/r.height*V.H);if(px<0||py<0||px>=V.W||py>=V.H)return;
+    const [x,y]=l2XY(px,py),R=l1St.l2R,h=R.z(x,y,V.minKm),st=R.strikeAt(x,y),box=$("l2inspect");
+    box.textContent=`${h>=0?"Elevation":"Depth"} ${Math.abs(h*1000).toFixed(0)} m; L1’s surface here ${Math.round(R.base(x,y)*1000)} m, L1 roughness ${Math.round(R.roughAt(x,y)*1000)} m${st&&st.stretch>1?`, relief stretched ${st.stretch.toFixed(2)}× along strike`:""}${V.inS[py*V.W+px]?"":" (outside the selection)"}`;
+    box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}});
 // the L1 -> L2 handoff: the selected tile's summary, and downloads of the landmass summary and of one tile's fields
 let l1TileSel=-1;
 function l1TileInfo(){const box=$("l1tile"),dl=$("l1dl"),ho=l1St&&l1St.ho;if(!ho){box.hidden=true;dl.hidden=true;return;}
@@ -597,7 +639,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
     checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
       L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
         basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null,
-      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells}:null},
+      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells,reliefAtTap:l2Relief().z(l2Sel.x,l2Sel.y)}:null},
     viewports:{
       L0:{colorMode:view,projection:proj,marks:$("marks").checked,faultTraces:!!handoff&&$("traces").checked,canvasPx:[pixW,pixH],
         globe:{yaw,pitch,zoom:gZoom},map:{zoom:mZoom,centre:mC,goode:goode&&{centreLonDeg:goode.lc*180/Math.PI,edgeLonDeg:goode.edgeLonDeg,
@@ -606,7 +648,8 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
       L1:S?{colorMode:l1View,rivers:$("l1Rivers").checked,zoom:l1Zoom,pan:l1Pan,canvasPx:[l1PW,l1PH],visible:l1Extent,
         frame:PROJ_DATA(sh?S.plan.proj:S.pv&&S.pv.proj),frameNote:sh?"the sheet's map: azimuthal equidistant co-moving with the reference plate (km)":"preview: azimuthal equidistant about the landmass's centroid in L0's fixed frame (km)",
         lastInspected:l1LastInspect}:null,
-      L2:ho?{tilesShown:l1View==="tiles",selectedTile:l1TileSel,tile:l1TileSel>=0?ho.tiles[l1TileSel]:null}:null},
+      L2:ho?{tilesShown:l1View==="tiles",selectedTile:l1TileSel,tile:l1TileSel>=0?ho.tiles[l1TileSel]:null,
+        reliefPreview:l2V?{zoom:l2V.zoom,pan:l2V.pan,kmPerPx:l2V.s,box:{xKm:[l2V.x0,l2V.x1],yKm:[l2V.y0,l2V.y1]}}:null}:null},
     stats:{L0:{t:w.t,steps:w.steps,dt:w.dt,platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac,continentalFraction:w.contFrac,meanSeafloorAgeMyr:w.oceanAge,
         meanUnitsPerContinentalColumn:w.meanUnits,netRotationDegPerMyr:w.netRot,msPerStep:msEma,simulatedMyrPerSecond:rateEma,savedStates:snaps.map(x=>({t:x.t,steps:x.steps}))},
       L1:sh?{history:sh.history,budget:sh.budget,msPerStep:l1Ms,basinsMs:S.bsMs,handoffMs:S.hoMs}:null},

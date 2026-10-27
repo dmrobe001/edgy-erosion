@@ -1,7 +1,7 @@
 // Runs the page's full script against a stubbed DOM: every view, both projections, inspector, extraction, export,
 // and an L1 landmass: select, preview, refine (replay, a short sheet run, the drainage pass), every L1 view, zoom and
 // inspect; then a session export, loaded back with tools/session.js and checked against the live state.
-const fs = require("fs"), path = require("path"), os = require("os"), SESSION = require("../tools/session.js"), { loadSim, loadL1 } = require("./lib");
+const fs = require("fs"), path = require("path"), os = require("os"), SESSION = require("../tools/session.js"), { loadSim, loadL1, loadL2 } = require("./lib");
 const html = fs.readFileSync(path.join(__dirname, "..", "plates.html"), "utf8");
 const code = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
 const defaults = { grid: "64", seed: "genesis", nPlates: "10", mode: "scatter", speed: "3", contT: "50", l1Win: "10", l1H: "70", l1Ar: "3", l1Ell: "500" }, els = {};
@@ -16,7 +16,7 @@ global.setTimeout = f => { f(); return 0; }; global.clearTimeout = () => {};
 global.getComputedStyle = () => ({ getPropertyValue: () => "#d2452f" });
 global.window = { devicePixelRatio: 2, addEventListener() {} };
 global.requestAnimationFrame = () => {};
-const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", code + `
+const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "loadL2", code + `
  return (async () => {
   for (let k = 0; k < 150; k++) { world.step(); snapTick(); }
   for (const p of ["globe", "flat"]) { proj = p; pixIdx = null; for (const v of ["elev", "rock", "l1", "plates"]) { view = v; colorsDirty = true; render(); } }
@@ -52,6 +52,11 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", cod
     for (let c = 0; c < bs.land.length; c++) if (s.mask[c] === 2) { l1St.plan.proj.inv(bs.x0 + (c % bs.nx + .5) * bs.h, bs.y0 + (Math.floor(c / bs.nx) + .5) * bs.h, b);
       if (Math.acos(Math.min(1, p[0] * b[0] + p[1] * b[1] + p[2] * b[2])) * 6371 > 200 + 1e-6) throw new Error("basin outside the radius selected"); }
     if (!document.getElementById("l2Info").innerHTML.includes("Selected")) throw new Error("L2 selection not reported");
+    // the relief preview, drawn in one go (frames run at once here)
+    const raf = global.requestAnimationFrame; global.requestAnimationFrame = f => f(); document.getElementById("l2Prev").onclick(); global.requestAnimationFrame = raf;
+    if (!l2V || !l2V.Z || !document.getElementById("l2stats").innerHTML.includes("Drawn at")) throw new Error("L2 relief preview not drawn");
+    let zl = Infinity, zh = -Infinity; for (const v of l2V.Z) { zl = Math.min(zl, v); zh = Math.max(zh, v); }
+    console.log("PASS ui smoke L2 relief preview: " + l2V.W + "x" + l2V.H + " px at " + l2V.s.toFixed(2) + " km/px, " + zl.toFixed(2) + " to " + zh.toFixed(2) + " km, " + Math.round(l2V.ms) + " ms");
     console.log("PASS ui smoke L2 selection: " + s.basins.length + " basins (" + s.nWithin + " within 200 km, " + s.nEnclosed + " enclosed), " + (s.areaKm2 / 1e3).toFixed(0) + " thousand km², " + s.ms.toFixed(0) + " ms"); }
   if (!document.getElementById("l1budget").innerHTML.includes("Drainage basins")) throw new Error("L1 summary not rendered");
   const sh = l1St.sh, bal = sh.balance(); if (Math.abs(bal.error) > 1e-9) throw new Error("L1 crust budget does not close: " + bal.error);
@@ -59,8 +64,8 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", cod
   console.log("PASS ui smoke: t=" + world.t.toFixed(0) + " Myr, export " + (json.length / 1e6).toFixed(1) + " MB");
   // session export: the log reruns in a fresh simulation to the same state, checked against the recorded values
   selCell = land; l1View = "tiles"; l1TileSel = 0; const file = path.join(os.tmpdir(), "edgy-session-test.json"); fs.writeFileSync(file, JSON.stringify(sessionData()));
-  const sess = SESSION.load(file), S2 = loadSim(), L2 = loadL1(S2), r = SESSION.reproduce(sess, S2, L2), bad = r.checks.filter(c => !c.ok);
-  if (bad.length || r.checks.length < 11) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
+  const sess = SESSION.load(file), S2 = loadSim(), L2 = loadL1(S2), r = SESSION.reproduce(sess, S2, L2, () => {}, loadL2(S2, L2)), bad = r.checks.filter(c => !c.ok);
+  if (bad.length || r.checks.length < 12) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
   if (!sess.viewports.L1.visible || sess.viewports.L2.selectedTile !== 0 || sess.viewports.L1.colorMode !== "tiles") throw new Error("viewports not recorded");
   const sf = file.replace(".json", ".stash"); SESSION.stash(r, sf); const u = SESSION.unstash(sf, S2, L2, sess), a = u.sheet.strainField(), b = l1St.sh.strainField();
   for (let c = 0; c < a.lmin.length; c++) if (!(a.lmin[c] === b.lmin[c] || isNaN(a.lmin[c]) && isNaN(b.lmin[c]))) throw new Error("stashed sheet differs");
@@ -68,4 +73,4 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", cod
   console.log("PASS ui smoke session: log " + (fs.statSync(file).size / 1e3).toFixed(0) + " kB, " + sess.actions.length + " actions; rerun matches all " + r.checks.length + " checks; stash " + (fs.statSync(sf).size / 1e6).toFixed(0) + " MB restores the sheet exactly");
  })();
 `);
-run(SESSION, fs, os, path, loadSim, loadL1).catch(e => { console.error(e); process.exitCode = 1; });
+run(SESSION, fs, os, path, loadSim, loadL1, loadL2).catch(e => { console.error(e); process.exitCode = 1; });

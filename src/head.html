@@ -97,6 +97,8 @@ h2{font-size:16px;font-weight:600;margin:0 0 8px}
 .l1stage{margin-top:12px}
 .l1wrap{position:relative;width:100%;touch-action:none;cursor:grab}
 .l1wrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
+.l2wrap{position:relative;width:100%;touch-action:none;cursor:grab;margin-top:12px}
+.l2wrap canvas{position:absolute;inset:0;width:100%;height:100%;display:block}
 .l1panel .row.l1controls{margin-top:10px;padding-top:0;border-top:0}
 button:disabled{opacity:.5;cursor:default}
 .underbar{display:flex;align-items:baseline;justify-content:space-between;gap:8px 18px;flex-wrap:wrap;margin:8px 0 0}
@@ -209,8 +211,11 @@ button:disabled{opacity:.5;cursor:default}
     <div class="row">
       <label><span class="field-label">Selection radius</span><input type="range" id="l2Rad" min="0" max="1000" step="25" value="150"><span class="num" id="l2RadVal">150 km</span></label>
       <button id="l2Clear" disabled>Clear selection</button>
+      <button class="primary" id="l2Prev" disabled>Preview L2 relief</button>
     </div>
     <div class="summary" id="l2Info"><div class="muted">Refine a landmass at L1, then tap its map to select drainage basins for L2.</div></div>
+    <div class="l2wrap" id="l2wrap" hidden><canvas id="l2map" aria-label="L2 relief preview"></canvas><div class="inspect num" id="l2inspect"></div></div>
+    <div class="stats" id="l2stats"></div>
   </section>
 
   <div class="cols">
@@ -243,6 +248,7 @@ button:disabled{opacity:.5;cursor:default}
     <p><span class="tag">L1 landmass.</span> Refine selected landmass replays the last 10–30 Myr of the selected landmass’s history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet: each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started. Buffer sets which land counts as the landmass: islands within that distance of its coast join it (and islands within that distance of those), and seas it encloses are always part of it, so an archipelago or an inland sea is refined with the land around it rather than cut off at a straight edge. Before refining, the L1 map shows L0’s present surface around the landmass (the landmass in colour, other land grey); refinement starts from L0’s state one window earlier.</p>
     <p><span class="tag">L1 views.</span> Terrain: shaded relief; outside the landmass’s crust, plain ocean (not modelled at L1; before refining, the preview shows L0’s surface there, dimmed). Thickening: crust thickened (red) or thinned (blue) since the window began. Finite strain: total horizontal shortening (red) and extension (blue) where it has not shortened; ticks lie along the shortening direction where it exceeds 10%. Strain rate: how fast the sheet deforms now (log scale). Surface rock: topmost unit by volume. Mantle pull: dynamic topography from sinking slabs, included in the elevation. Rainfall: a crude climate of latitude belts, zonal winds and rain shadows. Drainage basins: one colour per basin of at least 10,000 km²; inland-draining basins in earth tones, areic desert sand-coloured, small coastal basins grey; lakes blue (overflowing), pale blue (no outlet), white (dry floor). L2 tiles: the tiles L1 hands to L2, dark edges where the divide is firm (re-seeding the stand-in fine relief, 77% of firm divides stay within 30 km, against about half of the others).</p>
     <p><span class="tag">L2 basins.</span> Once a landmass is refined, a tap on its map (in any view but L2 tiles) selects drainage basins for L2: the tapped basin, whole, whatever its size; every basin lying wholly within the selection radius of the tap; and every basin the selection encloses. The circle shows the radius; land outside the selection is faded. A tap at sea selects only the basins wholly within the radius.</p>
+    <p><span class="tag">L2 relief.</span> Preview L2 relief draws the selected basins (land outside them faded) as L2 will start from them: L1’s surface, plus relief at 1–16 km that L1 cannot resolve (as loud as L1’s own local roughness continued down the spectrum, stretched along strike where L1 shortened the crust), with L1’s large rivers kept open in narrow valleys. It is a function of position, so each zoom level is drawn at its own pixel size; scroll or pinch to zoom, drag to pan, tap for the elevation.</p>
     <p><span class="tag">L1 handoff.</span> Extract handoff freezes the world and packages what L1 needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue and current plate motions.</p>
     <p><span class="tag">Export session.</span> Saves a small JSON log from which the session reruns exactly: seed, settings and step counts; the selected point; the L1 refinement’s cell, saved state, window and settings; check values for the rerun; what each view shows and how it is zoomed and coloured (L0, the L1 map and the L2 tiles); the statistics, the event log and the actions taken. tools/session.js in the repository reruns it.</p>
     <h3>What’s modeled, and what’s faked</h3>

@@ -91,8 +91,9 @@ plates.html            the built single-file page (what the artifact serves)
 build.sh               rebuilds plates.html from src/
 src/head.html          markup, styles, explanatory notes; ends with an opening <script> tag
 src/sim.js             the simulation core: a self-contained SIM module, usable in browser and Node
-src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff (L1 module)
-src/ui.js              rendering, controls, inspector, handoff panel, L1 panel
+src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff, basin selection (L1 module)
+src/l2.js              L2: the relief L2 starts from, as a function of position (L2 module)
+src/ui.js              rendering, controls, inspector, handoff panel, L1 and L2 panels
 tests/                 headless tests and benchmarks (see section 3.13)
 tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
@@ -578,12 +579,30 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 
 ### L2: region (~500 m)
 
-Built so far: the selection (section 5.6). The plan for the boundaries, not yet tested:
+Built so far: the selection (section 5.6) and the relief L2 starts from (below). The plan for the boundaries, not yet tested:
 - **What moves divides between L1 and L2 is mostly resolution, not time.** Redrawing only L1's unresolved relief with another seed changed the basin map drastically (adjusted Rand index 0.35); a 1,600-fold range of erodibility barely changed it (0.89–0.98); divide persistence rose with local relief (section 5.4). Divide migration from unequal erosion across a divide (Willett et al. 2014) is estimated, not measured, at 0.1–1 km per Myr: a cell or two of L2 over an L2 run.
 - **So L2's added relief should be a deterministic function of position** (fixed to the planet, from the seed and L1's fields), as L1's unresolved relief already is. It can then be evaluated anywhere without simulating the region around it.
 - **Burn in the outer boundary in strips.** A point's basin is a property of its downhill path, so the high-resolution divide is found by routing flow in a strip around each L1 divide on the selection's outer edge: a path that leaves the strip into a basin's interior belongs to that basin. The strip's half-width is the unresolved relief's amplitude over the resolved slope across the divide: narrow on crests, wide on lowlands. Divides inside the selection are L2's own to resolve. Because the strip depends only on position, neighbouring selections compute the same outline and their seams agree. The relief generator must be fixed before any outline is computed.
 - **During the L2 run** the burnt-in outline is a fixed water divide, open only at the outlets. The same idea, solving tiles independently and stitching only their perimeter cells, is behind Barnes's parallel depression filling and flow accumulation for DEMs (digital elevation models) of a trillion cells (2016, 2017).
 - **Test before trusting it:** route a whole test region at 500 m (200 × 200 km, 160,000 cells) and compare its outline with the strip-only outline.
+
+**The relief L2 starts from** (`src/l2.js`, `L2.relief(sheet, B)`) is a function z(x, y) on the L1 sheet's map (km, fixed to the reference plate), deterministic in the world seed. Any point can be evaluated without the rest, in about 1–3 µs. It is the sum of three parts:
+1. **Base:** L1's surface from the drainage pass (10 km, rivers and lakes included), Catmull-Rom bicubic. L1's values are cell means, so the values the interpolant passes through are corrected first (four iterations of e′ += e − M e′, M the interpolant's cell mean, a 5-point separable filter). Averaged over each L1 cell, the base is L1's surface.
+2. **Added relief** in the band L1 cannot resolve: gradient-noise octaves of lattice spacing 16, 8, 4, 2 and 1 km, each turned by its own angle (a lattice's axes show faintly in its noise, and octaves sharing them added up to a plaid).
+   - *Amplitude.* Each octave's RMS is L1's local roughness r₁ continued down the spectrum, r₁ (λ / 40 km)^H with H = 0.5. r₁ is the RMS, over a 30 km Gaussian window, of L1's land surface less its blur at one cell (relief at about 20–60 km), on land only, so the step from land to L1's flat sea is not roughness. H = 0.5 because L1's own spectrum falls by about 0.7 per octave (section 5.4), as Earth's topography does at these scales (Huang and Turcotte 1989).
+   - *Band ownership.* Noise of lattice spacing 16 km still has power at wavelengths L1 resolves. The added relief's own L1 cell means (8 × 8 samples per cell of the octaves of 4 km and up, computed when first needed) are interpolated like the base and subtracted. Averaged over L1's cells the added relief is then about zero; this removes most of the 16 km octave, so L2's relief is in practice about 1–10 km.
+   - *Structure.* Where L1 shortened the crust, the relief is stretched along strike by a = 1 + 5 × shortening (at most 4), as ridges, valleys and so divides run along strike in fold-thrust belts (trellis drainage). Direction and amount come from a lattice of nodes 20 km apart, each with its own rotated, stretched copy of the noise, blended with smooth weights; where the nodes agree (no shortening) the copies are one field, otherwise they are independent and the blend is renormalized to keep the RMS.
+3. **L1's trunk rivers** (draining at least 1,000 km²) burnt in, so the added relief cannot dam them. The surface is at most the river's level (L1's filled surface, linear along each 10 km reach) on a floor 0.6 km either side of the river, rising beyond it at the steeper of L1's valley side and 3 RMS of the added relief per km: a narrow trench, which doesn't flatten the valley. L1 knows a river's path only to a cell, and its reaches run at 0° and 45°, so the river is drawn where the reach is in coordinates warped by a smooth noise (RMS 1.5 km, 16 km lattice): it wanders within L1's cell instead of running as a canal. A river entering the sea is held at sea level. Small streams are L2's own.
+
+Measured (`tests/test_l2.js`, on the L1 test landmass; and the genesis landmass at 1 Gyr):
+- *Pure function of position:* a point evaluated alone equals the same point in a grid, and a second build agrees.
+- *L1's scale:* averaged over L1's 10 km cells, the 500 m surface differs from L1's surface by 4.2 m RMS, against 31 m RMS of L1's cell-to-cell relief (genesis: 12 m against 99 m; before the base correction and the band's high-pass, 53 m).
+- *Amplitude:* the octaves of 4 km and less have 0.419 RMS per unit of L1 roughness, against 0.418 designed.
+- *Structure:* on a made-up plain under 30% shortening (a = 2.5), the strike comes out at the designed angle, and gradients across strike vary 6.21 times as much as along it (a² = 6.25). The test landmasses have too little shortening to test (under 1%, and 6% on genesis).
+- *Rivers:* on 34 chains of five reaches, the lowest pass between two points on a river's floor, along any path on a 500 m grid, is no higher than the river at the upstream point (0.0 m). With a V-shaped trench and no floor it was 58 m, because a 500 m grid may have no cell on the river's line.
+- *Not yet addressed:* on coastal lowland a few tens of metres above sea level, hollows of the added relief dip below sea level and show as ponds and lagoons, a few kilometres inland at most. L1 treats land below sea level as inland water, and so will L2 unless this is changed.
+
+**Preview L2 relief** in the L2 panel draws the selected basins (the rest faded) from this function, per pixel at the view's own scale, leaving out octaves shorter than 2 pixels; scroll or pinch to zoom, drag to pan, tap for the elevation. The panel reports L2's planned grid (0.5 km; no time step yet, as nothing runs), the pixel size, the octaves drawn and the times. The session's checks include the relief at the tap, so a rerun verifies the generator.
 
 Also:
 - River network refinement constrained by L1's drainage graph.

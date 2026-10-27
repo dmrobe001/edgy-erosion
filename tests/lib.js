@@ -10,7 +10,9 @@ function loadSimPatched(patches, file = SRC) {
 }
 // L1 sits on top of SIM (it reads SIM's exports), so it is loaded with a SIM instance.
 function loadL1(SIM, file = path.join(__dirname, "..", "src", "l1.js")) { return new Function("SIM", fs.readFileSync(file, "utf8") + "\nreturn L1;")(SIM); }
+// L2 sits on top of SIM and L1.
+function loadL2(SIM, L1, file = path.join(__dirname, "..", "src", "l2.js")) { return new Function("SIM", "L1", fs.readFileSync(file, "utf8") + "\nreturn L2;")(SIM, L1); }
 function runTo(w, t) { while (w.t < t) w.step(); w.updateStats(true); return w; }
 function arg(name, def) { const a = process.argv.find(s => s.startsWith("--" + name + "=")); return a ? a.split("=")[1] : def; }
 const pct = x => (100 * x).toFixed(0) + "%";
-module.exports = { loadSim, loadSimPatched, loadL1, runTo, arg, pct };
+module.exports = { loadSim, loadSimPatched, loadL1, loadL2, runTo, arg, pct };
