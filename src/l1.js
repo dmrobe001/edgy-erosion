@@ -169,13 +169,18 @@ class Replay{
     return this.done;}
   // the plate whose frame is the reference at a frame: the reference plate, or its ancestor before it split off
   static refAt(fr,chain){for(const p of chain)if(fr.Q.has(p))return p;return chain[chain.length-1];}
-  finish(){const w=this.world,N=w.N,last=this.frames[this.frames.length-1],obj=new Uint8Array(this.idSpace);let nObj=0;
+  finish(){const w=this.world,N=w.N,nb=w.cube.nb,last=this.frames[this.frames.length-1],obj=new Uint8Array(this.idSpace);let nObj=0;
     for(const c of this.pick.cells){const id=last.id[c];if(id>=0&&!obj[id]){obj[id]=1;nObj++;}}
     // plus the landmass's land on oceanic crust (islands built by arcs and hotspots), marked 2: the sheet carries it too
     for(let h=0;h<this.pick.land;h++){const id=last.id[this.pick.cells[h]];if(id<-1&&!obj[-2-id]){obj[-2-id]=2;nObj++;}}
+    // and the coastal rim: oceanic cells touching the land (corners included) on the land cell's own plate. L0's coast
+    // is the zero of its bilinear surface, half a cell or so out into such a cell, so the sheet's crust has to reach
+    // past it, or its edge cuts the coast short in straight lines. Ocean on another plate (across a trench) stays out
+    for(let h=0;h<this.pick.land;h++){const a=this.pick.cells[h],pa=w.owner[a];
+      for(let k=0;k<4;k++){const b=nb[4*a+k];for(const c of [b,nb[4*b+CORNER[k]]]){const id=last.id[c];if(id<-1&&w.owner[c]===pa&&!obj[-2-id]){obj[-2-id]=2;nObj++;}}}}
     // plus the crust it consumes: a continental parcel that touches the object's crust at some frame and is gone by
     // the end (overrun in a collision, or relabelled by L0) was squeezed into it, so it belongs to the sheet
-    const atEnd=new Uint8Array(this.idSpace),nb=w.cube.nb;for(let i=0;i<N;i++){const v=last.id[i];if(v>=0)atEnd[v]=1;else if(v<-1)atEnd[-2-v]=1;}
+    const atEnd=new Uint8Array(this.idSpace);for(let i=0;i<N;i++){const v=last.id[i];if(v>=0)atEnd[v]=1;else if(v<-1)atEnd[-2-v]=1;}
     for(const fr of this.frames){const id=fr.id,add=[];
       for(let i=0;i<N;i++){const v=id[i];if(v<0||obj[v]||atEnd[v])continue;for(let k=0;k<4;k++){const u=id[nb[4*i+k]];if(u>=0&&obj[u]){add.push(v);break;}}}
       for(const v of add)if(!obj[v]){obj[v]=1;nObj++;}}
@@ -286,14 +291,24 @@ class Sheet{
   // sub-cells of its body cell (stratified, so marker rows don't alias with the grid or bunch into lines under shortening)
   seed(){const w=this.world,N=w.N,n=w.n,nn=n*n,m=this.o.markers,mj=this.o.markerJitter,q=Math.PI/4,t=[0,0,0],b=[0,0,0],xy=[0,0],obj=this.plan.obj,cube=w.cube,pool=w.pool,U=SIM.U;
     this.Qref=this.refQ();const Qr=this.Qref;
-    // L0 elevation smoothed (three passes) on the fixed grid, sampled bilinearly at each marker: the inherited surface
-    let Es=Float64Array.from(w.elev),tmp=new Float64Array(N);const nb=cube.nb;
-    for(let p=0;p<3;p++){for(let i=0;i<N;i++){let s=Es[i];for(let k=0;k<4;k++)s+=Es[nb[4*i+k]];tmp[i]=s/5;}[Es,tmp]=[tmp,Es];}
+    // L0 elevation smoothed (three passes) on the fixed grid, sampled bilinearly at each marker: the inherited surface.
+    // Land is averaged only with land and sea only with sea, so every cell keeps its sign and the coast stays where L0's
+    // own (bilinear) coast is; averaging across it would sink a cell of coastal lowland into the abyss beside it
+    let Es=Float64Array.from(w.elev),tmp=new Float64Array(N);const nb=cube.nb,EL=w.elev;
+    for(let p=0;p<3;p++){for(let i=0;i<N;i++){const up=EL[i]>0;let s=Es[i],n=1;for(let k=0;k<4;k++){const j=nb[4*i+k];if(EL[j]>0===up){s+=Es[j];n++;}}tmp[i]=s/n;}[Es,tmp]=[tmp,Es];}
+    // craton share of the crust (rock older than 500 Myr), also smoothed on the fixed grid (continental crust with
+    // continental crust) and sampled at each marker: strength is 10x on cratons, and taken parcel by parcel its edges
+    // would be L0's cell edges, staircases along which the weaker crust between cratons crumples into square ridges
+    const crat=c=>{if(c<0)return 0;const cnt=pool.cnt[c],tot=pool.sum(c);let s=0;for(let u=0;u<cnt;u++)if(pool.R[c*U+u]===SIM.ROCK.CRATON&&w.t-pool.B[c*U+u]>500)s+=tot>0?pool.T[c*U+u]/tot:1;return s;};
+    let Cs=new Float64Array(N);for(let i=0;i<N;i++)if(w.wK[i])Cs[i]=crat(w.wCol[i]);
+    for(let p=0;p<3;p++){for(let i=0;i<N;i++){if(!w.wK[i]){tmp[i]=0;continue;}let s=Cs[i],n=1;for(let k=0;k<4;k++){const j=nb[4*i+k];if(w.wK[j]){s+=Cs[j];n++;}}tmp[i]=s/n;}[Cs,tmp]=[tmp,Cs];}
     const out=[0,0,0],X=[],Y=[],V=[],S0=[],E0=[],PID=[],PL=[],COL=[],STR=[];
+    // Every object parcel present now is seeded, continental or not: oceanic parcels marked 2 (land and the coastal
+    // rim on oceanic crust), and continental crust that is still oceanic at t0 (accreted during the window).
     // L0 relabels some parcels during the window (resampling copies a neighbour's identity), leaving pinholes in the
     // traced set: a continental parcel with at least three traced neighbours on its plate counts as traced too
     const take=new Map();
-    for(const P of w.plates){if(!P.alive||!P.pid)continue;const pid=P.pid,tk=new Uint8Array(N);for(let k=0;k<N;k++)if(pid[k]>=0&&obj[pid[k]]&&P.T[k]>0&&(P.K[k]||obj[pid[k]]===2))tk[k]=1;
+    for(const P of w.plates){if(!P.alive||!P.pid)continue;const pid=P.pid,tk=new Uint8Array(N);for(let k=0;k<N;k++)if(pid[k]>=0&&obj[pid[k]]&&P.T[k]>0)tk[k]=1;
       for(let pass=0;pass<2;pass++){const add=[];for(let k=0;k<N;k++){if(tk[k]||!(P.T[k]>0)||!P.K[k])continue;let s=0;for(let d=0;d<4;d++)s+=tk[nb[4*k+d]];if(s>=3)add.push(k);}for(const k of add)tk[k]=1;}
       take.set(P.id,tk);}
     for(const P of w.plates){if(!P.alive||!P.pid)continue;const tk=take.get(P.id);
@@ -302,12 +317,12 @@ class Sheet{
         // the parcel's rock column, bottom to top, as fractions of its thickness
         const c=P.col[k],cnt=c>=0?pool.cnt[c]:0,tot=c>=0?pool.sum(c):0,col=[];
         for(let u=0;u<cnt;u++)col.push([pool.R[c*U+u],pool.B[c*U+u],tot>0?pool.T[c*U+u]/tot:1]);
-        let craton=0;for(const [r,born,fr] of col)if(r===SIM.ROCK.CRATON&&w.t-born>500)craton+=fr;
         for(let a=0;a<m;a++)for(let bb=0;bb<m;bb++){
           const [ju,jv]=mj>0?jit2(k,a*m+bb,P.id):[0,0];faceDir(f,Math.tan(((i+(a+.5+mj*ju)/m)/n*2-1)*q),Math.tan(((j+(bb+.5+mj*jv)/m)/n*2-1)*q),b);
           mv(P.Q,b[0],b[1],b[2],t);cube.lookupFrac(t[0],t[1],t[2],out);
           const cc=out[0],tx=out[1],ty=out[2],cB=nb[4*cc+(tx>=0?0:1)],cC=nb[4*cc+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty);
           const e0=(1-ax)*(1-ay)*Es[cc]+ax*(1-ay)*Es[cB]+(1-ax)*ay*Es[cC]+ax*ay*Es[cD],s0=Math.max(10,C.CONT_BASE+e0/C.ISO);
+          const craton=(1-ax)*(1-ay)*Cs[cc]+ax*(1-ay)*Cs[cB]+(1-ax)*ay*Cs[cC]+ax*ay*Cs[cD];
           mtv(Qr,t[0],t[1],t[2],b);this.proj.fwd(b,xy);
           X.push(xy[0]);Y.push(xy[1]);V.push(area);S0.push(s0);E0.push(e0);PID.push(id);PL.push(P.id);COL.push(col);STR.push(1+(this.o.cratonStrength-1)*craton);}}}
     const M=this.nm=X.length;this.mx=Float64Array.from(X);this.my=Float64Array.from(Y);this.mA=Float64Array.from(V);this.mS=Float64Array.from(S0);this.mS0=Float64Array.from(S0);this.mE0=Float64Array.from(E0);
@@ -442,28 +457,34 @@ class Sheet{
     for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let s=0,sm=0;for(let k=-R;k<=R;k++){const ii=i+k;if(ii<0||ii>=nx)continue;const c=j*nx+ii;if(!mask[c])continue;s+=w[k+R]*f[c];sm+=w[k+R];}a[j*nx+i]=s;ma[j*nx+i]=sm;}
     for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){let s=0,sm=0;for(let k=-R;k<=R;k++){const jj=j+k;if(jj<0||jj>=ny)continue;const c=jj*nx+i;s+=w[k+R]*a[c];sm+=w[k+R]*ma[c];}b[j*nx+i]=sm>0?s/sm:0;}
     return b;}
-  // L0's arcs and hotspots as new crust on the markers beneath them: each marker thickens by what its L0 cell gained
-  addVolcanism(rec){const w=this.world,Qr=this.Qref,b=[0,0,0],t=[0,0,0];let done=0;
-    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;this.proj.inv(this.mx[k],this.my[k],b);mv(Qr,b[0],b[1],b[2],t);const a=rec[w.cube.lookup(t[0],t[1],t[2])];if(!(a>0))continue;
+  // L0's arcs and hotspots as new crust on the markers beneath them: each marker thickens by what L0 gained there,
+  // interpolated bilinearly between L0's cells (a lookup would lay the crust down in blocks of L0's cells)
+  addVolcanism(rec){const w=this.world,Qr=this.Qref,b=[0,0,0],t=[0,0,0],out=[0,0,0],nb=w.cube.nb;let done=0;
+    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;this.proj.inv(this.mx[k],this.my[k],b);mv(Qr,b[0],b[1],b[2],t);w.cube.lookupFrac(t[0],t[1],t[2],out);
+      const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty);
+      const a=(1-ax)*(1-ay)*rec[c]+ax*(1-ay)*rec[cB]+(1-ax)*ay*rec[cC]+ax*ay*rec[cD];if(!(a>0))continue;
       const col=this.mCol[k],top=col[col.length-1],fr=a/(this.mS[k]+a);for(const u of col)u[2]*=1-fr;
       // a new top unit of arc or hotspot rock (arcs are by far the commoner source on continents)
       if(top&&top[0]===SIM.ROCK.ARC)top[2]+=fr;else col.push([SIM.ROCK.ARC,w.t,fr]);this.mS[k]+=a;done+=a*this.mA[k];}
     this.budget.arcsHotspots+=done;}
-  // share a per-cell volume change among the markers in each cell, in proportion to their volume
-  toMarkers(dvCell,apply,line){const {nx,ny,o}=this,h=o.h,tot=new Float64Array(nx*ny),cellOf=this._cellOf||(this._cellOf=new Int32Array(this.nm));
-    for(let k=0;k<this.nm;k++){if(!this.mIn[k]){cellOf[k]=-1;continue;}const i=Math.floor((this.mx[k]-this.x0)/h),j=Math.floor((this.my[k]-this.y0)/h);cellOf[k]=j*nx+i;tot[j*nx+i]+=this.mS[k]*this.mA[k];}
-    let done=0;
-    for(let k=0;k<this.nm;k++){const c=cellOf[k];if(c<0||!(tot[c]>0)||dvCell[c]===0)continue;const dv=dvCell[c]*this.mS[k]*this.mA[k]/tot[c];apply(k,dv);done+=dv;}
-    return done;}
+  // bilinear sample of a cell-centred field over crust cells only (renormalized; NaN where no crust is near)
+  sampleAct(f,x,y){const {nx,ny,o,act}=this,gx=(x-this.x0)/o.h-0.5,gy=(y-this.y0)/o.h-0.5,i0=Math.floor(gx),j0=Math.floor(gy),fx=gx-i0,fy=gy-j0;let s=0,w=0;
+    for(let q=0;q<4;q++){const i=i0+(q&1),j=j0+(q>>1);if(i<0||j<0||i>=nx||j>=ny)continue;const c=j*nx+i;if(!act[c])continue;const ww=(q&1?fx:1-fx)*(q>>1?fy:1-fy);s+=ww*f[c];w+=ww;}
+    return w>0?s/w:NaN;}
   // erosion on the sheet: denudation rising steeply with elevation, ero5 km/Myr at 5 km times (e / 5 km)^eroExp
   // (0.5 km/Myr in high ranges, about 20 m/Myr on lowlands at 0.5 km: the magnitudes of Ahnert's relation between
   // denudation and relief). A smooth stand-in for rivers, which the sheet's grid is too coarse to draw (the drainage
   // pass draws them at the end). Eroded rock leaves the system, stripped from the top of the rock columns.
-  erode(dt){const {nx,ny,o,act,e}=this,nc=nx*ny,h=o.h,dv=new Float64Array(nc);
-    for(let c=0;c<nc;c++){if(!act[c]||!(e[c]>0))continue;const d=Math.min(e[c],o.ero5*Math.pow(e[c]/5,o.eroExp)*dt);dv[c]=-d*h*h;this.eroded[c]+=d;}
-    const rem=-this.toMarkers(dv,(k,d)=>{const S=this.mS[k]*this.mA[k],cut=-d/S,col=this.mCol[k];let left=cut;
+  // Each marker loses the depth interpolated (bilinearly) to where it is: a depth per cell shared among the cell's
+  // markers would change from cell to cell in steps, and the markers would carry the steps away as blocks.
+  erode(dt){const {nx,ny,o,act,e}=this,nc=nx*ny,dc=this._dc||(this._dc=new Float64Array(nc));dc.fill(0);
+    for(let c=0;c<nc;c++){if(!act[c]||!(e[c]>0))continue;const d=Math.min(e[c],o.ero5*Math.pow(e[c]/5,o.eroExp)*dt);dc[c]=d;this.eroded[c]+=d;}
+    let rem=0;
+    for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const d0=this.sampleAct(dc,this.mx[k],this.my[k]);if(!(d0>0))continue;
+      const d=Math.min(d0,0.5*this.mS[k]),cut=d/this.mS[k],col=this.mCol[k];let left=cut;
       while(left>0&&col.length>1){const top=col[col.length-1];if(top[2]>left){top[2]-=left;left=0;}else{left-=top[2];col.pop();}}
-      if(left>0&&col.length)col[0][2]-=left;const sum=col.reduce((a,u)=>a+u[2],0)||1;for(const u of col)u[2]/=sum;this.mS[k]+=d/this.mA[k];});
+      if(left>0&&col.length)col[0][2]-=left;const sum=col.reduce((a,u)=>a+u[2],0)||1;for(const u of col)u[2]/=sum;
+      this.mS[k]-=d;rem+=d*this.mA[k];}
     this.budget.eroded+=rem;}
   // one coupled step: L0 advances (recording its tectonics), then the sheet runs in substeps, then volcanism, erosion
   advance(){const w=this.world,N=w.N,rec=this._rec||(this._rec=new Float32Array(N));
@@ -490,7 +511,7 @@ class Sheet{
   surfaceRock(){const {nx,ny,o}=this,h=o.h,acc=new Float64Array(nx*ny*8);
     for(let k=0;k<this.nm;k++){if(!this.mIn[k])continue;const i=Math.floor((this.mx[k]-this.x0)/h),j=Math.floor((this.my[k]-this.y0)/h),col=this.mCol[k];if(!col.length)continue;acc[(j*nx+i)*8+col[col.length-1][0]]+=this.mS[k]*this.mA[k];}
     for(let c=0;c<nx*ny;c++){let best=0,bv=0;for(let r=1;r<8;r++)if(acc[c*8+r]>bv){bv=acc[c*8+r];best=r;}this.rockTop[c]=best;}return this.rockTop;}
-  // map plane -> the L0 elevation there now (the backdrop outside L1's crust)
+  // map plane -> the L0 elevation there now (for comparisons with L0)
   l0ElevAt(x,y,tmp){const w=this.world,b=this.proj.inv(x,y,tmp||[0,0,0]),wv=mv(this.Qref,b[0],b[1],b[2],[0,0,0]),out=[0,0,0],nb=w.cube.nb;w.cube.lookupFrac(wv[0],wv[1],wv[2],out);
     const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty),E=w.elev;
     return(1-ax)*(1-ay)*E[c]+ax*(1-ay)*E[cB]+(1-ax)*ay*E[cC]+ax*ay*E[cD];}

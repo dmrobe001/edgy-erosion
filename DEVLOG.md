@@ -183,3 +183,15 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
 - **The first L1 fault-trace algorithm** (strict kind matching) mostly needed looser grouping, not a different tracer.
 - **The camera spin** was not the cause of the perceived global drift; the drift was real (see v3).
 - **Raising the arc-accretion threshold and lowering collapse probability** did little to the early crust-budget creep; the causes were the resampling bugs above. The thermostat remains, but now has much less to compensate for.
+
+- **Square mountains and clipped coasts.** On a 1 Gyr landmass (seed genesis, 150 km buffer, 20 Myr window), the high ground of the L1 map came out in rectangles, and the coast had corners cut out of it.
+  - **Rectangles.** I took the sheet's elevation apart, term by term, on the north of that landmass. The inherited surface was smooth. Crustal thickening from strain had the rectangles, up to 8 km of it, and so did strength. Cratons are 10 times stronger, and craton membership was taken parcel by parcel, so strength changed in steps along L0's 100 km cell edges. The weak crust between cratons took the shortening along those staircases. The craton share is now smoothed on L0's grid before markers sample it. Peak elevation on that landmass fell from 6.3 to 4.8 km, the same convergence spread over wider belts.
+  - **Erosion and volcanism were blocky too, but that was not the visible cause.** Erosion took the same depth from every marker in a 50 km cell, and markers in one cell came to differ by up to 13 km in thickness. Volcanism added crust by L0 cell. Both are now interpolated bilinearly to each marker. Fixing these first left the rectangles as they were.
+  - **Clipped coasts.** Three things, measured on the 10 km grid against L0's interpolated coast.
+    - The sheet carried only continental crust, so the edge of its crust cut the coast where L0's land runs into an oceanic cell. It now also carries a coastal rim of oceanic cells on the land's own plate.
+    - Crust still oceanic at the window's start was not seeded, so accreted crust was missing. Every parcel of the object is seeded now.
+    - The inherited surface was smoothed across the coast, sinking coastal lowland toward the abyss next to it. Land is now smoothed with land and sea with sea.
+    
+    Land on L0's pick with no sheet crust fell from 728 to 492 fine cells. All 7 L0 cells left are parcels the sheet did carry and moved elsewhere. Of the 8,200 fine cells where L1 has crust under the sea but L0 has land, 2,300 are drowned by the mantle pull, which L1 adds and L0 does not have. The rest are drowned by erosion and spreading. Both are L1's dynamics, not gaps in the pick.
+  - **No more L0 behind L1.** Drawing L0's surface outside the sheet's crust showed two shorelines that disagree for those reasons. The refined map now draws plain ocean there. The shelf fades into it across the edge cell, because a hard edge showed the crust's 50 km cells as a staircase in the sea.
+

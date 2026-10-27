@@ -424,28 +424,31 @@ function l1Size(){const sh=l1St.sh||l1St.pv,wrap=$("l1wrap"),X0=sh.x0,X1=sh.x0+s
 const l1XY=(px,py)=>[l1Geo.cx+(px+0.5-l1PW/2)*l1Geo.s,l1Geo.cy-(py+0.5-l1PH/2)*l1Geo.s];
 // per pixel: the field values to draw (recomputed when the sheet moves or the view changes)
 function l1Fields(){if(!l1St.sh)return l1PreviewFields();const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,n=W*H,h=sh.o.h,{nx,ny}=sh;
-  const P=l1Pix={cell:new Int32Array(n),fine:new Int32Array(n),e:new Float32Array(n),back:new Float32Array(n)},tmp=[0,0,0];
+  const P=l1Pix={cell:new Int32Array(n),fine:new Int32Array(n),e:new Float32Array(n),back:new Float32Array(n)};
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=l1XY(px,py),i=Math.floor((x-sh.x0)/h),j=Math.floor((y-sh.y0)/h);
     const c=i>=0&&j>=0&&i<nx&&j<ny?j*nx+i:-1;P.cell[q]=c>=0&&sh.act[c]?c:-1;P.fine[q]=-1;P.back[q]=NaN;
     if(bs&&P.cell[q]>=0){const fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);if(fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny)P.fine[q]=fj*bs.nx+fi;}
-    if(P.fine[q]>=0)P.e[q]=bs.e[P.fine[q]];
-    else if(P.cell[q]>=0){// bilinear over active neighbours
+    if(P.fine[q]>=0&&bs.e[P.fine[q]]>0)P.e[q]=bs.e[P.fine[q]];
+    else{// the sheet's surface, bilinear over active neighbours; at sea it fades into the plain ocean outside the crust
+      // over the edge cell, so the crust's 50 km cells don't show as a staircase in the sea
       const gx=(x-sh.x0)/h-0.5,gy=(y-sh.y0)/h-0.5,i0=Math.floor(gx),j0=Math.floor(gy),fx=gx-i0,fy=gy-j0;let s=0,ws=0;
       for(const [di,dj,ww] of [[0,0,(1-fx)*(1-fy)],[1,0,fx*(1-fy)],[0,1,(1-fx)*fy],[1,1,fx*fy]]){const ii=i0+di,jj=j0+dj;if(ii<0||jj<0||ii>=nx||jj>=ny)continue;const cc=jj*nx+ii;if(!sh.act[cc])continue;s+=ww*sh.e[cc];ws+=ww;}
-      P.e[q]=ws>0?s/ws:sh.e[P.cell[q]];}
-    else{P.e[q]=NaN;P.back[q]=sh.l0ElevAt(x,y,tmp);}}}
+      const v=ws>0?s/ws:P.cell[q]>=0?sh.e[P.cell[q]]:NaN;P.e[q]=P.fine[q]>=0||v<=0&&ws<1?Math.min(-0.01,ws*v+(1-ws)*L1_OUT_KM):P.cell[q]>=0?v:NaN;}}}
 // before refining: L0's present surface in the preview frame, the landmass (and its submerged rim) as crust, the rest as backdrop
 function l1PreviewFields(){const pv=l1St.pv,W=l1PW,H=l1PH,n=W*H,b=[0,0,0],lk=world.cube.lookup;
   const P=l1Pix={cell:new Int32Array(n).fill(-1),fine:new Int32Array(n).fill(-1),e:new Float32Array(n),back:new Float32Array(n)};
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=l1XY(px,py);pv.proj.inv(x,y,b);const v=l0Elev(b[0],b[1],b[2]);
     if(pv.mask[lk(b[0],b[1],b[2])]){P.e[q]=v;P.back[q]=NaN;}else{P.e[q]=NaN;P.back[q]=v;}}}
+const L1_OUT_KM=-5,L1_OUT=(()=>{const k=Math.round((L1_OUT_KM+8)/16*1023);return[LUT_E[k*3],LUT_E[k*3+1],LUT_E[k*3+2]];})();
 function l1Render(){if(!l1St||!(l1St.sh||l1St.pv))return;l1Size();if(!l1Pix)l1Fields();
   const S=l1St,sh=S.sh,bs=S.bs,W=l1PW,H=l1PH,d=l1Img.data,P=l1Pix,E=P.e,ex=10/l1Geo.s,rivers=$("l1Rivers").checked;
   const rock=l1View==="rock"?sh.surfaceRock():null,sf=l1View==="finite"?sh.strainField():null,fAmin=2e4;
   const bcol=new Map(),bsize=bs?l1BasinSizes():null;
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,c=P.cell[q],f=P.fine[q];let r,g,b;
-    if(isNaN(E[q])){// outside L1's crust: L0's own surface, land greyed
-      const hb=P.back[q];if(isNaN(hb)){r=g=b=20;}else{let k=Math.round((hb+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];
+    // outside L1's crust: before refining, L0's own surface, land greyed; after, plain ocean (L0's coast there is
+    // not L1's, and drawing both side by side shows two shorelines)
+    if(isNaN(E[q])){
+      const hb=P.back[q];if(isNaN(hb)){r=L1_OUT[0];g=L1_OUT[1];b=L1_OUT[2];}else{let k=Math.round((hb+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];g=LUT_E[k*3+1];b=LUT_E[k*3+2];
         if(hb>0){const m=(r+g+b)/3;r=0.35*r+0.65*m;g=0.35*g+0.65*m;b=0.35*b+0.65*m;}r*=0.72;g*=0.72;b*=0.72;}
       d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;continue;}
     const h=E[q],land=h>0;
@@ -524,7 +527,7 @@ gestures($("l1wrap"),{
   tap:e=>l1Inspect(e)});
 function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
   if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,c=l1Pix.cell[q],f=l1Pix.fine[q],sh=l1St.sh,bs=l1St.bs,box=$("l1inspect"),h=l1Pix.e[q];
-  if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb))return;box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
+  if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb)){box.textContent="Outside the landmass’s crust: not modelled at L1";return;}box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
     if(c>=0&&sh){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr, mantle pull ${Math.round(sh.dyn[c]*1000)} m${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
     if(f>=0&&bs&&bs.land[f]){const sz=l1BasinSizes().get(bs.basin[f])*bs.h*bs.h;t+=`; drains ${Math.round(bs.A[f]).toLocaleString("en-US")} km², in a basin of ${Math.round(sz).toLocaleString("en-US")} km² that ${["reaches the sea","drains inland","never reaches a river (desert)"][bs.closedB[f]]}`;if(bs.climate)t+=`; rain ${Math.round(bs.climate.P[f]*1000)} mm/yr, runoff ${Math.round(bs.climate.R[f]*1000)} mm/yr`;if(bs.lake[f])t+=["","; a lake that overflows","; a lake with no outlet","; a dry lake floor","; where a river runs dry"][bs.lake[f]];if(bs.inlandSea[f])t+=" (a sea cut off from the ocean)";}
