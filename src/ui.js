@@ -428,7 +428,11 @@ function l1Fields(){if(!l1St.sh)return l1PreviewFields();const S=l1St,sh=S.sh,bs
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,[x,y]=l1XY(px,py),i=Math.floor((x-sh.x0)/h),j=Math.floor((y-sh.y0)/h);
     const c=i>=0&&j>=0&&i<nx&&j<ny?j*nx+i:-1;P.cell[q]=c>=0&&sh.act[c]?c:-1;P.fine[q]=-1;P.back[q]=NaN;
     if(bs&&P.cell[q]>=0){const fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);if(fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny)P.fine[q]=fj*bs.nx+fi;}
-    if(P.fine[q]>=0&&bs.e[P.fine[q]]>0)P.e[q]=bs.e[P.fine[q]];
+    // land: the drainage pass's 10 km surface, bilinear between its land cells (drawn cell by cell, the hillshade lit
+    // only the cells' edges, a crosshatch); land only, so the coast stays where the pass has it
+    if(P.fine[q]>=0&&bs.e[P.fine[q]]>0){const gx=(x-bs.x0)/bs.h-0.5,gy=(y-bs.y0)/bs.h-0.5,i0=Math.floor(gx),j0=Math.floor(gy),fx=gx-i0,fy=gy-j0;let s=0,ws=0;
+      for(let k=0;k<4;k++){const ii=i0+(k&1),jj=j0+(k>>1);if(ii<0||jj<0||ii>=bs.nx||jj>=bs.ny)continue;const v=bs.e[jj*bs.nx+ii];if(!(v>0))continue;const ww=(k&1?fx:1-fx)*(k>>1?fy:1-fy);s+=ww*v;ws+=ww;}
+      P.e[q]=ws>0?s/ws:bs.e[P.fine[q]];}
     else{// the sheet's surface, bilinear over active neighbours; at sea it fades into the plain ocean outside the crust
       // over the edge cell, so the crust's 50 km cells don't show as a staircase in the sea
       const gx=(x-sh.x0)/h-0.5,gy=(y-sh.y0)/h-0.5,i0=Math.floor(gx),j0=Math.floor(gy),fx=gx-i0,fy=gy-j0;let s=0,ws=0;

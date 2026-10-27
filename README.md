@@ -493,8 +493,8 @@ How firm a divide is turns out to be graded, not sharp.
 
 - **Coupling to L0 is one-way.** L0 does not see the sheet's deformation.
 - **Sutures stop the crumpling.** When L0 welds two plates, their markers get the same velocity, so a collision crumples the crust only until L0 welds it. That is L0's rule, and L1 inherits it.
-- **Crust created during the window is missing.** Arcs that become continent and shelves that emerge have no markers.
-- **Ocean is outside the sheet.** Continental crust is the only material.
+- **Crust is seeded from what exists at the window's start.** Every parcel that ends up in the landmass is seeded, including continental crust that was still oceanic then (accreted during the window). Crust that is new during the window comes only from L0's arcs and hotspots, added to markers already there.
+- **Most of the ocean is outside the sheet.** The sheet carries continental crust, land on oceanic crust and the coastal rim of oceanic cells on the land's own plate (section 5.1). The rest of the region's ocean floor is not modelled at L1, and the refined map draws it as plain ocean.
 - **Erosion during the sheet** is a smooth function of elevation, and eroded rock leaves the system instead of filling basins.
 - **The drainage pass** has uniform erodibility (by design: section 6, item 3).
 - **Fault traces in the handoff** are L0's, at 100 km cells, where L0's rigid plates put them. In crumple zones the sheet has moved the crust by up to the shortening.
@@ -557,7 +557,7 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 - Thrust-sheet and fold generation (balanced cross-sections, critical taper, Biot buckling wavelengths). This belongs to L2; item 1 is shaped to serve it.
 - Limits accepted in L1 v2:
   - crumpling stops once L0 welds two plates;
-  - crust created during the window has no markers;
+  - crust is seeded from what exists at the window's start (crust that is new during the window comes only from arcs and hotspots);
   - the coupling is one-way.
 
 - **Inputs:** smoothed elevation, formation stacks and domains, fault zones, events, plate velocities (for present-day uplift).
@@ -612,7 +612,7 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 - **Formation identity is inferred** at handoff from rock type, origin plate and age. Recording an explicit depositional-episode ID when each unit forms would be cleaner.
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
-- **L1:** see section 5.5.
+- **L1:** see section 5.6.
 
 ---
 
