@@ -164,4 +164,17 @@ check(same, "deterministic"); console.log(`determinism: ${same ? "identical" : "
   console.log(`L2 handoff: ${nT} tiles (${Object.entries(kinds).map(([k, v]) => v + " " + k).join(", ")}; ${small} under 5,000 km^2), ${HO.imprints.length} imprints; ${unassigned} land cells without a tile, ${cross} receivers crossing a tile edge; summary ${(JSON.stringify(HO.summary()).length / 1e3).toFixed(0)} kB`);
   check(unassigned === 0 && cross === 0 && area === bs.landCells * bs.h * bs.h, "tiles partition the land into whole basins");
   check(outlets && sorted && upOk && sizes && same, "handoff: outlets, imprint order, response time, field sizes, determinism"); }
+// L2 basin selection on a made-up map (20 x 20 cells of 10 km, sea round the edge): basin A, 5 x 5 at the centre,
+// lies inside a ring basin B (9 x 9); basin C is the rest of the land, and D is a small basin wholly inside the circle
+{ const nx = 20, ny = 20, h = 10, land = new Uint8Array(nx * ny), basin = new Int32Array(nx * ny).fill(-1);
+  for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) { const c = j * nx + i, di = Math.max(Math.abs(i - 9), Math.abs(j - 9)); land[c] = 1; basin[c] = di <= 2 ? 0 : di <= 4 ? 1 : 2; }
+  basin[1 * nx + 1] = 3; // D: one cell in the corner
+  const B = { nx, ny, h, x0: -100, y0: -100, land, basin }, P = new L1.Projection([0, 0, 1], [1, 0, 0], [0, 1, 0]), at = (i, j) => [B.x0 + (i + .5) * h, B.y0 + (j + .5) * h];
+  const s1 = L1.basinSelection(B, P, ...at(9, 13), 0);   // the ring, radius 0: the ring and what it encloses
+  const s2 = L1.basinSelection(B, P, ...at(2, 2), 30);   // the big basin C at its corner: D lies within 30 km
+  const s3 = L1.basinSelection(B, P, ...at(0, 0), 30);   // at sea: only D
+  check(s1.tapped === 1 && s1.basins.join() === "0,1" && s1.nEnclosed === 1, "L2 selection: a ring basin takes the basin it encloses");
+  check(s2.tapped === 2 && s2.basins.join() === "0,1,2,3" && s2.nWithin === 1, "L2 selection: the tapped basin whole, a small one within the radius, and what they enclose");
+  check(s3.tapped === -1 && s3.basins.join() === "3" && s3.nWithin === 1, "L2 selection: a tap at sea picks only basins wholly within the radius");
+  console.log(`L2 selection: ring ${s1.basins.join("+")} (${s1.nEnclosed} enclosed); big basin ${s2.basins.join("+")}; at sea ${s3.basins.join("+")}`); }
 console.log(ok ? "PASS L1" : "FAIL L1"); process.exitCode = ok ? 0 : 1;

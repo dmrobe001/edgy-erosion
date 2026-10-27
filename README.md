@@ -489,7 +489,16 @@ How firm a divide is turns out to be graded, not sharp.
 - **Response time:** a median of 54 Myr across the land; 90% of cells are under 206 Myr. Headwaters in desert, with almost no runoff, reach over 1,000 Myr.
 - **Sizes and cost:** the summary is 0.83 MB of JSON and the largest tile 1.7 MB. Building it all takes 0.8 s.
 
-### 5.6 What it does not do yet
+### 5.6 Selecting basins for L2
+
+L2 refines drainage basins, not a landmass. A tap on the refined L1 map (in any view but L2 tiles) selects them about the tapped point, with the **Selection radius** slider in the L2 panel (default 150 km, 0 to 1,000 km) (`basinSelection(B, proj, x, y, radiusKm)`):
+1. *The tapped basin*, whole, whatever its size. A tap at sea selects none.
+2. *Basins wholly within the radius*: every cell centre within the radius of the tap (great-circle distance). This picks up a cluster of small coastal basins without the large basin behind them, which a buffer around the tapped basin would take.
+3. *Enclosed basins*: land the rest of the map cannot reach without crossing the selection (8-connected, from the grid's edge and the open sea), as enclosed seas join a landmass at L1.
+
+The page draws the circle and fades the land outside the selection, and the panel reports the basins, their area and their cell count at L2's planned 500 m. The tap and radius go into the session log, and a rerun checks the selection (tapped basin, basins, cells). Measured on the genesis landmass at 1 Gyr: a tap on the east coast with a 300 km radius selects 54 basins, 54,200 km² (the tapped one 100 km², 53 wholly within the radius); a tap inland selects its basin of 605,000 km² alone. A selection takes about 20–60 ms.
+
+### 5.7 What it does not do yet
 
 - **Coupling to L0 is one-way.** L0 does not see the sheet's deformation.
 - **Sutures stop the crumpling.** When L0 welds two plates, their markers get the same velocity, so a collision crumples the crust only until L0 welds it. That is L0's rule, and L1 inherits it.
@@ -569,6 +578,14 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 
 ### L2: region (~500 m)
 
+Built so far: the selection (section 5.6). The plan for the boundaries, not yet tested:
+- **What moves divides between L1 and L2 is mostly resolution, not time.** Redrawing only L1's unresolved relief with another seed changed the basin map drastically (adjusted Rand index 0.35); a 1,600-fold range of erodibility barely changed it (0.89–0.98); divide persistence rose with local relief (section 5.4). Divide migration from unequal erosion across a divide (Willett et al. 2014) is estimated, not measured, at 0.1–1 km per Myr: a cell or two of L2 over an L2 run.
+- **So L2's added relief should be a deterministic function of position** (fixed to the planet, from the seed and L1's fields), as L1's unresolved relief already is. It can then be evaluated anywhere without simulating the region around it.
+- **Burn in the outer boundary in strips.** A point's basin is a property of its downhill path, so the high-resolution divide is found by routing flow in a strip around each L1 divide on the selection's outer edge: a path that leaves the strip into a basin's interior belongs to that basin. The strip's half-width is the unresolved relief's amplitude over the resolved slope across the divide: narrow on crests, wide on lowlands. Divides inside the selection are L2's own to resolve. Because the strip depends only on position, neighbouring selections compute the same outline and their seams agree. The relief generator must be fixed before any outline is computed.
+- **During the L2 run** the burnt-in outline is a fixed water divide, open only at the outlets. The same idea, solving tiles independently and stitching only their perimeter cells, is behind Barnes's parallel depression filling and flow accumulation for DEMs (digital elevation models) of a trillion cells (2016, 2017).
+- **Test before trusting it:** route a whole test region at 500 m (200 × 200 km, 160,000 cells) and compare its outline with the strip-only outline.
+
+Also:
 - River network refinement constrained by L1's drainage graph.
 - Strata tilted and folded near faults, so dip comes from fault kind and proximity.
 - Water table from precipitation and formation permeability.
@@ -612,7 +629,7 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 - **Formation identity is inferred** at handoff from rock type, origin plate and age. Recording an explicit depositional-episode ID when each unit forms would be cleaner.
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
-- **L1:** see section 5.6.
+- **L1:** see section 5.7.
 
 ---
 

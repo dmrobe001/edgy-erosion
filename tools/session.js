@@ -18,7 +18,7 @@ function l0Hash(w) { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math
 function newWorld(sess, SIM) { const s = sess.settings; return new SIM.World({ n: s.resolution, seed: s.seed, nPlates: s.initialPlates, mode: s.start, nnr: true, contTarget: s.continentalTarget }); }
 
 function reproduce(sess, SIM, L1, log = () => {}) {
-  const w = newWorld(sess, SIM), R = sess.reproduce, L = R.L1, out = { world: w };
+  const w = newWorld(sess, SIM), R = sess.reproduce, L = R.L1, out = { world: w, L1 };
   const to = steps => { while (w.steps < steps) w.step(); };
   if (L) {
     to(L.entrySteps); const entry = { t: w.t, steps: w.steps, snap: w.snapshot() }; out.entry = entry; log(`L0 at the saved state: ${w.t.toFixed(2)} Myr, ${w.steps} steps`);
@@ -42,6 +42,8 @@ function check(sess, r) {
   if (c.L1 && r.sheet) { const sh = r.sheet; eq("sheet steps", c.L1.sheetSteps, sh.steps); eq("markers", c.L1.markers, sh.nm); eq("max elevation", c.L1.last.maxElevKm, sh.history.at(-1).maxElevKm);
     if (c.L1.basins && r.basins) { eq("basins", c.L1.basins.nBasins, r.basins.nBasins); eq("inland share", c.L1.basins.inlandFrac, r.basins.inlandFrac); }
     if (c.L1.tiles != null && r.handoff) eq("tiles", c.L1.tiles, r.handoff.tiles.length); }
+  const L2 = sess.reproduce.L2;
+  if (c.L2 && L2 && r.basins) { const s = r.L1.basinSelection(r.basins, r.plan.proj, L2.xKm, L2.yKm, L2.radiusKm); eq("L2 tapped basin", c.L2.tapped, s.tapped); eq("L2 basins", c.L2.basins, s.basins.length); eq("L2 cells", c.L2.cells, s.cells); }
   return res;
 }
 // Stash: the rerun's states on disk (v8 serialization), so later work can skip the rerun

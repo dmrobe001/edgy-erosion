@@ -204,6 +204,15 @@ button:disabled{opacity:.5;cursor:default}
     </div>
   </section>
 
+  <section class="panel l2panel" id="l2panel">
+    <h2>L2 basins</h2>
+    <div class="row">
+      <label><span class="field-label">Selection radius</span><input type="range" id="l2Rad" min="0" max="1000" step="25" value="150"><span class="num" id="l2RadVal">150 km</span></label>
+      <button id="l2Clear" disabled>Clear selection</button>
+    </div>
+    <div class="summary" id="l2Info"><div class="muted">Refine a landmass at L1, then tap its map to select drainage basins for L2.</div></div>
+  </section>
+
   <div class="cols">
     <section class="panel handoff">
       <h2>L1 handoff</h2>
@@ -232,7 +241,8 @@ button:disabled{opacity:.5;cursor:default}
     <p><span class="tag">Map projection.</span> Interrupted Goode homolosine, an equal-area projection: sinusoidal within 40°44′ of the equator and Mollweide beyond. Its cuts are placed for this planet: the map edge is the meridian crossing the least land, the north gets one more cut and the south two, each at the meridian crossing the least land in that hemisphere, at least 50° from the others. Cuts are re-placed when the world stops moving.</p>
     <p><span class="tag">Legends.</span> Elevation: sea level is the blue–green break; dark lines are trenches. Rock type: darker means older. L1 preview: smoothed L0 elevation and formations, cut by stand-in fine relief (noise, not a real L1 model). Plates: light fill is continental crust; boundaries coloured by relative motion.</p>
     <p><span class="tag">L1 landmass.</span> Refine selected landmass replays the last 10–30 Myr of the selected landmass’s history from a saved state of L0, at finer resolution and with the continents deforming instead of rigid. Its crust is a thin viscous sheet: each plate drags the crust above it, and thickened crust pushes back by its own weight, so where plates converge the crust crumples into mountain belts and plateaus. The sheet carries L0’s rock columns. At the end, tectonics stops and 5 Myr of erosion on a 10 km grid settle the drainage basins, the tiles for L2. L0 ends exactly where it started. Buffer sets which land counts as the landmass: islands within that distance of its coast join it (and islands within that distance of those), and seas it encloses are always part of it, so an archipelago or an inland sea is refined with the land around it rather than cut off at a straight edge. Before refining, the L1 map shows L0’s present surface around the landmass (the landmass in colour, other land grey); refinement starts from L0’s state one window earlier.</p>
-    <p><span class="tag">L1 views.</span> Terrain: shaded relief; outside the landmass’s crust, L0’s own surface, dimmed. Thickening: crust thickened (red) or thinned (blue) since the window began. Finite strain: total horizontal shortening (red) and extension (blue) where it has not shortened; ticks lie along the shortening direction where it exceeds 10%. Strain rate: how fast the sheet deforms now (log scale). Surface rock: topmost unit by volume. Mantle pull: dynamic topography from sinking slabs, included in the elevation. Rainfall: a crude climate of latitude belts, zonal winds and rain shadows. Drainage basins: one colour per basin of at least 10,000 km²; inland-draining basins in earth tones, areic desert sand-coloured, small coastal basins grey; lakes blue (overflowing), pale blue (no outlet), white (dry floor). L2 tiles: the tiles L1 hands to L2, dark edges where the divide is firm (re-seeding the stand-in fine relief, 77% of firm divides stay within 30 km, against about half of the others).</p>
+    <p><span class="tag">L1 views.</span> Terrain: shaded relief; outside the landmass’s crust, plain ocean (not modelled at L1; before refining, the preview shows L0’s surface there, dimmed). Thickening: crust thickened (red) or thinned (blue) since the window began. Finite strain: total horizontal shortening (red) and extension (blue) where it has not shortened; ticks lie along the shortening direction where it exceeds 10%. Strain rate: how fast the sheet deforms now (log scale). Surface rock: topmost unit by volume. Mantle pull: dynamic topography from sinking slabs, included in the elevation. Rainfall: a crude climate of latitude belts, zonal winds and rain shadows. Drainage basins: one colour per basin of at least 10,000 km²; inland-draining basins in earth tones, areic desert sand-coloured, small coastal basins grey; lakes blue (overflowing), pale blue (no outlet), white (dry floor). L2 tiles: the tiles L1 hands to L2, dark edges where the divide is firm (re-seeding the stand-in fine relief, 77% of firm divides stay within 30 km, against about half of the others).</p>
+    <p><span class="tag">L2 basins.</span> Once a landmass is refined, a tap on its map (in any view but L2 tiles) selects drainage basins for L2: the tapped basin, whole, whatever its size; every basin lying wholly within the selection radius of the tap; and every basin the selection encloses. The circle shows the radius; land outside the selection is faded. A tap at sea selects only the basins wholly within the radius.</p>
     <p><span class="tag">L1 handoff.</span> Extract handoff freezes the world and packages what L1 needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue and current plate motions.</p>
     <p><span class="tag">Export session.</span> Saves a small JSON log from which the session reruns exactly: seed, settings and step counts; the selected point; the L1 refinement’s cell, saved state, window and settings; check values for the rerun; what each view shows and how it is zoomed and coloured (L0, the L1 map and the L2 tiles); the statistics, the event log and the actions taken. tools/session.js in the repository reruns it.</p>
     <h3>What’s modeled, and what’s faked</h3>
@@ -253,7 +263,7 @@ button:disabled{opacity:.5;cursor:default}
   </section>
 </main>
 <script>
-const BUILD_ID="53a794be81ad";
+const BUILD_ID="70dc9b88a0fa";
 // ===== SIM-START =====
 const SIM = (() => {
 const R_KM=6371, U=8, FS=15;
@@ -1693,7 +1703,35 @@ function handoff(sheet,B,o){
       fine:Object.assign({cellKm:h,i0,j0,nx:tx,ny:ty,x0Km:B.x0+i0*h,y0Km:B.y0+j0*h},F),coarse:Object.assign({cellKm:H,x0Km:sheet.x0+si0*H,y0Km:sheet.y0+sj0*H},G)};}
   return{meta,lifetimes,imprints,tiles:outTiles,tileOf,divide,responseMyr:tau,tile,summary:()=>({meta,lifetimes,imprints,tiles:outTiles})};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,handoff,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
+// ---------- selecting basins for L2 ----------
+// A tap at (x, y) on the map with a selection radius picks drainage basins of the drainage pass:
+// 1. the basin tapped (whole, whatever its size; none if the tap is at sea);
+// 2. every basin lying wholly within radiusKm of the tap (great-circle distance to each cell's centre), which picks up
+//    a cluster of small coastal basins without the big one behind them;
+// 3. every basin the selection encloses: land the rest of the map cannot reach without crossing the selection
+//    (8-connected, from the grid's edge and the open sea), as enclosed seas join a landmass at L1.
+// Returns the basin ids, and per fine cell 1 (tapped), 2 (within the radius), 3 (enclosed) or 0.
+function basinSelection(B,proj,x,y,radiusKm){const {nx,ny,h,land,basin}=B,nc=nx*ny,p=proj.inv(x,y,[0,0,0]);
+  let u=B._u;if(!u){u=B._u=new Float32Array(3*nc);const b=[0,0,0];for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){proj.inv(B.x0+(i+.5)*h,B.y0+(j+.5)*h,b);const c=j*nx+i;u[3*c]=b[0];u[3*c+1]=b[1];u[3*c+2]=b[2];}}
+  const fi=Math.floor((x-B.x0)/h),fj=Math.floor((y-B.y0)/h),f0=fi>=0&&fj>=0&&fi<nx&&fj<ny?fj*nx+fi:-1,tapped=f0>=0&&land[f0]?basin[f0]:-1;
+  // each basin's farthest cell from the tap (as the least cosine)
+  const far=new Map();for(let c=0;c<nc;c++){if(!land[c])continue;const d=u[3*c]*p[0]+u[3*c+1]*p[1]+u[3*c+2]*p[2],b=basin[c],m=far.get(b);if(m===undefined||d<m)far.set(b,d);}
+  const cosR=Math.cos(Math.min(Math.PI,radiusKm/R_KM)),kind=new Map();
+  for(const [b,m] of far)if(b===tapped)kind.set(b,1);else if(radiusKm>0&&m>=cosR)kind.set(b,2);
+  // enclosed: flood the rest from the grid's edge and the open sea
+  const out=new Uint8Array(nc),q=[];for(let c=0;c<nc;c++){if(land[c]&&kind.has(basin[c]))continue;const i=c%nx,j=(c/nx)|0;if(!land[c]||i===0||j===0||i===nx-1||j===ny-1){out[c]=1;q.push(c);}}
+  for(let k=0;k<q.length;k++){const c=q[k],i=c%nx,j=(c/nx)|0;for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I<0||J<0||I>=nx||J>=ny)continue;const n=J*nx+I;if(!out[n]&&!(land[n]&&kind.has(basin[n]))){out[n]=1;q.push(n);}}}
+  if(kind.size){const reached=new Set();for(let c=0;c<nc;c++)if(land[c]&&out[c])reached.add(basin[c]);for(const b of far.keys())if(!kind.has(b)&&!reached.has(b))kind.set(b,3);}
+  const mask=new Uint8Array(nc),n=[0,0,0,0];let cells=0;for(let c=0;c<nc;c++)if(land[c]){const k=kind.get(basin[c]);if(k){mask[c]=k;cells++;}}
+  for(const k of kind.values())n[k]++;
+  return{x,y,radiusKm,tapped,basins:[...kind.keys()].sort((a,b)=>a-b),mask,nWithin:n[2],nEnclosed:n[3],cells,areaKm2:cells*h*h};}
+// the circle of radius radiusKm (great circle) about the map point (x, y), as map points
+function mapCircle(proj,x,y,radiusKm,n=96){const p=proj.inv(x,y,[0,0,0]),d=radiusKm/R_KM,pts=[],xy=[0,0];
+  // east and north at p (north toward the map's own pole axis, falling back to any perpendicular at the pole)
+  let nr=[-p[0]*p[2],-p[1]*p[2],1-p[2]*p[2]];let L=Math.hypot(nr[0],nr[1],nr[2]);if(L<1e-9){nr=[1,0,0];L=1;}nr=nr.map(v=>v/L);const ea=[nr[1]*p[2]-nr[2]*p[1],nr[2]*p[0]-nr[0]*p[2],nr[0]*p[1]-nr[1]*p[0]];
+  for(let k=0;k<=n;k++){const a=2*Math.PI*k/n,c=Math.cos(d),s=Math.sin(d),b=[0,1,2].map(i=>c*p[i]+s*(Math.cos(a)*ea[i]+Math.sin(a)*nr[i]));proj.fwd(b,xy);pts.push([xy[0],xy[1]]);}
+  return pts;}
+return {Replay,Sheet,Projection,landmassAt,basins,handoff,basinSelection,mapCircle,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
 })();
 // ===== L1-END =====
 // ---------- rendering ----------
@@ -2044,7 +2082,7 @@ const LUT_DYN=buildLut(DYN_STOPS,256,-1,0.6),RAIN_STOPS=[[-1.3,"#96703c"],[-0.7,
 const LUT_RAIN=buildLut(RAIN_STOPS,256,-1.3,0.5),LUT_FIN=buildLut(FIN_STOPS,256,-0.5,0.6),LUT_DS=buildLut(THICK_DIV,256,-15,30),LUT_EPS=buildLut(STRAIN_STOPS,256,-3,0.5);
 function l1Reset(){l1St=null;l1Mask=null;l1Pix=null;$("l1Run").disabled=true;
   $("l1stage").hidden=true;$("l1controls").hidden=true;$("l1stats").innerHTML="";$("l1budget").innerHTML="";$("l1legend").innerHTML="";
-  $("l1Info").innerHTML="";l1TileSel=-1;l1TileInfo();}
+  $("l1Info").innerHTML="";l1TileSel=-1;l1TileInfo();l2Reset();}
 // the newest saved state at least a window before the present
 const l1Entry=win=>{for(let k=snaps.length-1;k>=0;k--)if(snaps[k].t<=world.t-win-1e-9)return snaps[k];return null;};
 // A finished run belongs to its moment of L0: once L0 moves on it is marked stale and kept until the selection changes.
@@ -2091,7 +2129,7 @@ $("l1Run").onclick=()=>{if(l1Busy()||selCell<0)return;const win=+$("l1Win").valu
   if(running)stopRun();$("l1Run").disabled=true;
   const o={h:+$("l1H").value,Ar:+$("l1Ar").value,ellKm:+$("l1Ell").value};let rp;
   try{rp=new L1.Replay(world,entry,win,pick);}catch(err){$("l1Info").insertAdjacentHTML("beforeend",`<div class="muted">Could not start: ${err.message}</div>`);return;}
-  l1TileSel=-1;l1TileInfo();$("l1stats").innerHTML="";$("l1budget").innerHTML="";
+  l1TileSel=-1;l1TileInfo();l2Reset();$("l1stats").innerHTML="";$("l1budget").innerHTML="";
   l1St={phase:"replay",pick,cell:selCell,rp,entry,win,o,t0Wall:performance.now()};logAction({a:"refine",cell:selCell,bufferKm:pick.bufferKm,entrySteps:entry.steps,windowMyr:win,sheet:o});l1Mask=null;$("exportBtn").disabled=true;
   $("l1Info").innerHTML=`<div class="muted" id="l1Prog">Replaying L0 to trace the landmass’s crust…</div>`;};
 function l1Prog(t){const el=$("l1Prog");if(el)el.textContent=t;}
@@ -2184,8 +2222,15 @@ function l1Render(){if(!l1St||!(l1St.sh||l1St.pv))return;l1Size();if(!l1Pix)l1Fi
     if(rivers&&land&&f>=0&&(l1View==="terrain"||l1View==="basins"||l1View==="rain"||l1View==="tiles")){const A=bs.climate?bs.Q[f]/0.3:bs.A[f],a=A>=fAmin?Math.min(0.9,0.4+0.25*Math.log10(A/fAmin)):0;
       if(a>0){r=r*(1-a)+40*a;g=g*(1-a)+95*a;b=b*(1-a)+170*a;}}
     if(land&&f>=0&&bs.lake[f]&&l1View!=="thick"&&l1View!=="strain"&&l1View!=="finite"&&l1View!=="dyn"){const L=[null,[52,104,190],[120,196,214],[238,234,222],[214,178,112]][bs.lake[f]];r=L[0];g=L[1];b=L[2];}
+    // L2 selection: land outside it faded and greyed
+    if(l2Sel&&l1View!=="tiles"&&f>=0&&bs.land[f]&&!l2Sel.mask[f]){const m=(r+g+b)/3;r=0.3*r+0.35*m;g=0.3*g+0.35*m;b=0.3*b+0.35*m;}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
   const ctx=$("l1map").getContext("2d");ctx.putImageData(l1Img,0,0);
+  // the L2 selection circle
+  if(l2Sel&&l1View!=="tiles"){const dpr=l1PW/$("l1wrap").clientWidth,pts=L1.mapCircle(S.plan.proj,l2Sel.x,l2Sel.y,l2Sel.radiusKm),P2=([x,y])=>[(x-l1Geo.cx)/l1Geo.s+l1PW/2,-(y-l1Geo.cy)/l1Geo.s+l1PH/2];
+    for(const [col,wd] of [["rgba(20,20,20,.8)",3.4],["rgba(255,255,255,.95)",1.6]]){ctx.strokeStyle=col;ctx.lineWidth=wd*dpr;ctx.setLineDash(l2Sel.radiusKm>0?[]:[1]);ctx.beginPath();
+      if(l2Sel.radiusKm>0)pts.forEach((p,k)=>{const [a,b]=P2(p);k?ctx.lineTo(a,b):ctx.moveTo(a,b);});
+      const [cx,cy]=P2([l2Sel.x,l2Sel.y]);ctx.moveTo(cx-6*dpr,cy);ctx.lineTo(cx+6*dpr,cy);ctx.moveTo(cx,cy-6*dpr);ctx.lineTo(cx,cy+6*dpr);ctx.stroke();}}
   // ticks along the shortening axis where crust has shortened by 10% or more, on a lattice of cells about 26 px apart
   if(sf){const {nx,ny}=sh,h=sh.o.h,step=Math.max(1,Math.round(26*l1Geo.s/h)),len=0.42*step*h/l1Geo.s,dpr=l1PW/$("l1wrap").clientWidth;
     ctx.lineCap="round";for(const [col,wd] of [["rgba(255,255,255,.75)",3.2],["rgba(20,20,20,.9)",1.4]]){ctx.strokeStyle=col;ctx.lineWidth=wd*dpr;ctx.beginPath();
@@ -2230,6 +2275,8 @@ gestures($("l1wrap"),{
   tap:e=>l1Inspect(e)});
 function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundingClientRect(),px=Math.floor((e.clientX-r.left)/r.width*l1PW),py=Math.floor((e.clientY-r.top)/r.height*l1PH);
   if(px<0||py<0||px>=l1PW||py>=l1PH)return;const q=py*l1PW+px,c=l1Pix.cell[q],f=l1Pix.fine[q],sh=l1St.sh,bs=l1St.bs,box=$("l1inspect"),h=l1Pix.e[q];
+  // after the drainage pass, a tap (outside the tiles view) selects basins for L2 about the tapped point
+  if(bs&&l1St.phase==="done"&&l1View!=="tiles"){const [xk,yk]=l1XY(px,py);l2Select(xk,yk,true);}
   if(isNaN(h)){const hb=l1Pix.back[q];if(isNaN(hb)){box.textContent="Outside the landmass’s crust: not modelled at L1";return;}box.textContent=`Not the landmass’s crust; L0 ${hb>=0?"elevation":"depth"} ${Math.abs(hb).toFixed(2)} km`;}
   else{let t=`${h>=0?"Elevation":"Depth"} ${Math.abs(h).toFixed(2)} km`;
     if(c>=0&&sh){const rk=sh.surfaceRock()[c];t+=`, crust ${sh.S[c].toFixed(1)} km (${sh.dS[c]>=0?"+":"−"}${Math.abs(sh.dS[c]).toFixed(1)} in the window), strain rate ${sh.eps[c].toFixed(3)}/Myr, mantle pull ${Math.round(sh.dyn[c]*1000)} m${rk?", "+ROCKS[rk].name.toLowerCase()+" at the surface":""}`;const sf=sh.strainField();if(!isNaN(sf.lmin[c])){const s1=1-sf.lmin[c],e1=sf.lmax[c]-1;t+=`; ${s1>=0.02?`shortened ${Math.round(100*s1)}% along ${l1Bearing(sf.dir[c])}`:"little shortened"}${e1>=0.02?`, stretched ${Math.round(100*e1)}% across`:""}, rotated ${Math.abs(Math.round(sf.rot[c]*180/Math.PI))}° ${sf.rot[c]>=0?"anticlockwise":"clockwise"}`;}}
@@ -2237,6 +2284,20 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
     if(l1View==="tiles"&&f>=0&&bs&&bs.land[f]&&l1St.ho){const k=l1St.ho.tileOf[f];if(k>=0&&k!==l1TileSel){l1TileSel=k;l1TileInfo();l1Render();}}
     box.textContent=t;const [xk,yk]=l1XY(px,py);l1LastInspect={xKm:+xk.toFixed(1),yKm:+yk.toFixed(1),text:t};}
   box.style.display="block";clearTimeout(box._t);box._t=setTimeout(()=>box.style.display="none",5000);}
+// ---------- L2: selecting drainage basins on the L1 map ----------
+// a tap picks the tapped basin (whole), every basin wholly within the radius and every basin the selection encloses
+let l2Sel=null;const l2Rad=()=>+$("l2Rad").value;
+function l2Reset(){l2Sel=null;$("l2Clear").disabled=true;$("l2Info").innerHTML=`<div class="muted">Refine a landmass at L1, then tap its map to select drainage basins for L2.</div>`;}
+function l2Select(x,y,log){const S=l1St;if(!S||!S.bs)return;const t0=performance.now();l2Sel=L1.basinSelection(S.bs,S.plan.proj,x,y,l2Rad());l2Sel.ms=performance.now()-t0;
+  if(log)logAction({a:"l2select",xKm:+x.toFixed(2),yKm:+y.toFixed(2),radiusKm:l2Sel.radiusKm});$("l2Clear").disabled=false;l2Info();l1Render();}
+function l2Info(){const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;const fmt=v=>Math.round(v).toLocaleString("en-US"),sz=l1BasinSizes(),cell=bs.h*bs.h;
+  const tap=s.tapped>=0?`the tapped basin (${fmt(sz.get(s.tapped)*cell)} km²${["",", draining inland",", areic desert"][bs.closedB[s.tapped]]})`:"no basin tapped (the tap is at sea)";
+  const n2=s.basins.length;
+  $("l2Info").innerHTML=`<div><b>Selected</b>: ${n2} basin${n2===1?"":"s"}, ${fmt(s.areaKm2)} km²: ${tap}, ${s.nWithin} wholly within ${fmt(s.radiusKm)} km, ${s.nEnclosed} enclosed by the selection.</div>
+    <div class="muted">At L2's planned 500 m cells: ${fmt(s.areaKm2/0.25)} cells. (${fmt(s.ms)} ms.)</div>`;}
+$("l2Rad").oninput=e=>{$("l2RadVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";if(l2Sel)l2Select(l2Sel.x,l2Sel.y,false);};
+$("l2Rad").onchange=()=>{if(l2Sel)logAction({a:"l2radius",radiusKm:l2Rad()});};
+$("l2Clear").onclick=()=>{logAction({a:"l2clear"});l2Reset();l1Render();};
 // the L1 -> L2 handoff: the selected tile's summary, and downloads of the landmass summary and of one tile's fields
 let l1TileSel=-1;
 function l1TileInfo(){const box=$("l1tile"),dl=$("l1dl"),ho=l1St&&l1St.ho;if(!ho){box.hidden=true;dl.hidden=true;return;}
@@ -2265,12 +2326,14 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
     settings:{seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
-      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value}},
+      stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value},l2:{radiusKm:l2Rad()}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
-      L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null},
+      L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null,
+      L2:l2Sel?{xKm:l2Sel.x,yKm:l2Sel.y,radiusKm:l2Sel.radiusKm,frameNote:"the L1 sheet's map (km)"}:null},
     checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
       L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
-        basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null},
+        basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null,
+      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells}:null},
     viewports:{
       L0:{colorMode:view,projection:proj,marks:$("marks").checked,faultTraces:!!handoff&&$("traces").checked,canvasPx:[pixW,pixH],
         globe:{yaw,pitch,zoom:gZoom},map:{zoom:mZoom,centre:mC,goode:goode&&{centreLonDeg:goode.lc*180/Math.PI,edgeLonDeg:goode.edgeLonDeg,

@@ -42,6 +42,17 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", cod
   if (l1TileSel < 0 || !document.getElementById("l1tile").innerHTML.includes("Tile " + l1TileSel)) throw new Error("tile not selected");
   const tj = JSON.stringify(l1St.ho.tile(l1TileSel)), sj = JSON.stringify(l1St.ho.summary());
   console.log("PASS ui smoke L2 handoff: " + l1St.ho.tiles.length + " tiles, summary " + (sj.length / 1e3).toFixed(0) + " kB, tile " + l1TileSel + " " + (tj.length / 1e3).toFixed(0) + " kB");
+  // L2 selection: a tap in the basins view with a 200 km radius picks the tapped basin, the basins wholly inside, the enclosed
+  l1View = "basins"; l1Pix = null; l1Render(); { const el = document.getElementById("l2Rad"); el.value = 200; el.oninput({ target: el });
+    let q = -1; for (let k = Math.floor(l1Pix.fine.length / 2); k < l1Pix.fine.length; k++) if (l1Pix.fine[k] >= 0 && l1St.bs.land[l1Pix.fine[k]]) { q = k; break; }
+    l1Inspect({ clientX: (q % l1PW + 0.5) / l1PW * 400, clientY: (Math.floor(q / l1PW) + 0.5) / l1PH * 400 });
+    const s = l2Sel, bs = l1St.bs; if (!s || s.tapped !== bs.basin[l1Pix.fine[q]]) throw new Error("L2 tap did not select the tapped basin");
+    // every cell of a basin wholly within the radius is within it (to the cell's centre)
+    const p = l1St.plan.proj.inv(s.x, s.y, [0, 0, 0]), b = [0, 0, 0];
+    for (let c = 0; c < bs.land.length; c++) if (s.mask[c] === 2) { l1St.plan.proj.inv(bs.x0 + (c % bs.nx + .5) * bs.h, bs.y0 + (Math.floor(c / bs.nx) + .5) * bs.h, b);
+      if (Math.acos(Math.min(1, p[0] * b[0] + p[1] * b[1] + p[2] * b[2])) * 6371 > 200 + 1e-6) throw new Error("basin outside the radius selected"); }
+    if (!document.getElementById("l2Info").innerHTML.includes("Selected")) throw new Error("L2 selection not reported");
+    console.log("PASS ui smoke L2 selection: " + s.basins.length + " basins (" + s.nWithin + " within 200 km, " + s.nEnclosed + " enclosed), " + (s.areaKm2 / 1e3).toFixed(0) + " thousand km², " + s.ms.toFixed(0) + " ms"); }
   if (!document.getElementById("l1budget").innerHTML.includes("Drainage basins")) throw new Error("L1 summary not rendered");
   const sh = l1St.sh, bal = sh.balance(); if (Math.abs(bal.error) > 1e-9) throw new Error("L1 crust budget does not close: " + bal.error);
   console.log("PASS ui smoke L1: " + sh.nx + "x" + sh.ny + " sheet, " + sh.nm + " markers, t=" + sh.t.toFixed(1) + " Myr, " + l1St.bs.nBasins + " basins, budget error " + bal.error.toExponential(1));
@@ -49,7 +60,7 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", cod
   // session export: the log reruns in a fresh simulation to the same state, checked against the recorded values
   selCell = land; l1View = "tiles"; l1TileSel = 0; const file = path.join(os.tmpdir(), "edgy-session-test.json"); fs.writeFileSync(file, JSON.stringify(sessionData()));
   const sess = SESSION.load(file), S2 = loadSim(), L2 = loadL1(S2), r = SESSION.reproduce(sess, S2, L2), bad = r.checks.filter(c => !c.ok);
-  if (bad.length || r.checks.length < 8) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
+  if (bad.length || r.checks.length < 11) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
   if (!sess.viewports.L1.visible || sess.viewports.L2.selectedTile !== 0 || sess.viewports.L1.colorMode !== "tiles") throw new Error("viewports not recorded");
   const sf = file.replace(".json", ".stash"); SESSION.stash(r, sf); const u = SESSION.unstash(sf, S2, L2, sess), a = u.sheet.strainField(), b = l1St.sh.strainField();
   for (let c = 0; c < a.lmin.length; c++) if (!(a.lmin[c] === b.lmin[c] || isNaN(a.lmin[c]) && isNaN(b.lmin[c]))) throw new Error("stashed sheet differs");

@@ -805,6 +805,34 @@ function handoff(sheet,B,o){
       fine:Object.assign({cellKm:h,i0,j0,nx:tx,ny:ty,x0Km:B.x0+i0*h,y0Km:B.y0+j0*h},F),coarse:Object.assign({cellKm:H,x0Km:sheet.x0+si0*H,y0Km:sheet.y0+sj0*H},G)};}
   return{meta,lifetimes,imprints,tiles:outTiles,tileOf,divide,responseMyr:tau,tile,summary:()=>({meta,lifetimes,imprints,tiles:outTiles})};
 }
-return {Replay,Sheet,Projection,landmassAt,basins,handoff,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
+// ---------- selecting basins for L2 ----------
+// A tap at (x, y) on the map with a selection radius picks drainage basins of the drainage pass:
+// 1. the basin tapped (whole, whatever its size; none if the tap is at sea);
+// 2. every basin lying wholly within radiusKm of the tap (great-circle distance to each cell's centre), which picks up
+//    a cluster of small coastal basins without the big one behind them;
+// 3. every basin the selection encloses: land the rest of the map cannot reach without crossing the selection
+//    (8-connected, from the grid's edge and the open sea), as enclosed seas join a landmass at L1.
+// Returns the basin ids, and per fine cell 1 (tapped), 2 (within the radius), 3 (enclosed) or 0.
+function basinSelection(B,proj,x,y,radiusKm){const {nx,ny,h,land,basin}=B,nc=nx*ny,p=proj.inv(x,y,[0,0,0]);
+  let u=B._u;if(!u){u=B._u=new Float32Array(3*nc);const b=[0,0,0];for(let j=0;j<ny;j++)for(let i=0;i<nx;i++){proj.inv(B.x0+(i+.5)*h,B.y0+(j+.5)*h,b);const c=j*nx+i;u[3*c]=b[0];u[3*c+1]=b[1];u[3*c+2]=b[2];}}
+  const fi=Math.floor((x-B.x0)/h),fj=Math.floor((y-B.y0)/h),f0=fi>=0&&fj>=0&&fi<nx&&fj<ny?fj*nx+fi:-1,tapped=f0>=0&&land[f0]?basin[f0]:-1;
+  // each basin's farthest cell from the tap (as the least cosine)
+  const far=new Map();for(let c=0;c<nc;c++){if(!land[c])continue;const d=u[3*c]*p[0]+u[3*c+1]*p[1]+u[3*c+2]*p[2],b=basin[c],m=far.get(b);if(m===undefined||d<m)far.set(b,d);}
+  const cosR=Math.cos(Math.min(Math.PI,radiusKm/R_KM)),kind=new Map();
+  for(const [b,m] of far)if(b===tapped)kind.set(b,1);else if(radiusKm>0&&m>=cosR)kind.set(b,2);
+  // enclosed: flood the rest from the grid's edge and the open sea
+  const out=new Uint8Array(nc),q=[];for(let c=0;c<nc;c++){if(land[c]&&kind.has(basin[c]))continue;const i=c%nx,j=(c/nx)|0;if(!land[c]||i===0||j===0||i===nx-1||j===ny-1){out[c]=1;q.push(c);}}
+  for(let k=0;k<q.length;k++){const c=q[k],i=c%nx,j=(c/nx)|0;for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I<0||J<0||I>=nx||J>=ny)continue;const n=J*nx+I;if(!out[n]&&!(land[n]&&kind.has(basin[n]))){out[n]=1;q.push(n);}}}
+  if(kind.size){const reached=new Set();for(let c=0;c<nc;c++)if(land[c]&&out[c])reached.add(basin[c]);for(const b of far.keys())if(!kind.has(b)&&!reached.has(b))kind.set(b,3);}
+  const mask=new Uint8Array(nc),n=[0,0,0,0];let cells=0;for(let c=0;c<nc;c++)if(land[c]){const k=kind.get(basin[c]);if(k){mask[c]=k;cells++;}}
+  for(const k of kind.values())n[k]++;
+  return{x,y,radiusKm,tapped,basins:[...kind.keys()].sort((a,b)=>a-b),mask,nWithin:n[2],nEnclosed:n[3],cells,areaKm2:cells*h*h};}
+// the circle of radius radiusKm (great circle) about the map point (x, y), as map points
+function mapCircle(proj,x,y,radiusKm,n=96){const p=proj.inv(x,y,[0,0,0]),d=radiusKm/R_KM,pts=[],xy=[0,0];
+  // east and north at p (north toward the map's own pole axis, falling back to any perpendicular at the pole)
+  let nr=[-p[0]*p[2],-p[1]*p[2],1-p[2]*p[2]];let L=Math.hypot(nr[0],nr[1],nr[2]);if(L<1e-9){nr=[1,0,0];L=1;}nr=nr.map(v=>v/L);const ea=[nr[1]*p[2]-nr[2]*p[1],nr[2]*p[0]-nr[0]*p[2],nr[0]*p[1]-nr[1]*p[0]];
+  for(let k=0;k<=n;k++){const a=2*Math.PI*k/n,c=Math.cos(d),s=Math.sin(d),b=[0,1,2].map(i=>c*p[i]+s*(Math.cos(a)*ea[i]+Math.sin(a)*nr[i]));proj.fwd(b,xy);pts.push([xy[0],xy[1]]);}
+  return pts;}
+return {Replay,Sheet,Projection,landmassAt,basins,handoff,basinSelection,mapCircle,route,streamPower,planarGrid,scratch,Heap,expm2,dynTopo,dynAt,DYN};
 })();
 // ===== L1-END =====
