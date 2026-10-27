@@ -207,10 +207,12 @@ function boundary(R,B,o){
     return near;}
   // tiles a refinement still needs routed, [TI, TJ] each: the edge cells' first (the band's width depends on their
   // halos), then the band's; empty when refine(sel) can run at once. Lets the page route a tile per frame.
-  function pending(sel){const inSel=new Set(sel.basins),selC=c=>inSel.has(lab1[c]),edge=edgeCells(selC),need=new Map();
+  // the selection as a flag per L1 cell (a set lookup per neighbour made the scan of a large grid slow)
+  const selFlags=sel=>{const inSel=new Set(sel.basins),fl=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++)if(lab1[c]>=0&&inSel.has(lab1[c]))fl[c]=1;return c=>fl[c]===1;};
+  function pending(sel){const selC=selFlags(sel),edge=edgeCells(selC),need=new Map();
     for(const c of edge){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}if(need.size)return[...need.values()];
     for(const c of nearCells(selC,edge)){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}return[...need.values()];}
-  function refine(sel){const t0=Date.now(),inSel=new Set(sel.basins),selC=c=>inSel.has(lab1[c]),near=nearCells(selC,edgeCells(selC));
+  function refine(sel){const t0=Date.now(),inSel=new Set(sel.basins),selC=selFlags(sel),near=nearCells(selC,edgeCells(selC));
     const cells=new Map(),seen=new Set();for(const c of near){seen.add(tKey(c));cells.set(c,tileAt(c).cells.get(c));}
     const inside=(x,y)=>{const i=Math.floor((x-B.x0)/h),j=Math.floor((y-B.y0)/h);if(i<0||j<0||i>=nx||j>=ny)return false;const c=j*nx+i,L=cells.get(c);
       if(!L)return selC(c);const u=Math.min(f-1,Math.floor((x-B.x0-i*h)/dx)),v=Math.min(f-1,Math.floor((y-B.y0-j*h)/dx));return inSel.has(L[v*f+u]);};

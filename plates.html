@@ -269,7 +269,7 @@ button:disabled{opacity:.5;cursor:default}
   </section>
 </main>
 <script>
-const BUILD_ID="fc551685ce56";
+const BUILD_ID="25efcb214263";
 // ===== SIM-START =====
 const SIM = (() => {
 const R_KM=6371, U=8, FS=15;
@@ -1949,10 +1949,12 @@ function boundary(R,B,o){
     return near;}
   // tiles a refinement still needs routed, [TI, TJ] each: the edge cells' first (the band's width depends on their
   // halos), then the band's; empty when refine(sel) can run at once. Lets the page route a tile per frame.
-  function pending(sel){const inSel=new Set(sel.basins),selC=c=>inSel.has(lab1[c]),edge=edgeCells(selC),need=new Map();
+  // the selection as a flag per L1 cell (a set lookup per neighbour made the scan of a large grid slow)
+  const selFlags=sel=>{const inSel=new Set(sel.basins),fl=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++)if(lab1[c]>=0&&inSel.has(lab1[c]))fl[c]=1;return c=>fl[c]===1;};
+  function pending(sel){const selC=selFlags(sel),edge=edgeCells(selC),need=new Map();
     for(const c of edge){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}if(need.size)return[...need.values()];
     for(const c of nearCells(selC,edge)){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}return[...need.values()];}
-  function refine(sel){const t0=Date.now(),inSel=new Set(sel.basins),selC=c=>inSel.has(lab1[c]),near=nearCells(selC,edgeCells(selC));
+  function refine(sel){const t0=Date.now(),inSel=new Set(sel.basins),selC=selFlags(sel),near=nearCells(selC,edgeCells(selC));
     const cells=new Map(),seen=new Set();for(const c of near){seen.add(tKey(c));cells.set(c,tileAt(c).cells.get(c));}
     const inside=(x,y)=>{const i=Math.floor((x-B.x0)/h),j=Math.floor((y-B.y0)/h);if(i<0||j<0||i>=nx||j>=ny)return false;const c=j*nx+i,L=cells.get(c);
       if(!L)return selC(c);const u=Math.min(f-1,Math.floor((x-B.x0-i*h)/dx)),v=Math.min(f-1,Math.floor((y-B.y0-j*h)/dx));return inSel.has(L[v*f+u]);};
@@ -2547,9 +2549,11 @@ $("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;let i0
 // the selection's outline burnt in at 500 m (L2.boundary): a tile routed per slice of a frame, then the outline
 function l2Boundary(){const S=l1St;if(!S.l2B)S.l2B=L2.boundary(l2Relief(),S.bs);return S.l2B;}
 function l2Burn(done){const sel=l2Sel,job=++l2Job;if(sel.ref){done();return;}const bd=l2Boundary(),t0=performance.now();let n=0;
-  const step=()=>{if(job!==l2Job||sel!==l2Sel)return;const t1=performance.now();let p=bd.pending(sel);
-    while(p.length&&performance.now()-t1<60){bd.tile(p[0][0],p[0][1]);n++;p=p.slice(1);if(!p.length)p=bd.pending(sel);}
-    if(p.length){$("l2stats").innerHTML=`<div>Burning in the outline<b class="num">${n} tiles routed…</b></div>`;requestAnimationFrame(step);return;}
+  // the tiles still to route: listed once per phase (the scan is slow on a large grid), at least one routed per frame
+  let p=[],finished=false,listed=0;
+  const step=()=>{if(job!==l2Job||sel!==l2Sel)return;const t1=performance.now();
+    do{if(!p.length){p=bd.pending(sel);listed++;if(!p.length){finished=true;break;}}const [TI,TJ]=p.shift();bd.tile(TI,TJ);n++;}while(performance.now()-t1<60);
+    if(!finished){$("l2stats").innerHTML=`<div>Burning in the outline<b class="num">${n} tiles routed, ${p.length} more listed${listed<2?" (then the band around the edge)":""}…</b></div>`;requestAnimationFrame(step);return;}
     sel.ref=bd.refine(sel);sel.ref.wallMs=performance.now()-t0;sel.ref.routed=n;l2Info();done();};
   requestAnimationFrame(step);}
 // geometry: the selection's box fitted to the canvas, zoomed and panned
@@ -2560,8 +2564,9 @@ const l2XY=(px,py)=>[l2V.cx+(px+0.5-l2V.W/2)*l2V.s,l2V.cy-(py+0.5-l2V.H/2)*l2V.s
 // drawn a band of rows per frame (about 40 ms each), then shaded
 function l2Draw(){if(!l2V)return;const job=++l2Job,R=l2Relief(),bs=l1St.bs,sel=l2Sel;l2Geo();const V=l2V,W=V.W,H=V.H,Z=new Float32Array(W*H),inS=new Uint8Array(W*H),minKm=Math.max(R.o.lamMinKm,2*V.s),t0=performance.now();let row=0;
   const step=()=>{if(job!==l2Job)return;const t1=performance.now();
-    while(row<H&&performance.now()-t1<40){for(let px=0;px<W;px++){const [x,y]=l2XY(px,row),q=row*W+px,fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);
-        Z[q]=R.z(x,y,minKm);inS[q]=sel.ref?(sel.ref.inside(x,y)?1:0):fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}
+    // at least one row per frame, however slow the frame
+    do{for(let px=0;px<W;px++){const [x,y]=l2XY(px,row),q=row*W+px,fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);
+        Z[q]=R.z(x,y,minKm);inS[q]=sel.ref?(sel.ref.inside(x,y)?1:0):fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}while(row<H&&performance.now()-t1<40);
     $("l2stats").innerHTML=`<div>Drawing<b class="num">${Math.round(100*row/H)}%</b></div>`;
     if(row<H){requestAnimationFrame(step);return;}
     V.Z=Z;V.inS=inS;V.minKm=minKm;V.ms=performance.now()-t0;l2Shade();};

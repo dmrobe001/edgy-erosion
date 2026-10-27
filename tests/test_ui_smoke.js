@@ -53,12 +53,17 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
       if (Math.acos(Math.min(1, p[0] * b[0] + p[1] * b[1] + p[2] * b[2])) * 6371 > 200 + 1e-6) throw new Error("basin outside the radius selected"); }
     if (!document.getElementById("l2Info").innerHTML.includes("Selected")) throw new Error("L2 selection not reported");
     // the relief preview, drawn in one go (frames run at once here)
-    const raf = global.requestAnimationFrame; global.requestAnimationFrame = f => f(); document.getElementById("l2Prev").onclick(); global.requestAnimationFrame = raf;
+    // with a clock that jumps 100 ms at every reading, every frame is over its time budget: the burn-in must still route
+    // a tile per frame (it once listed the pending tiles, ran out of time and never routed one)
+    const raf = global.requestAnimationFrame, now = performance.now, queue = []; let fake = now.call(performance), frames = 0;
+    global.requestAnimationFrame = f => queue.push(f); performance.now = () => (fake += 100);
+    try { document.getElementById("l2Prev").onclick(); while (queue.length) { if (++frames > 20000) throw new Error("L2 burn-in makes no progress"); queue.shift()(); } }
+    finally { global.requestAnimationFrame = raf; performance.now = now; }
     if (!l2V || !l2V.Z || !document.getElementById("l2stats").innerHTML.includes("Drawn at")) throw new Error("L2 relief preview not drawn");
     if (!s.ref || !document.getElementById("l2Info").innerHTML.includes("Outline at 500 m")) throw new Error("L2 outline not burnt in");
-    console.log("PASS ui smoke L2 outline: " + Math.round(s.ref.areaKm2) + " km² at 500 m (L1: " + Math.round(s.ref.areaL1Km2) + "), " + s.ref.nTiles + " tiles, halos up to " + s.ref.kMaxUsed + ", " + (s.ref.wallMs / 1000).toFixed(1) + " s");
+    console.log("PASS ui smoke L2 outline: " + Math.round(s.ref.areaKm2) + " km² at 500 m (L1: " + Math.round(s.ref.areaL1Km2) + "), " + s.ref.nTiles + " tiles, halos up to " + s.ref.kMaxUsed + ", " + frames + " frames under a clock running 100 ms per reading");
     let zl = Infinity, zh = -Infinity; for (const v of l2V.Z) { zl = Math.min(zl, v); zh = Math.max(zh, v); }
-    console.log("PASS ui smoke L2 relief preview: " + l2V.W + "x" + l2V.H + " px at " + l2V.s.toFixed(2) + " km/px, " + zl.toFixed(2) + " to " + zh.toFixed(2) + " km, " + Math.round(l2V.ms) + " ms");
+    console.log("PASS ui smoke L2 relief preview: " + l2V.W + "x" + l2V.H + " px at " + l2V.s.toFixed(2) + " km/px, " + zl.toFixed(2) + " to " + zh.toFixed(2) + " km");
     console.log("PASS ui smoke L2 selection: " + s.basins.length + " basins (" + s.nWithin + " within 200 km, " + s.nEnclosed + " enclosed), " + (s.areaKm2 / 1e3).toFixed(0) + " thousand km², " + s.ms.toFixed(0) + " ms"); }
   if (!document.getElementById("l1budget").innerHTML.includes("Drainage basins")) throw new Error("L1 summary not rendered");
   const sh = l1St.sh, bal = sh.balance(); if (Math.abs(bal.error) > 1e-9) throw new Error("L1 crust budget does not close: " + bal.error);
