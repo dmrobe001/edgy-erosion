@@ -98,6 +98,7 @@ tests/                 headless tests and benchmarks (see section 3.13)
 tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
 ONTOLOGY.md            what each structure in the code is (field, material, pattern, ...), and what that shows
+L0_MESH_SPEC.md        proposal: L0 rebuilt on Lagrangian markers with a torque balance, mantle flow, plumes and cracking
 docs/                  diagnostic images produced during development
 ```
 
