@@ -4,7 +4,7 @@ This repository holds the first two levels of a multi-level procedural generator
 
 The goal is diversity that comes from **material and history** rather than from noise layered on hand-made rules. Each level simulates or procedurally generates the structure that is plausible at its own scale. It hands down only what it can actually resolve, plus a record of what happened, so finer levels inherit causes as well as shapes.
 
-Contents: the big picture; quick start; L0 in detail; the L1 handoff format; L1 landmass; sketches of the levels below; known limitations and next steps. `DEVLOG.md` explains how the current version came about, including what didn't work.
+Contents: the big picture; quick start; L0 in detail; the L1 handoff format; L1 landmass; sketches of the levels below; known limitations and next steps. `DEVLOG.md` explains how the current version came about, including what didn't work. `ONTOLOGY.md` labels every structure in the code as field, material, record, process, source, event or pattern, and lists where the labels show a problem.
 
 ---
 
@@ -97,6 +97,7 @@ src/ui.js              rendering, controls, inspector, handoff panel, L1 and L2 
 tests/                 headless tests and benchmarks (see section 3.13)
 tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
+ONTOLOGY.md            what each structure in the code is (field, material, pattern, ...), and what that shows
 docs/                  diagnostic images produced during development
 ```
 
