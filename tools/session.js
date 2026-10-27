@@ -44,7 +44,8 @@ function check(sess, r) {
     if (c.L1.tiles != null && r.handoff) eq("tiles", c.L1.tiles, r.handoff.tiles.length); }
   const L2 = sess.reproduce.L2;
   if (c.L2 && L2 && r.basins) { const s = r.L1.basinSelection(r.basins, r.plan.proj, L2.xKm, L2.yKm, L2.radiusKm); eq("L2 tapped basin", c.L2.tapped, s.tapped); eq("L2 basins", c.L2.basins, s.basins.length); eq("L2 cells", c.L2.cells, s.cells);
-    if (c.L2.reliefAtTap != null && r.L2) eq("L2 relief at the tap", c.L2.reliefAtTap, r.L2.relief(r.sheet, r.basins).z(L2.xKm, L2.yKm)); }
+    if (c.L2.reliefAtTap != null && r.L2) { const Rl = r.L2.relief(r.sheet, r.basins); eq("L2 relief at the tap", c.L2.reliefAtTap, Rl.z(L2.xKm, L2.yKm));
+      if (c.L2.outlineKm2 != null) eq("L2 outline area", c.L2.outlineKm2, r.L2.boundary(Rl, r.basins).refine(s).areaKm2); } }
   return res;
 }
 // Stash: the rerun's states on disk (v8 serialization), so later work can skip the rerun

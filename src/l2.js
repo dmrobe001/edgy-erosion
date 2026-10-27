@@ -128,6 +128,103 @@ function relief(sheet,B,o){
   return{o,z,grid,base,band,added,trench,r1,roughAt:(x,y)=>bil(r1,x,y),strikeAt:(x,y)=>{const I=Math.round((x-lx0)/Lb),J=Math.round((y-ly0)/Lb);if(I<0||J<0||I>=lnx||J>=lny)return null;const k=J*lnx+I;return{stretch:an[k],strike:Math.atan2(sn[k],cs[k])};},
     nSegments:segs.length,octaves:Array.from({length:nOct},(_,k)=>o.lamMaxKm/2**k)};
 }
-return {relief,makeGrad2,gblur};
+// ---------- basin boundaries at 500 m ----------
+// Which L1 basin a point of L2's surface belongs to: the basin (at L1) of the place where its water leaves the land, at
+// the sea, at an inland sink (an L1 lake with no outlet, a dry lake floor or a river's dry end; or land below sea
+// level), or at the edge of the window routed. Depressions are filled (priority flood, as at L1), so every point
+// drains somewhere. On a window: flood from those outlets, lowest first; each cell takes the label of the cell it was
+// reached from, so it carries the label of the outlet its water reaches (Barnes et al. 2014).
+// L1 sea cells take the basin of the nearest L1 land cell, so a coast that L2 moves seaward keeps its basins.
+function l1Labels(B){const {nx,ny,land,basin}=B,nc=nx*ny,lab=new Int32Array(nc).fill(-1),q=[];
+  for(let c=0;c<nc;c++)if(land[c]){lab[c]=basin[c];q.push(c);}
+  for(let k=0;k<q.length;k++){const c=q[k],i=c%nx,j=(c/nx)|0;for(const [di,dj] of [[1,0],[-1,0],[0,1],[0,-1]]){const I=i+di,J=j+dj;if(I<0||J<0||I>=nx||J>=ny)continue;const n=J*nx+I;if(lab[n]<0){lab[n]=lab[c];q.push(n);}}}
+  return lab;}
+// labels on a window of W x H cells with heights z: seeds (lab0 >= 0) are outlets; returns each cell's label, and
+// the seed (outlet cell) it came from
+function flood(z,W,H,lab0){const n=W*H,src=new Int32Array(n).fill(-1),key=new Float64Array(n),done=new Uint8Array(n),hp=new L1.Heap(9*n+8);
+  for(let q=0;q<n;q++)if(lab0[q]>=0){src[q]=q;key[q]=z[q];hp.push(q,z[q]);}
+  while(hp.n){const q=hp.pop();if(done[q])continue;done[q]=1;const i=q%W,j=(q/W)|0,kq=key[q];
+    for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){if(!di&&!dj)continue;const I=i+di,J=j+dj;if(I<0||J<0||I>=W||J>=H)continue;const p=J*W+I;
+      if(done[p]||lab0[p]>=0)continue;const kp=Math.max(z[p],kq);if(src[p]<0||kp<key[p]){src[p]=src[q];key[p]=kp;hp.push(p,kp);}}}
+  const lab=new Int32Array(n);for(let q=0;q<n;q++)lab[q]=src[q]>=0?lab0[src[q]]:-1;
+  return{lab,src};}
+// The selection's outline at L2's resolution, by strips: labels are computed on a fixed lattice of tiles (T x T L1
+// cells), each routed on itself plus a halo of k L1 cells, the halo's outer edge an outlet with L1's own labels. A
+// tile's labels depend only on its position, never on the selection, so two selections sharing a boundary compute
+// the same outline there. The halo is wide enough when no core cell takes its label from a guess: a core cell's
+// water reaches a real outlet (the sea, a sink), or the halo's edge where L1's label is sure (the L1 cells around all
+// share it); if it reaches the edge near an L1 divide, the halo doubles, up to kMax. (Two halos agreeing
+// with each other proved nothing: both sent the same water to the same uncertain edge.) The first halo is how far
+// L2's relief can move a divide: the added relief's RMS over L1's regional
+// slope at the cell (a contour on a slope s moves by about sigma / s), in L1 cells, from kMin to kMax, the most
+// over the tile. The regional slope is that of L1's surface blurred over slopeKm: the steepest drop to a neighbour
+// is usually the wall of a small valley L1 carved, and in flat country it hid how far water wanders at 500 m.
+// Tiles are routed for the L1 cells within max(band, k / 2) cells of the selection's outer edge; elsewhere a point
+// keeps its L1 cell's label.
+function boundary(R,B,o){
+  o=Object.assign({dx:0.5,T:4,kMin:2,kMax:24,band:2,slopeKm:20},o);
+  const {nx,ny,h,e,land,lake}=B,f=Math.round(h/o.dx),dx=h/f,lab1=l1Labels(B),blocks=new Map(),tiles=new Map();
+  // the relief's RMS per unit of L1 roughness (all octaves, as drawn; an upper bound once the band is high-passed)
+  const sig=Math.sqrt(R.octaves.reduce((a,L)=>a+Math.pow(L/R.o.refKm,2*R.o.H),0));
+  const lm=Uint8Array.from(land),eS=gblur(e,lm,nx,ny,o.slopeKm/h),kc=new Uint8Array(nx*ny);
+  for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0,at=(I,J)=>eS[Math.max(0,Math.min(ny-1,J))*nx+Math.max(0,Math.min(nx-1,I))];
+    const s=Math.hypot(at(i+1,j)-at(i-1,j),at(i,j+1)-at(i,j-1))/(2*h),w=sig*R.r1[c]/Math.max(s,1e-6);kc[c]=Math.max(o.kMin,Math.min(o.kMax,Math.ceil(w/h)));}
+  const kOf=c=>kc[c];
+  // the surface at L2's resolution in one L1 cell, f x f values, when first needed
+  const block=c=>{let b=blocks.get(c);if(b)return b;b=new Float32Array(f*f);const i=c%nx,j=(c/nx)|0;
+    for(let v=0;v<f;v++)for(let u=0;u<f;u++)b[v*f+u]=R.z(B.x0+i*h+(u+.5)*dx,B.y0+j*h+(v+.5)*dx,R.o.lamMinKm);blocks.set(c,b);return b;};
+  const sink=c=>land[c]&&lake&&lake[c]>=2;
+  // L1 cells whose label is sure: every L1 cell within a cell shares it
+  const sure=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0;let ok=1;for(let dj=-1;dj<=1&&ok;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I>=0&&J>=0&&I<nx&&J<ny&&lab1[J*nx+I]!==lab1[c]){ok=0;break;}}sure[c]=ok;}
+  // a tile's labels: per core L1 cell, f x f labels
+  function tile(TI,TJ){const key=TI+","+TJ;let t=tiles.get(key);if(t)return t;const i0=TI*o.T,j0=TJ*o.T;let k=o.kMin;
+    for(let j=j0;j<j0+o.T;j++)for(let i=i0;i<i0+o.T;i++)if(i<nx&&j<ny)k=Math.max(k,kOf(j*nx+i));
+    // double the halo while a core cell's label is a guess (or to kMax)
+    let r=route(i0,j0,k),tries=1;while(r.guesses&&k<o.kMax){k=Math.min(o.kMax,2*k);r=route(i0,j0,k);tries++;}
+    t={k,tries,guesses:r.guesses,cells:r.out};tiles.set(key,t);return t;}
+  // the core cells' labels of the tile at (i0, j0), routed with a halo of k cells
+  function route(i0,j0,k){
+    const a0=i0-k,b0=j0-k,n1=o.T+2*k,W=n1*f,z=new Float32Array(W*W).fill(1e9),l0=new Int32Array(W*W).fill(-1);
+    for(let bj=0;bj<n1;bj++)for(let bi=0;bi<n1;bi++){const I=a0+bi,J=b0+bj;const inG=I>=0&&J>=0&&I<nx&&J<ny,c=inG?J*nx+I:-1,bl=inG?block(c):null,edge=bi===0||bj===0||bi===n1-1||bj===n1-1;
+      for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;if(!inG){z[q]=-1;l0[q]=-2;continue;}z[q]=bl[v*f+u];
+        const ring=edge&&(bi===0&&u===0||bj===0&&v===0||bi===n1-1&&u===f-1||bj===n1-1&&v===f-1);if(ring||z[q]<=0||sink(c))l0[q]=lab1[c];}}
+    const {lab,src}=flood(z,W,W,l0),out=new Map();let guesses=0;
+    for(let bj=k;bj<k+o.T;bj++)for(let bi=k;bi<k+o.T;bi++){const I=a0+bi,J=b0+bj;if(I<0||J<0||I>=nx||J>=ny)continue;const L=new Int32Array(f*f);
+      for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;L[v*f+u]=lab[q];
+        // a guess: the outlet is on the halo's edge (not sea or sink) in an L1 cell near a divide
+        const sq=src[q];if(sq>=0&&z[sq]>0){const sb=(sq/W/f)|0,sa=((sq%W)/f)|0,cc=(b0+sb)*nx+a0+sa;if(cc>=0&&cc<nx*ny&&!sink(cc)&&!sure[cc])guesses++;}}
+      out.set(J*nx+I,L);}
+    return{out,guesses};}
+  // The selection refined. Edge cells: selected with an unselected neighbour, or the reverse; then every L1 cell
+  // within max(band, k / 2) of one, k its tile's halo, gets L2 labels from its tile.
+  const tKey=c=>Math.floor((c%nx)/o.T)+","+Math.floor(((c/nx)|0)/o.T);
+  const tileAt=c=>tile(Math.floor((c%nx)/o.T),Math.floor(((c/nx)|0)/o.T));
+  function edgeCells(selC){const edge=[];for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0;let on=false;
+      for(let dj=-1;dj<=1&&!on;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I<0||J<0||I>=nx||J>=ny)continue;if(selC(J*nx+I)!==selC(c)&&(land[c]||land[J*nx+I])){on=true;break;}}if(on)edge.push(c);}
+    return edge;}
+  function nearCells(selC,edge){const near=new Set();
+    for(const c of edge){const d=Math.max(o.band,Math.ceil(Math.max(kc[c],tileAt(c).k)/2)),i=c%nx,j=(c/nx)|0;for(let dj=-d;dj<=d;dj++)for(let di=-d;di<=d;di++){const I=i+di,J=j+dj;if(I>=0&&J>=0&&I<nx&&J<ny)near.add(J*nx+I);}}
+    return near;}
+  // tiles a refinement still needs routed, [TI, TJ] each: the edge cells' first (the band's width depends on their
+  // halos), then the band's; empty when refine(sel) can run at once. Lets the page route a tile per frame.
+  function pending(sel){const inSel=new Set(sel.basins),selC=c=>inSel.has(lab1[c]),edge=edgeCells(selC),need=new Map();
+    for(const c of edge){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}if(need.size)return[...need.values()];
+    for(const c of nearCells(selC,edge)){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}return[...need.values()];}
+  function refine(sel){const t0=Date.now(),inSel=new Set(sel.basins),selC=c=>inSel.has(lab1[c]),near=nearCells(selC,edgeCells(selC));
+    const cells=new Map(),seen=new Set();for(const c of near){seen.add(tKey(c));cells.set(c,tileAt(c).cells.get(c));}
+    const inside=(x,y)=>{const i=Math.floor((x-B.x0)/h),j=Math.floor((y-B.y0)/h);if(i<0||j<0||i>=nx||j>=ny)return false;const c=j*nx+i,L=cells.get(c);
+      if(!L)return selC(c);const u=Math.min(f-1,Math.floor((x-B.x0-i*h)/dx)),v=Math.min(f-1,Math.floor((y-B.y0-j*h)/dx));return inSel.has(L[v*f+u]);};
+    // land area: L1 cells refined count their land points in the selection; the rest count whole if selected
+    let area=0,areaL1=0;for(let c=0;c<nx*ny;c++){if(!land[c])continue;if(selC(c))areaL1+=h*h;const L=cells.get(c);if(!L){if(selC(c))area+=h*h;continue;}const bl=block(c);let n=0;for(let q=0;q<L.length;q++)if(inSel.has(L[q])&&bl[q]>0)n++;area+=n*dx*dx;}
+    let kMaxUsed=0,unsettled=0;for(const key of seen){const t=tiles.get(key);kMaxUsed=Math.max(kMaxUsed,t.k);if(t.guesses)unsettled++;}
+    return{inside,cells,nTiles:seen.size,nCells:near.size,areaKm2:area,areaL1Km2:areaL1,kMaxUsed,unsettled,ms:Date.now()-t0};}
+  // the same labelling routed over a whole box at once (the reference the strips are tested against): nX x nY cells
+  // of dx from (x0, y0), the box's edge an outlet with L1's labels
+  function full(x0,y0,nX,nY){const z=R.grid(x0,y0,dx,nX,nY,R.o.lamMinKm),l0=new Int32Array(nX*nY).fill(-1);
+    for(let j=0;j<nY;j++)for(let i=0;i<nX;i++){const q=j*nX+i,x=x0+(i+.5)*dx,y=y0+(j+.5)*dx,ci=Math.floor((x-B.x0)/h),cj=Math.floor((y-B.y0)/h);
+      if(ci<0||cj<0||ci>=nx||cj>=ny){l0[q]=-2;continue;}const c=cj*nx+ci;if(i===0||j===0||i===nX-1||j===nY-1||z[q]<=0||sink(c))l0[q]=lab1[c];}
+    return{z,lab:flood(z,nX,nY,l0).lab};}
+  return{o,dx,f,lab1,tile,pending,refine,full,kOf,blocks,tiles};}
+return {relief,boundary,flood,l1Labels,makeGrad2,gblur};
 })();
 // ===== L2-END =====

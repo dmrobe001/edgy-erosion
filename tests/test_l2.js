@@ -6,7 +6,9 @@
 // 4. stretched along strike where L1 shortened the crust: gradients across strike over along strike, about a^2
 //    (on the landmass if it has shortening, and on a made-up plain under uniform shortening);
 // 5. free of dams on L1's trunk rivers: the lowest pass between two points on a river, along any path at 500 m, is no
-//    higher than the river's level at the upstream point.
+//    higher than the river's level at the upstream point;
+// 6. basin outlines burnt in by strips agree with routing the whole region at 500 m;
+// 7. two neighbouring selections, refined independently, agree on their shared outline.
 const { loadSim, loadL1, loadL2, arg } = require("./lib");
 const SIM = loadSim(), L1 = loadL1(SIM), L2 = loadL2(SIM, L1);
 let ok = true; const check = (cond, msg) => { if (!cond) { ok = false; console.log("FAIL " + msg); } };
@@ -87,5 +89,34 @@ console.log(`landmass: ${B.landCells} land cells of ${h} km; relief built in ${b
     worst = Math.max(worst, best[e] - Math.max(g[s], tr[s])); tested++; }
   console.log(`trunk rivers: ${tested} chains of up to 5 reaches; highest pass above the upstream end ${(worst * 1000).toFixed(1)} m (${Date.now() - t} ms)`);
   check(tested > 5 && worst <= 1e-6, "relief: no dams on L1's trunk rivers"); }
+
+// 6. the outline burnt in by strips against routing the whole box at 500 m (the box's edge 40 km out, labelled by L1):
+//    mean displacement (land assigned differently, over the outline's length), for a cluster tapped on the coast and
+//    for a mid-size basin; and L1's own 10 km outline for comparison
+const sizes = new Map(); for (let c = 0; c < nx * ny; c++) if (B.land[c]) sizes.set(B.basin[c], (sizes.get(B.basin[c]) || 0) + 1);
+const pj = plan.proj, at = c => [cx(c), cy(c)];
+let coastC = -1; for (let c = Math.floor(nx * ny / 2); c < nx * ny; c++) if (land(c) && !B.land[c + 1]) { coastC = c; break; }
+let midB = -1; for (const [b, n] of sizes) if (n >= 150 && n <= 400) { midB = b; break; }
+let midC = 0; while (!(B.land[midC] && B.basin[midC] === midB)) midC++;
+const selA = L1.basinSelection(B, pj, ...at(coastC), 150), selM = L1.basinSelection(B, pj, ...at(midC), 0);
+for (const [name, sel] of [["coastal cluster", selA], ["mid-size basin", selM]]) {
+  let i0 = 1e9, i1 = -1, j0 = 1e9, j1 = -1; for (let c = 0; c < nx * ny; c++) if (sel.mask[c]) { const i = c % nx, j = Math.floor(c / nx); i0 = Math.min(i0, i); i1 = Math.max(i1, i); j0 = Math.min(j0, j); j1 = Math.max(j1, j); }
+  const m = 40, dx = 0.5, X0 = B.x0 + i0 * h - m, Y0 = B.y0 + j0 * h - m, nX = Math.round(((i1 - i0 + 1) * h + 2 * m) / dx), nY = Math.round(((j1 - j0 + 1) * h + 2 * m) / dx);
+  const bd = L2.boundary(R, B), t = Date.now(), ref = bd.refine(sel), ms = Date.now() - t, F = bd.full(X0, Y0, nX, nY), inS = new Set(sel.basins);
+  let bad = 0, badL1 = 0, len = 0; for (let j = 0; j < nY; j++) for (let i = 0; i < nX; i++) { const q = j * nX + i; if (F.z[q] <= 0) continue; const x = X0 + (i + .5) * dx, y = Y0 + (j + .5) * dx, tr = inS.has(F.lab[q]);
+    if (ref.inside(x, y) !== tr) bad += dx * dx; if (inS.has(bd.lab1[Math.floor((y - B.y0) / h) * nx + Math.floor((x - B.x0) / h)]) !== tr) badL1 += dx * dx;
+    if (i + 1 < nX && F.z[q + 1] > 0 && tr !== inS.has(F.lab[q + 1])) len += dx; if (j + 1 < nY && F.z[q + nX] > 0 && tr !== inS.has(F.lab[q + nX])) len += dx; }
+  console.log(`burn-in, ${name}: ${sel.basins.length} basins, ${Math.round(ref.areaKm2).toLocaleString("en-US")} km² (L1: ${Math.round(ref.areaL1Km2).toLocaleString("en-US")}); ${ref.nTiles} tiles, halos up to ${ref.kMaxUsed} cells (${ref.unsettled} unsettled), ${ms} ms; mean displacement from full routing ${(bad / len).toFixed(3)} km (L1's outline ${(badL1 / len).toFixed(2)} km)`);
+  check(bad / len < 0.25 && bad < 0.25 * badL1, "burn-in: the strips' outline is within half an L2 cell of full routing, " + name); }
+
+// 7. seams: two neighbouring selections, refined independently, label the L1 cells both refine identically, and no
+//    point is in both
+{ const nbr = new Map(); for (let c = 0; c < nx * ny; c++) { if (!B.land[c] || B.basin[c] !== midB) continue; for (const d of [1, -1, nx, -nx]) { const q = c + d; if (B.land[q] && B.basin[q] !== midB) nbr.set(B.basin[q], (nbr.get(B.basin[q]) || 0) + 1); } }
+  const other = [...nbr].sort((a, b) => b[1] - a[1])[0][0]; let oc = 0; while (!(B.land[oc] && B.basin[oc] === other)) oc++;
+  const selO = L1.basinSelection(B, pj, ...at(oc), 0), r1 = L2.boundary(R, B).refine(selM), r2 = L2.boundary(R, B).refine(selO);
+  let shared = 0, same = true, both = 0; for (const [c, L] of r1.cells) { const M = r2.cells.get(c); if (!M) continue; shared++; for (let q = 0; q < L.length; q++) if (L[q] !== M[q]) same = false; }
+  for (const [c] of r1.cells) for (let v = 0; v < 20; v++) for (let u = 0; u < 20; u++) { const x = B.x0 + (c % nx) * h + (u + .5) * 0.5, y = B.y0 + Math.floor(c / nx) * h + (v + .5) * 0.5; if (r1.inside(x, y) && r2.inside(x, y)) both++; }
+  console.log(`seams: basins ${midB} and ${other} refined apart share ${shared} L1 cells; labels there ${same ? "identical" : "DIFFER"}; ${both} points in both`);
+  check(shared > 0 && same && both === 0, "burn-in: neighbouring selections agree on their shared outline"); }
 
 console.log(ok ? "PASS L2" : "FAIL L2"); process.exitCode = ok ? 0 : 1;

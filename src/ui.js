@@ -558,7 +558,8 @@ function l2Info(){const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;const fmt=v=>
   const tap=s.tapped>=0?`the tapped basin (${fmt(sz.get(s.tapped)*cell)} km²${["",", draining inland",", areic desert"][bs.closedB[s.tapped]]})`:"no basin tapped (the tap is at sea)";
   const n2=s.basins.length;
   $("l2Info").innerHTML=`<div><b>Selected</b>: ${n2} basin${n2===1?"":"s"}, ${fmt(s.areaKm2)} km²: ${tap}, ${s.nWithin} wholly within ${fmt(s.radiusKm)} km, ${s.nEnclosed} enclosed by the selection.</div>
-    <div class="muted">At L2's planned 500 m cells: ${fmt(s.areaKm2/0.25)} cells. (${fmt(s.ms)} ms.)</div>`;}
+    <div class="muted">At L2's planned 500 m cells: ${fmt(s.areaKm2/0.25)} cells. (${fmt(s.ms)} ms.)</div>
+    ${s.ref?`<div><b>Outline at 500 m</b>: ${fmt(s.ref.areaKm2)} km² of land (L1's 10 km outline: ${fmt(s.ref.areaL1Km2)} km²), from ${s.ref.nTiles} tiles of ${4*bs.h} km routed with halos of up to ${s.ref.kMaxUsed} L1 cells${s.ref.unsettled?`; in ${s.ref.unsettled} tile${s.ref.unsettled>1?"s":""} some water still reached the halo's edge near a divide at the widest halo, so the outline there is L1's best guess`:""}.</div>`:""}`;}
 $("l2Rad").oninput=e=>{$("l2RadVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";if(l2Sel)l2Select(l2Sel.x,l2Sel.y,false);};
 $("l2Rad").onchange=()=>{if(l2Sel)logAction({a:"l2radius",radiusKm:l2Rad()});};
 $("l2Clear").onclick=()=>{logAction({a:"l2clear"});l2Reset();l1Render();};
@@ -570,7 +571,15 @@ function l2PrevHide(){l2V=null;l2Job++;$("l2wrap").hidden=true;$("l2stats").inne
 $("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;let i0=1e9,i1=-1,j0=1e9,j1=-1;
   for(let c=0;c<s.mask.length;c++)if(s.mask[c]){const i=c%bs.nx,j=(c/bs.nx)|0;if(i<i0)i0=i;if(i>i1)i1=i;if(j<j0)j0=j;if(j>j1)j1=j;}
   const pad=10;l2V={x0:bs.x0+i0*bs.h-pad,x1:bs.x0+(i1+1)*bs.h+pad,y0:bs.y0+j0*bs.h-pad,y1:bs.y0+(j1+1)*bs.h+pad,zoom:1,pan:[0,0]};
-  logAction({a:"l2preview"});$("l2wrap").hidden=false;l2Draw();};
+  logAction({a:"l2preview"});$("l2wrap").hidden=false;l2Burn(l2Draw);};
+// the selection's outline burnt in at 500 m (L2.boundary): a tile routed per slice of a frame, then the outline
+function l2Boundary(){const S=l1St;if(!S.l2B)S.l2B=L2.boundary(l2Relief(),S.bs);return S.l2B;}
+function l2Burn(done){const sel=l2Sel,job=++l2Job;if(sel.ref){done();return;}const bd=l2Boundary(),t0=performance.now();let n=0;
+  const step=()=>{if(job!==l2Job||sel!==l2Sel)return;const t1=performance.now();let p=bd.pending(sel);
+    while(p.length&&performance.now()-t1<60){bd.tile(p[0][0],p[0][1]);n++;p=p.slice(1);if(!p.length)p=bd.pending(sel);}
+    if(p.length){$("l2stats").innerHTML=`<div>Burning in the outline<b class="num">${n} tiles routed…</b></div>`;requestAnimationFrame(step);return;}
+    sel.ref=bd.refine(sel);sel.ref.wallMs=performance.now()-t0;sel.ref.routed=n;l2Info();done();};
+  requestAnimationFrame(step);}
 // geometry: the selection's box fitted to the canvas, zoomed and panned
 function l2Geo(){const V=l2V,wrap=$("l2wrap"),bw=V.x1-V.x0,bh=V.y1-V.y0,asp=Math.min(1.2,Math.max(0.5,bh/bw));wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";
   const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp),cv=$("l2map");if(cv.width!==W||cv.height!==H){cv.width=W;cv.height=H;}
@@ -580,7 +589,7 @@ const l2XY=(px,py)=>[l2V.cx+(px+0.5-l2V.W/2)*l2V.s,l2V.cy-(py+0.5-l2V.H/2)*l2V.s
 function l2Draw(){if(!l2V)return;const job=++l2Job,R=l2Relief(),bs=l1St.bs,sel=l2Sel;l2Geo();const V=l2V,W=V.W,H=V.H,Z=new Float32Array(W*H),inS=new Uint8Array(W*H),minKm=Math.max(R.o.lamMinKm,2*V.s),t0=performance.now();let row=0;
   const step=()=>{if(job!==l2Job)return;const t1=performance.now();
     while(row<H&&performance.now()-t1<40){for(let px=0;px<W;px++){const [x,y]=l2XY(px,row),q=row*W+px,fi=Math.floor((x-bs.x0)/bs.h),fj=Math.floor((y-bs.y0)/bs.h);
-        Z[q]=R.z(x,y,minKm);inS[q]=fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}
+        Z[q]=R.z(x,y,minKm);inS[q]=sel.ref?(sel.ref.inside(x,y)?1:0):fi>=0&&fj>=0&&fi<bs.nx&&fj<bs.ny&&sel.mask[fj*bs.nx+fi]?1:0;}row++;}
     $("l2stats").innerHTML=`<div>Drawing<b class="num">${Math.round(100*row/H)}%</b></div>`;
     if(row<H){requestAnimationFrame(step);return;}
     V.Z=Z;V.inS=inS;V.minKm=minKm;V.ms=performance.now()-t0;l2Shade();};
@@ -588,12 +597,15 @@ function l2Draw(){if(!l2V)return;const job=++l2Job,R=l2Relief(),bs=l1St.bs,sel=l
 function l2Shade(){const V=l2V,W=V.W,H=V.H,Z=V.Z,cv=$("l2map"),ctx=cv.getContext("2d"),img=ctx.createImageData(W,H),d=img.data,ex=10/V.s;
   for(let py=0;py<H;py++)for(let px=0;px<W;px++){const q=py*W+px,o=4*q,h=Z[q],land=h>0;let k=Math.round((h+8)/16*1023);k=k<0?0:k>1023?1023:k;let r=LUT_E[k*3],g=LUT_E[k*3+1],b=LUT_E[k*3+2];
     if(land){const eL=px>0?Z[q-1]:h,eR=px<W-1?Z[q+1]:h,eU=py>0?Z[q-W]:h,eD=py<H-1?Z[q+W]:h,gx=(eR-eL)*ex/2,gy=(eU-eD)*ex/2,nl=1/Math.sqrt(1+gx*gx+gy*gy),s=Math.max(0.35,Math.min(1.25,(0.55*-gx+0.55*gy+0.63)*nl/0.63));r*=s;g*=s;b*=s;}
-    if(!V.inS[q]){const m=(r+g+b)/3;r=0.3*r+0.35*m;g=0.3*g+0.35*m;b=0.3*b+0.35*m;}
+    if(land&&!V.inS[q]){const m=(r+g+b)/3;r=0.3*r+0.35*m;g=0.3*g+0.35*m;b=0.3*b+0.35*m;}
+    // the outline, on land
+    if(land&&(px<W-1&&V.inS[q+1]!==V.inS[q]&&Z[q+1]>0||py<H-1&&V.inS[q+W]!==V.inS[q]&&Z[q+W]>0)){r=g=b=24;}
     d[o]=r;d[o+1]=g;d[o+2]=b;d[o+3]=255;}
   ctx.putImageData(img,0,0);l2Stats();}
 function l2Stats(){const V=l2V,S=l1St;if(!V)return;const R=S.l2R,fmt=v=>v<1?v.toFixed(2):v<10?v.toFixed(1):Math.round(v).toLocaleString("en-US");
   $("l2stats").innerHTML=`<div>L2 grid dx / dt<b class="num">${R.o.lamMinKm/2} km / no run yet</b></div><div>Drawn at<b class="num">${fmt(V.s)} km per pixel</b></div>
-    <div>Octaves drawn<b class="num">${R.octaves.filter(L=>L>=V.minKm).join(", ")} km</b></div><div>Relief built / drawn<b class="num">${Math.round(S.l2Ms)} / ${Math.round(V.ms)} ms</b></div>`;}
+    <div>Octaves drawn<b class="num">${R.octaves.filter(L=>L>=V.minKm).join(", ")} km</b></div><div>Relief built / drawn<b class="num">${Math.round(S.l2Ms)} / ${Math.round(V.ms)} ms</b></div>
+    ${l2Sel&&l2Sel.ref?`<div>Outline burnt in<b class="num">${(l2Sel.ref.wallMs/1000).toFixed(1)} s, ${l2Sel.ref.routed} tiles routed</b></div>`:""}`;}
 gestures($("l2wrap"),{
   drag:(dx,dy)=>{if(!l2V||l2V.zoom<=1)return;const k=l2V.s*l2V.W/$("l2wrap").clientWidth;l2V.pan[0]-=dx*k;l2V.pan[1]+=dy*k;clearTimeout(l2V.t);l2V.t=setTimeout(l2Draw,120);},
   zoom:(f,cx,cy)=>{if(!l2V||!l2V.W)return;const r=$("l2map").getBoundingClientRect(),px=(cx-r.left)/r.width*l2V.W,py=(cy-r.top)/r.height*l2V.H,[x,y]=l2XY(px,py);
@@ -639,7 +651,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
     checks:{L0:{hash:l0Hash(w),platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac},
       L1:sh?{sheetSteps:sh.steps,markers:sh.nm,t:sh.t,budgetError:sh.balance().error,last:sh.history[sh.history.length-1],
         basins:bs?{nBasins:bs.nBasins,landCells:bs.landCells,inlandFrac:bs.inlandFrac,nClosed:bs.nClosed,nDry:bs.nDry}:null,tiles:ho?ho.tiles.length:null}:null,
-      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells,reliefAtTap:l2Relief().z(l2Sel.x,l2Sel.y)}:null},
+      L2:l2Sel?{tapped:l2Sel.tapped,basins:l2Sel.basins.length,cells:l2Sel.cells,reliefAtTap:l2Relief().z(l2Sel.x,l2Sel.y),outlineKm2:l2Sel.ref?l2Sel.ref.areaKm2:null}:null},
     viewports:{
       L0:{colorMode:view,projection:proj,marks:$("marks").checked,faultTraces:!!handoff&&$("traces").checked,canvasPx:[pixW,pixH],
         globe:{yaw,pitch,zoom:gZoom},map:{zoom:mZoom,centre:mC,goode:goode&&{centreLonDeg:goode.lc*180/Math.PI,edgeLonDeg:goode.edgeLonDeg,

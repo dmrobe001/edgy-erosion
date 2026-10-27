@@ -55,6 +55,8 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
     // the relief preview, drawn in one go (frames run at once here)
     const raf = global.requestAnimationFrame; global.requestAnimationFrame = f => f(); document.getElementById("l2Prev").onclick(); global.requestAnimationFrame = raf;
     if (!l2V || !l2V.Z || !document.getElementById("l2stats").innerHTML.includes("Drawn at")) throw new Error("L2 relief preview not drawn");
+    if (!s.ref || !document.getElementById("l2Info").innerHTML.includes("Outline at 500 m")) throw new Error("L2 outline not burnt in");
+    console.log("PASS ui smoke L2 outline: " + Math.round(s.ref.areaKm2) + " km² at 500 m (L1: " + Math.round(s.ref.areaL1Km2) + "), " + s.ref.nTiles + " tiles, halos up to " + s.ref.kMaxUsed + ", " + (s.ref.wallMs / 1000).toFixed(1) + " s");
     let zl = Infinity, zh = -Infinity; for (const v of l2V.Z) { zl = Math.min(zl, v); zh = Math.max(zh, v); }
     console.log("PASS ui smoke L2 relief preview: " + l2V.W + "x" + l2V.H + " px at " + l2V.s.toFixed(2) + " km/px, " + zl.toFixed(2) + " to " + zh.toFixed(2) + " km, " + Math.round(l2V.ms) + " ms");
     console.log("PASS ui smoke L2 selection: " + s.basins.length + " basins (" + s.nWithin + " within 200 km, " + s.nEnclosed + " enclosed), " + (s.areaKm2 / 1e3).toFixed(0) + " thousand km², " + s.ms.toFixed(0) + " ms"); }
@@ -65,7 +67,7 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
   // session export: the log reruns in a fresh simulation to the same state, checked against the recorded values
   selCell = land; l1View = "tiles"; l1TileSel = 0; const file = path.join(os.tmpdir(), "edgy-session-test.json"); fs.writeFileSync(file, JSON.stringify(sessionData()));
   const sess = SESSION.load(file), S2 = loadSim(), L2 = loadL1(S2), r = SESSION.reproduce(sess, S2, L2, () => {}, loadL2(S2, L2)), bad = r.checks.filter(c => !c.ok);
-  if (bad.length || r.checks.length < 12) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
+  if (bad.length || r.checks.length < 13) throw new Error("rerun differs: " + JSON.stringify(bad.length ? bad : r.checks));
   if (!sess.viewports.L1.visible || sess.viewports.L2.selectedTile !== 0 || sess.viewports.L1.colorMode !== "tiles") throw new Error("viewports not recorded");
   const sf = file.replace(".json", ".stash"); SESSION.stash(r, sf); const u = SESSION.unstash(sf, S2, L2, sess), a = u.sheet.strainField(), b = l1St.sh.strainField();
   for (let c = 0; c < a.lmin.length; c++) if (!(a.lmin[c] === b.lmin[c] || isNaN(a.lmin[c]) && isNaN(b.lmin[c]))) throw new Error("stashed sheet differs");

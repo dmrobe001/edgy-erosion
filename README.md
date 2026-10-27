@@ -92,7 +92,7 @@ build.sh               rebuilds plates.html from src/
 src/head.html          markup, styles, explanatory notes; ends with an opening <script> tag
 src/sim.js             the simulation core: a self-contained SIM module, usable in browser and Node
 src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff, basin selection (L1 module)
-src/l2.js              L2: the relief L2 starts from, as a function of position (L2 module)
+src/l2.js              L2: the relief L2 starts from, as a function of position; basin outlines burnt in at 500 m (L2 module)
 src/ui.js              rendering, controls, inspector, handoff panel, L1 and L2 panels
 tests/                 headless tests and benchmarks (see section 3.13)
 tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
@@ -579,7 +579,7 @@ Measure each step by the inland share in dry belts, the major-basin re-seed scor
 
 ### L2: region (~500 m)
 
-Built so far: the selection (section 5.6) and the relief L2 starts from (below). The plan for the boundaries, not yet tested:
+Built so far: the selection (section 5.6), the relief L2 starts from, and the selection's outline burnt in at 500 m (both below). The plan for the boundaries, as first written (the burn-in below tests and revises it):
 - **What moves divides between L1 and L2 is mostly resolution, not time.** Redrawing only L1's unresolved relief with another seed changed the basin map drastically (adjusted Rand index 0.35); a 1,600-fold range of erodibility barely changed it (0.89–0.98); divide persistence rose with local relief (section 5.4). Divide migration from unequal erosion across a divide (Willett et al. 2014) is estimated, not measured, at 0.1–1 km per Myr: a cell or two of L2 over an L2 run.
 - **So L2's added relief should be a deterministic function of position** (fixed to the planet, from the seed and L1's fields), as L1's unresolved relief already is. It can then be evaluated anywhere without simulating the region around it.
 - **Burn in the outer boundary in strips.** A point's basin is a property of its downhill path, so the high-resolution divide is found by routing flow in a strip around each L1 divide on the selection's outer edge: a path that leaves the strip into a basin's interior belongs to that basin. The strip's half-width is the unresolved relief's amplitude over the resolved slope across the divide: narrow on crests, wide on lowlands. Divides inside the selection are L2's own to resolve. Because the strip depends only on position, neighbouring selections compute the same outline and their seams agree. The relief generator must be fixed before any outline is computed.
@@ -602,7 +602,23 @@ Measured (`tests/test_l2.js`, on the L1 test landmass; and the genesis landmass 
 - *Rivers:* on 34 chains of five reaches, the lowest pass between two points on a river's floor, along any path on a 500 m grid, is no higher than the river at the upstream point (0.0 m). With a V-shaped trench and no floor it was 58 m, because a 500 m grid may have no cell on the river's line.
 - *Not yet addressed:* on coastal lowland a few tens of metres above sea level, hollows of the added relief dip below sea level and show as ponds and lagoons, a few kilometres inland at most. L1 treats land below sea level as inland water, and so will L2 unless this is changed.
 
-**Preview L2 relief** in the L2 panel draws the selected basins (the rest faded) from this function, per pixel at the view's own scale, leaving out octaves shorter than 2 pixels; scroll or pinch to zoom, drag to pan, tap for the elevation. The panel reports L2's planned grid (0.5 km; no time step yet, as nothing runs), the pixel size, the octaves drawn and the times. The session's checks include the relief at the tap, so a rerun verifies the generator.
+**The outline burnt in at 500 m** (`L2.boundary(relief, B)`):
+- *Membership.* A 500 m point belongs to the L1 basin of the place where its water leaves the land: the sea, an inland sink (an L1 lake with no outlet, a dry lake floor or a river's dry end; or land below sea level), or the edge of the window routed, where it takes the L1 label of its cell. Depressions are filled (priority flood, as at L1). On a window, the flood starts from those outlets, lowest first, and each cell takes the label of the cell it was reached from (Barnes et al. 2014). L1's sea cells take the basin of the nearest L1 land cell, so a coast that L2 moves seaward keeps its basins. A point is in the selection if its label is a selected basin.
+- *Canonical tiles.* Labels are computed on a fixed lattice of tiles of 4 × 4 L1 cells, each routed on itself plus a halo of k L1 cells. A tile's labels depend only on its position, never on the selection, so two selections sharing a boundary compute the same outline there (tested: two neighbouring basins refined independently label their 1,614 shared L1 cells identically, and no point falls in both). Only the L1 cells within max(2, k/2) cells of the selection's outer edge are routed; elsewhere a point keeps its L1 cell's label.
+- *How wide a halo.* A core cell's label is exact (given the relief) if its water reaches the sea or a sink, and reliable if it reaches the halo's edge where L1's label is sure (all L1 cells around share it). If it reaches the edge near an L1 divide, the label is a guess, and the halo doubles (2, 4, 8, 16, 24 L1 cells). The first halo is the added relief's RMS over L1's regional slope (L1's surface blurred over 20 km), as a contour on a slope s moves by about σ/s. A tile still guessing at 24 cells is reported as unsettled; the criterion is conservative (unsettled tiles have so far all been right).
+- *Measured against routing the whole box at once* (the selection's box at 500 m, its edge 40 km out; widening that margin to 120 or 200 km changed nothing), as mean displacement of the outline (land assigned differently, over the outline's length):
+
+  | Selection | L1's 10 km outline | Burnt in | Tiles, time |
+  |---|---|---|---|
+  | Genesis, 1 Gyr: 54 coastal basins, 54,200 km² | 2.51 km | 0 km | 131 tiles, 5.5 s |
+  | Genesis: a mid-size coastal basin, 36,300 km² at 500 m | 4.10 km | 0 km | 93 tiles, 5.8 s |
+  | Test landmass: 28 coastal basins | 2.93 km | 0 km | 44 tiles, 3.9 s |
+  | Test landmass: a lowland basin (18,300 km² at L1, 14,600 at 500 m) | 5.29 km | 0 km | 140 tiles, 20 s |
+
+  L1's outline is off by 2.5–5 km on average, a quarter to a half of an L1 cell, and a basin's area at 500 m can differ from L1's by 20% in flat country. The burnt-in outline matches full routing exactly in all four.
+- *Cost.* In flat country water near a gentle divide wanders 100–200 km before its fate is settled, so halos there reach 16–24 L1 cells, and every 40 km tile routes that neighbourhood itself. Routing the selection's own box once is far cheaper (under 1.5 s for these boxes) but depends on the box, so neighbouring selections would not be guaranteed to agree. Sharing the halos' routing between tiles (stitching tiles' perimeters, as in Barnes's parallel priority-flood) is the obvious speed-up.
+
+**Preview L2 relief** in the L2 panel first burns in the selection's outline (a tile per slice of a frame, with progress; tiles are kept for the L1 run, so later selections reuse them), then draws the selected basins (the rest faded) from this function, per pixel at the view's own scale, leaving out octaves shorter than 2 pixels; scroll or pinch to zoom, drag to pan, tap for the elevation. The outline is drawn as a line, the land outside faded. The panel reports the land area inside the 500 m outline against L1's, the tiles and halos, and any unsettled tiles; and L2's planned grid (0.5 km; no time step yet, as nothing runs), the pixel size, the octaves drawn and the times. The session's checks include the relief at the tap and the outline's area, so a rerun verifies both.
 
 Also:
 - River network refinement constrained by L1's drainage graph.
