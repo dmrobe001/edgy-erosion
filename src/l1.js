@@ -8,11 +8,12 @@ const {R_KM,C,makeLookup,elevOf,makeNoise3,hashStr,getCube}=SIM;
 const ROOT=1-C.ISO, EPS=1e-6; // share of a thickness change taken by the root under full isostasy; priority-flood step (km)
 
 // ---------- generic graph tools (also used on a planar grid by the tests) ----------
-function Heap(cap){this.k=new Float64Array(cap);this.v=new Int32Array(cap);this.n=0;}
-Heap.prototype.push=function(v,key){const K=this.k,V=this.v;let i=this.n++;while(i>0){const p=(i-1)>>1;if(K[p]<=key)break;K[i]=K[p];V[i]=V[p];i=p;}K[i]=key;V[i]=v;};
-Heap.prototype.pop=function(){const K=this.k,V=this.v,top=V[0],n=--this.n;
+// a binary min-heap of (value, key) pairs (a class, so its source can be handed to workers with toString)
+class Heap{constructor(cap){this.k=new Float64Array(cap);this.v=new Int32Array(cap);this.n=0;}
+push(v,key){const K=this.k,V=this.v;let i=this.n++;while(i>0){const p=(i-1)>>1;if(K[p]<=key)break;K[i]=K[p];V[i]=V[p];i=p;}K[i]=key;V[i]=v;}
+pop(){const K=this.k,V=this.v,top=V[0],n=--this.n;
   if(n>0){const key=K[n],v=V[n];let i=0;for(;;){let c=2*i+1;if(c>=n)break;if(c+1<n&&K[c+1]<K[c])c++;if(K[c]>=key)break;K[i]=K[c];V[i]=V[c];i=c;}K[i]=key;V[i]=v;}
-  return top;};
+  return top;}}
 function scratch(nC){return{f:new Float64Array(nC),closed:new Uint8Array(nC),rec:new Int32Array(nC),rdist:new Float32Array(nC),stack:new Int32Array(nC),
   ndon:new Int32Array(nC+1),don:new Int32Array(nC),A:new Float64Array(nC),hN:new Float64Array(nC),heap:new Heap(nC),pit:new Int32Array(nC),ns:0};}
 // Route flow over a graph with 8 neighbour slots per cell (-1 = none), plus optional extra links X in CSR form

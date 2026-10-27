@@ -8,7 +8,8 @@
 // 5. free of dams on L1's trunk rivers: the lowest pass between two points on a river, along any path at 500 m, is no
 //    higher than the river's level at the upstream point;
 // 6. basin outlines burnt in by strips agree with routing the whole region at 500 m;
-// 7. two neighbouring selections, refined independently, agree on their shared outline.
+// 7. two neighbouring selections, refined independently, agree on their shared outline;
+// 8. a worker built from the module's source makes the same tiles as the main thread.
 const { loadSim, loadL1, loadL2, arg } = require("./lib");
 const SIM = loadSim(), L1 = loadL1(SIM), L2 = loadL2(SIM, L1);
 let ok = true; const check = (cond, msg) => { if (!cond) { ok = false; console.log("FAIL " + msg); } };
@@ -106,17 +107,38 @@ for (const [name, sel] of [["coastal cluster", selA], ["mid-size basin", selM]])
   let bad = 0, badL1 = 0, len = 0; for (let j = 0; j < nY; j++) for (let i = 0; i < nX; i++) { const q = j * nX + i; if (F.z[q] <= 0) continue; const x = X0 + (i + .5) * dx, y = Y0 + (j + .5) * dx, tr = inS.has(F.lab[q]);
     if (ref.inside(x, y) !== tr) bad += dx * dx; if (inS.has(bd.lab1[Math.floor((y - B.y0) / h) * nx + Math.floor((x - B.x0) / h)]) !== tr) badL1 += dx * dx;
     if (i + 1 < nX && F.z[q + 1] > 0 && tr !== inS.has(F.lab[q + 1])) len += dx; if (j + 1 < nY && F.z[q + nX] > 0 && tr !== inS.has(F.lab[q + nX])) len += dx; }
-  console.log(`burn-in, ${name}: ${sel.basins.length} basins, ${Math.round(ref.areaKm2).toLocaleString("en-US")} km² (L1: ${Math.round(ref.areaL1Km2).toLocaleString("en-US")}); ${ref.nTiles} tiles, halos up to ${ref.kMaxUsed} cells (${ref.unsettled} unsettled), ${ms} ms; mean displacement from full routing ${(bad / len).toFixed(3)} km (L1's outline ${(badL1 / len).toFixed(2)} km)`);
+  console.log(`burn-in, ${name}: ${sel.basins.length} basins, ${Math.round(ref.areaKm2).toLocaleString("en-US")} km² (L1: ${Math.round(ref.areaL1Km2).toLocaleString("en-US")}); ${ref.nTiles} tiles stitched (${ref.rounds} rounds, ${ref.guessCells} L1 cells with guesses), ${ms} ms; mean displacement from full routing ${(bad / len).toFixed(3)} km (L1's outline ${(badL1 / len).toFixed(2)} km)`);
   check(bad / len < 0.25 && bad < 0.25 * badL1, "burn-in: the strips' outline is within half an L2 cell of full routing, " + name); }
 
-// 7. seams: two neighbouring selections, refined independently, label the L1 cells both refine identically, and no
-//    point is in both
+// 7. seams: two neighbouring selections, refined independently, agree wherever either puts a point in one of the two,
+//    and no point is in both
 { const nbr = new Map(); for (let c = 0; c < nx * ny; c++) { if (!B.land[c] || B.basin[c] !== midB) continue; for (const d of [1, -1, nx, -nx]) { const q = c + d; if (B.land[q] && B.basin[q] !== midB) nbr.set(B.basin[q], (nbr.get(B.basin[q]) || 0) + 1); } }
   const other = [...nbr].sort((a, b) => b[1] - a[1])[0][0]; let oc = 0; while (!(B.land[oc] && B.basin[oc] === other)) oc++;
   const selO = L1.basinSelection(B, pj, ...at(oc), 0), r1 = L2.boundary(R, B).refine(selM), r2 = L2.boundary(R, B).refine(selO);
-  let shared = 0, same = true, both = 0; for (const [c, L] of r1.cells) { const M = r2.cells.get(c); if (!M) continue; shared++; for (let q = 0; q < L.length; q++) if (L[q] !== M[q]) same = false; }
+  // where either refinement puts a point in one of the two selections, the other must put it in the same one (labels of
+  // third basins may differ: each stitched domain ends somewhere else)
+  const AB = new Set([...selM.basins, ...selO.basins]); let shared = 0, same = true, both = 0, differ = 0;
+  for (const [c, L] of r1.cells) { const M = r2.cells.get(c); if (!M) continue; shared++; for (let q = 0; q < L.length; q++) if ((AB.has(L[q]) || AB.has(M[q])) && L[q] !== M[q]) { same = false; differ++; } }
   for (const [c] of r1.cells) for (let v = 0; v < 20; v++) for (let u = 0; u < 20; u++) { const x = B.x0 + (c % nx) * h + (u + .5) * 0.5, y = B.y0 + Math.floor(c / nx) * h + (v + .5) * 0.5; if (r1.inside(x, y) && r2.inside(x, y)) both++; }
-  console.log(`seams: basins ${midB} and ${other} refined apart share ${shared} L1 cells; labels there ${same ? "identical" : "DIFFER"}; ${both} points in both`);
-  check(shared > 0 && same && both === 0, "burn-in: neighbouring selections agree on their shared outline"); }
+  console.log(`seams: basins ${midB} and ${other} refined apart share ${shared} L1 cells; labels of the two basins there ${same ? "identical" : "DIFFER at " + differ + " points"}; ${both} points in both`);
+  // stitched domains depend on the selection, so a point balanced between two exits can resolve differently: allowed at
+  // 1 in 10,000 shared points
+  check(shared > 0 && differ <= 1e-4 * shared * 400 && both === 0, "burn-in: neighbouring selections agree on their shared outline"); }
 
-console.log(ok ? "PASS L2" : "FAIL L2"); process.exitCode = ok ? 0 : 1;
+// 8. a worker built as the page builds it (the module's source and the relief's plain inputs) makes the same tiles
+//    as the main thread, bit for bit
+(async () => {
+  const fs = require("fs"), path = require("path"), { Worker } = require("worker_threads"), src2 = fs.readFileSync(path.join(__dirname, "..", "src", "l2.js"), "utf8");
+  const mod = src2.slice(src2.indexOf("function L2module("), src2.indexOf("const L2=L2module(SIM,L1);"));
+  const code = `const {parentPort}=require("worker_threads");const self={postMessage:(m,t)=>parentPort.postMessage(m,t)};parentPort.on("message",d=>self.onmessage({data:d}));
+const SIM={hashStr:${SIM.hashStr}};const L1={Heap:${L1.Heap}};${mod}\nconst L2=L2module(SIM,L1);let M=null;
+self.onmessage=e=>{const m=e.data;if(m.init){M=L2.tileMaker(L2.reliefFrom(m.init.D),m.init.B,m.init.o);return;}const g=M.make(m.TI,m.TJ);self.postMessage({key:m.key,g});};`;
+  const bd = L2.boundary(R, B), wi = bd.workerInputs(), D = L2.reliefInputs(sh, B), w = new Worker(code, { eval: true });
+  w.postMessage({ init: { D, B: wi.B, o: wi.o } });
+  let i0 = 0; while (!land(i0)) i0++; const TI = Math.floor((i0 % nx) / 4), TJ = Math.floor(Math.floor(i0 / nx) / 4), key = TI * bd.tny + TJ;
+  const g = await new Promise(res => { w.on("message", m => res(m.g)); w.postMessage({ key, TI, TJ }); }); w.terminate();
+  const own = bd.ensure(key); let same = g.z.length === own.z.length && g.eu.length === own.eu.length;
+  for (const f of ["z", "out", "lab", "per", "eu", "ev", "ew"]) for (let q = 0; same && q < own[f].length; q++) if (own[f][q] !== g[f][q]) same = false;
+  console.log(`worker: tile (${TI}, ${TJ}) from a worker ${same ? "identical to" : "DIFFERS from"} the main thread's (${own.eu.length} graph edges)`);
+  check(same, "burn-in: a worker computes the same tiles as the main thread");
+  console.log(ok ? "PASS L2" : "FAIL L2"); process.exitCode = ok ? 0 : 1; })();

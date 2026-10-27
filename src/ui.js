@@ -553,20 +553,36 @@ function l1Inspect(e){if(!l1St||!l1Pix)return;const cv=$("l1map"),r=cv.getBoundi
 let l2Sel=null;const l2Rad=()=>+$("l2Rad").value;
 function l2Reset(){l2Sel=null;$("l2Clear").disabled=true;l2PrevHide();$("l2Info").innerHTML=`<div class="muted">Refine a landmass at L1, then tap its map to select drainage basins for L2.</div>`;}
 function l2Select(x,y,log){const S=l1St;if(!S||!S.bs)return;const t0=performance.now();l2Sel=L1.basinSelection(S.bs,S.plan.proj,x,y,l2Rad());l2Sel.ms=performance.now()-t0;
-  if(log)logAction({a:"l2select",xKm:+x.toFixed(2),yKm:+y.toFixed(2),radiusKm:l2Sel.radiusKm});$("l2Clear").disabled=false;l2PrevHide();l2Info();l1Render();}
+  if(log)logAction({a:"l2select",xKm:+x.toFixed(2),yKm:+y.toFixed(2),radiusKm:l2Sel.radiusKm});$("l2Clear").disabled=false;l2PrevHide();l2Info();l1Render();
+  // start the burn-in's workers now (they take about a second to build the relief), so they are ready for the preview
+  if(S.l2Pool===undefined)setTimeout(()=>{if(l1St===S)l2Pool();},50);}
 function l2Info(){const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;const fmt=v=>Math.round(v).toLocaleString("en-US"),sz=l1BasinSizes(),cell=bs.h*bs.h;
   const tap=s.tapped>=0?`the tapped basin (${fmt(sz.get(s.tapped)*cell)} km²${["",", draining inland",", areic desert"][bs.closedB[s.tapped]]})`:"no basin tapped (the tap is at sea)";
   const n2=s.basins.length;
   $("l2Info").innerHTML=`<div><b>Selected</b>: ${n2} basin${n2===1?"":"s"}, ${fmt(s.areaKm2)} km²: ${tap}, ${s.nWithin} wholly within ${fmt(s.radiusKm)} km, ${s.nEnclosed} enclosed by the selection.</div>
     <div class="muted">At L2's planned 500 m cells: ${fmt(s.areaKm2/0.25)} cells. (${fmt(s.ms)} ms.)</div>
-    ${s.ref?`<div><b>Outline at 500 m</b>: ${fmt(s.ref.areaKm2)} km² of land (L1's 10 km outline: ${fmt(s.ref.areaL1Km2)} km²), from ${s.ref.nTiles} tiles of ${4*bs.h} km routed with halos of up to ${s.ref.kMaxUsed} L1 cells${s.ref.unsettled?`; in ${s.ref.unsettled} tile${s.ref.unsettled>1?"s":""} some water still reached the halo's edge near a divide at the widest halo, so the outline there is L1's best guess`:""}.</div>`:""}`;}
+    ${s.ref?`<div><b>Outline at 500 m</b>: ${fmt(s.ref.areaKm2)} km² of land (L1's 10 km outline: ${fmt(s.ref.areaL1Km2)} km²), routed over ${s.ref.nTiles} tiles of ${4*bs.h} km stitched together${s.ref.rounds>1?` (the domain widened ${s.ref.rounds-1}× to follow water to its outlet)`:""}${s.ref.guessCells?`; in ${s.ref.guessCells} L1 cell${s.ref.guessCells>1?"s":""} near the outline some water still reached the domain's edge near a divide, so the outline there is L1's best guess`:""}.</div>`:""}`;}
 $("l2Rad").oninput=e=>{$("l2RadVal").textContent=(+e.target.value).toLocaleString("en-US")+" km";if(l2Sel)l2Select(l2Sel.x,l2Sel.y,false);};
 $("l2Rad").onchange=()=>{if(l2Sel)logAction({a:"l2radius",radiusKm:l2Rad()});};
 $("l2Clear").onclick=()=>{logAction({a:"l2clear"});l2Reset();l1Render();};
 // ---------- L2: the relief L2 starts from, drawn for the selection ----------
 // The relief is a function of position, so the view samples it per pixel, leaving out octaves shorter than 2 pixels.
 let l2V=null,l2Job=0;
-function l2Relief(){const S=l1St;if(!S||!S.bs)return null;if(!S.l2R){const t0=performance.now();S.l2R=L2.relief(S.sh,S.bs);S.l2Ms=performance.now()-t0;}return S.l2R;}
+function l2Relief(){const S=l1St;if(!S||!S.bs)return null;if(!S.l2R){const t0=performance.now();S.l2D=L2.reliefInputs(S.sh,S.bs);S.l2R=L2.reliefFrom(S.l2D);S.l2Ms=performance.now()-t0;}return S.l2R;}
+// Workers for pass A (a tile's surface and graph), one fewer than the cores (at most 8), built from the L2 module's own
+// source and the relief's plain inputs, so they compute exactly what the main thread would. If workers can't start
+// (or one fails), the main thread does the work.
+function l2Pool(){const S=l1St;if(S.l2Pool!==undefined)return S.l2Pool;S.l2Pool=null;
+  try{const n=Math.max(1,Math.min(8,(navigator.hardwareConcurrency||2)-1));if(typeof Worker==="undefined")return null;
+    const src=`const SIM={hashStr:${SIM.hashStr}};const L1={Heap:${L1.Heap}};${L2module}\nconst L2=L2module(SIM,L1);let M=null;
+self.onmessage=e=>{const m=e.data;if(m.init){M=L2.tileMaker(L2.reliefFrom(m.init.D),m.init.B,m.init.o);return;}
+  const g=M.make(m.TI,m.TJ);self.postMessage({key:m.key,g},[g.z.buffer,g.out.buffer,g.lab.buffer,g.cell.buffer,g.per.buffer,g.eu.buffer,g.ev.buffer,g.ew.buffer]);};`;
+    const url=URL.createObjectURL(new Blob([src],{type:"text/javascript"})),wi=l2Boundary().workerInputs(),ws=[];
+    for(let k=0;k<n;k++){const w=new Worker(url);w.postMessage({init:{D:S.l2D,B:wi.B,o:wi.o}});ws.push(w);}
+    // one pool at a time: a new L1 run's replaces the last
+    if(l2PoolLast)for(const w of l2PoolLast.workers)w.terminate();S.l2Pool=l2PoolLast={workers:ws,n,failed:false};URL.revokeObjectURL(url);}catch(err){S.l2Pool=null;}
+  return S.l2Pool;}
+let l2PoolLast=null;
 function l2PrevHide(){l2V=null;l2Job++;$("l2wrap").hidden=true;$("l2stats").innerHTML="";$("l2Prev").disabled=!l2Sel;}
 $("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;let i0=1e9,i1=-1,j0=1e9,j1=-1;
   for(let c=0;c<s.mask.length;c++)if(s.mask[c]){const i=c%bs.nx,j=(c/bs.nx)|0;if(i<i0)i0=i;if(i>i1)i1=i;if(j<j0)j0=j;if(j>j1)j1=j;}
@@ -574,14 +590,24 @@ $("l2Prev").onclick=()=>{const s=l2Sel,bs=l1St&&l1St.bs;if(!s||!bs)return;let i0
   logAction({a:"l2preview"});$("l2wrap").hidden=false;l2Burn(l2Draw);};
 // the selection's outline burnt in at 500 m (L2.boundary): a tile routed per slice of a frame, then the outline
 function l2Boundary(){const S=l1St;if(!S.l2B)S.l2B=L2.boundary(l2Relief(),S.bs);return S.l2B;}
-function l2Burn(done){const sel=l2Sel,job=++l2Job;if(sel.ref){done();return;}const bd=l2Boundary(),t0=performance.now();let n=0;
-  // the tiles still to route: listed once per phase (the scan is slow on a large grid), at least one routed per frame
-  let p=[],finished=false,listed=0;
-  const step=()=>{if(job!==l2Job||sel!==l2Sel)return;const t1=performance.now();
-    do{if(!p.length){p=bd.pending(sel);listed++;if(!p.length){finished=true;break;}}const [TI,TJ]=p.shift();bd.tile(TI,TJ);n++;}while(performance.now()-t1<60);
-    if(!finished){$("l2stats").innerHTML=`<div>Burning in the outline<b class="num">${n} tiles routed, ${p.length} more listed${listed<2?" (then the band around the edge)":""}…</b></div>`;requestAnimationFrame(step);return;}
-    sel.ref=bd.refine(sel);sel.ref.wallMs=performance.now()-t0;sel.ref.routed=n;l2Info();done();};
-  requestAnimationFrame(step);}
+// The burn-in's generator asks for tiles (pass A) in batches; the workers evaluate them in parallel, or, without
+// workers, the main thread does, at least one per frame. Between batches the generator stitches (main thread).
+function l2Burn(done){const sel=l2Sel,job=++l2Job;if(sel.ref){done();return;}const bd=l2Boundary(),t0=performance.now(),it=bd.refineSteps(sel),pool=l2Pool(),tny=bd.tny;
+  const ts0=performance.now();let r=it.next(),queue=[],inFlight=0,got=0,want=0,stitchMs=performance.now()-ts0,batchT=0,tileMs=0;const alive=()=>job===l2Job&&sel===l2Sel,missing=()=>r.value.need.filter(k=>!bd.graphs.has(k));
+  const show=()=>$("l2stats").innerHTML=`<div>Burning in the outline<b class="num">${got} of ${want} tiles evaluated${pool&&!pool.failed?` on ${pool.n} worker${pool.n>1?"s":""}`:""}${!r.done&&r.value.rounds>1?`, domain widened ${r.value.rounds-1}×`:""}…</b></div>`;
+  const finish=()=>{sel.ref=r.value;sel.ref.wallMs=performance.now()-t0;sel.ref.stitchMs=stitchMs;sel.ref.tileMs=tileMs;sel.ref.workers=pool&&!pool.failed?pool.n:0;l2Info();done();};
+  // resume the generator (it stitches) until it asks for tiles not yet evaluated, or ends
+  const advance=()=>{if(!alive())return;if(batchT)tileMs+=performance.now()-batchT;const ts=performance.now();do r=it.next();while(!r.done&&!missing().length);stitchMs+=performance.now()-ts;if(r.done){finish();return;}batch();};
+  const batch=()=>{queue=missing();want+=queue.length;show();batchT=performance.now();if(pool&&!pool.failed)for(const w of pool.workers)feed(w);else requestAnimationFrame(local);};
+  const feed=w=>{if(!alive())return;if(!queue.length){if(!inFlight)requestAnimationFrame(advance);return;}const k=queue.shift();inFlight++;
+    w.onmessage=e=>{inFlight--;if(!alive())return;bd.putGraph(e.data.key,e.data.g);got++;show();feed(w);};
+    w.onerror=e=>{if(e.preventDefault)e.preventDefault();if(pool.failed)return;pool.failed=true;queue=missing();inFlight=0;requestAnimationFrame(local);};
+    w.postMessage({key:k,TI:Math.floor(k/tny),TJ:k%tny});};
+  // without workers: here, at least one tile per frame
+  const local=()=>{if(!alive())return;const t1=performance.now();
+    do{const k=queue.shift();if(k===undefined)break;bd.ensure(k);got++;}while(queue.length&&performance.now()-t1<60);
+    show();requestAnimationFrame(queue.length?local:advance);};
+  if(r.done){finish();return;}if(!missing().length){requestAnimationFrame(advance);return;}batch();}
 // geometry: the selection's box fitted to the canvas, zoomed and panned
 function l2Geo(){const V=l2V,wrap=$("l2wrap"),bw=V.x1-V.x0,bh=V.y1-V.y0,asp=Math.min(1.2,Math.max(0.5,bh/bw));wrap.style.height=Math.round(wrap.clientWidth*asp)+"px";
   const dpr=Math.min(2,window.devicePixelRatio||1),W=Math.min(1100,Math.round(wrap.clientWidth*dpr)),H=Math.round(W*asp),cv=$("l2map");if(cv.width!==W||cv.height!==H){cv.width=W;cv.height=H;}
@@ -608,7 +634,7 @@ function l2Shade(){const V=l2V,W=V.W,H=V.H,Z=V.Z,cv=$("l2map"),ctx=cv.getContext
 function l2Stats(){const V=l2V,S=l1St;if(!V)return;const R=S.l2R,fmt=v=>v<1?v.toFixed(2):v<10?v.toFixed(1):Math.round(v).toLocaleString("en-US");
   $("l2stats").innerHTML=`<div>L2 grid dx / dt<b class="num">${R.o.lamMinKm/2} km / no run yet</b></div><div>Drawn at<b class="num">${fmt(V.s)} km per pixel</b></div>
     <div>Octaves drawn<b class="num">${R.octaves.filter(L=>L>=V.minKm).join(", ")} km</b></div><div>Relief built / drawn<b class="num">${Math.round(S.l2Ms)} / ${Math.round(V.ms)} ms</b></div>
-    ${l2Sel&&l2Sel.ref?`<div>Outline burnt in<b class="num">${(l2Sel.ref.wallMs/1000).toFixed(1)} s, ${l2Sel.ref.routed} tiles routed</b></div>`:""}`;}
+    ${l2Sel&&l2Sel.ref?`<div>Outline burnt in<b class="num">${(l2Sel.ref.wallMs/1000).toFixed(1)} s: ${l2Sel.ref.evaluated} tiles evaluated${l2Sel.ref.workers?` on ${l2Sel.ref.workers} worker${l2Sel.ref.workers>1?"s":""}`:" on the main thread"}, stitched in ${(l2Sel.ref.stitchMs/1000).toFixed(1)} s</b></div>`:""}`;}
 gestures($("l2wrap"),{
   drag:(dx,dy)=>{if(!l2V||l2V.zoom<=1)return;const k=l2V.s*l2V.W/$("l2wrap").clientWidth;l2V.pan[0]-=dx*k;l2V.pan[1]+=dy*k;clearTimeout(l2V.t);l2V.t=setTimeout(l2Draw,120);},
   zoom:(f,cx,cy)=>{if(!l2V||!l2V.W)return;const r=$("l2map").getBoundingClientRect(),px=(cx-r.left)/r.width*l2V.W,py=(cy-r.top)/r.height*l2V.H,[x,y]=l2XY(px,py);

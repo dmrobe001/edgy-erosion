@@ -2,8 +2,9 @@
 // L2: drainage basins selected on the refined L1 map, at 500 m. So far: the surface L2 starts from, as a function of
 // position. Any point of it can be evaluated without the rest, which is what burning in basin boundaries in strips
 // needs (README, section 6, L2).
-const L2 = (() => {
-const {R_KM,hashStr}=SIM;
+// The module is a function of SIM and L1 so that its source can be handed to Web Workers (see L2work below).
+function L2module(SIM,L1){
+const {hashStr}=SIM;
 
 // 2D gradient noise (Perlin's improved noise, quintic fade), 16 gradient directions, lattice spacing 1; octave k
 // draws its gradients from its own hash, so octaves are independent, and is turned by its own angle (k times the
@@ -56,24 +57,33 @@ function gblur(f,mask,nx,ny,sig){const R=Math.max(1,Math.ceil(3*sig)),w=[];for(l
 //    warpKm, lattice warpLamKm): it wanders within L1's cell instead of running as a canal. A river entering the sea
 //    is held at sea level, not taken down to L1's sea floor. Small streams are L2's own.
 // Octaves shorter than minKm (a pixel, when drawing) are left out. Deterministic in the world seed.
-function relief(sheet,B,o){
+// What the relief needs from L1, as plain data (typed arrays and numbers), so that a worker can build the same
+// function: the seed, the drainage pass's surface and rivers, and the shortening lattice (from the sheet).
+function reliefInputs(sheet,B,o){
   o=Object.assign({H:0.5,lamMaxKm:16,lamMinKm:1,refKm:40,windowKm:30,aniso:5,anisoMax:4,latticeKm:20,burnKm2:1000,burnRise:3,burnWidthKm:1,burnMaxKm:15,floorKm:0.6,warpKm:1.5,warpLamKm:16},o);
-  const {nx,ny,h,e,land}=B,nc=nx*ny,seed=hashStr(String(sheet.world.opts.seed)+"|L2relief")|0,noise=makeGrad2(seed);
+  const {nx,ny,h}=B,seed=hashStr(String(sheet.world.opts.seed)+"|L2relief")|0;
+  // shortening, as an axial vector field (s cos 2t, s sin 2t) on the sheet's grid, t the shortening axis, sampled on a
+  // lattice latticeKm apart: per node the strike's direction and the stretch along it
+  const sf=sheet.strainField(),snc=sheet.nx*sheet.ny,qc=new Float64Array(snc),qs=new Float64Array(snc);
+  for(let c=0;c<snc;c++){if(isNaN(sf.lmin[c]))continue;const s=Math.max(0,1-sf.lmin[c]);qc[c]=s*Math.cos(2*sf.dir[c]);qs[c]=s*Math.sin(2*sf.dir[c]);}
+  const Lb=o.latticeKm,lnx=Math.ceil(nx*h/Lb)+2,lny=Math.ceil(ny*h/Lb)+2,cs=new Float64Array(lnx*lny),sn=new Float64Array(lnx*lny),an=new Float64Array(lnx*lny).fill(1);
+  for(let J=0;J<lny;J++)for(let I=0;I<lnx;I++){const x=B.x0+I*Lb,y=B.y0+J*Lb,a=sheet.sample(qc,x,y),b=sheet.sample(qs,x,y),s=Math.hypot(a,b),k=J*lnx+I;
+    const st=Math.min(o.anisoMax,1+o.aniso*s);if(st<1.02){cs[k]=1;sn[k]=0;continue;}
+    const strike=0.5*Math.atan2(b,a)+Math.PI/2;cs[k]=Math.cos(strike);sn[k]=Math.sin(strike);an[k]=st;}
+  return{o,seed,B:{nx,ny,h,x0:B.x0,y0:B.y0,e:B.e,land:B.land,rec:B.rec,A:B.A,f:B.S.f},lat:{lnx,lny,cs,sn,an}};}
+function relief(sheet,B,o){return reliefFrom(reliefInputs(sheet,B,o));}
+function reliefFrom(D){
+  const o=D.o,B=D.B,{nx,ny,h,e,land}=B,nc=nx*ny,seed=D.seed,noise=makeGrad2(seed);
   // RMS of one noise octave (sampled once on a fine, irregular set of points), to scale octaves to a given RMS
   let ss=0;const NS=40000;for(let k=0;k<NS;k++){const v=noise(k*0.6180339887%97.3,k*0.7548776662%89.1,1000);ss+=v*v;}const nrm=1/Math.sqrt(ss/NS);
   // 1. L1 roughness r1, land only
   const lm=Uint8Array.from(land,(v,c)=>v&&e[c]>0?1:0),hp=new Float64Array(nc),bl=gblur(e,lm,nx,ny,1);
   for(let c=0;c<nc;c++)hp[c]=lm[c]?(e[c]-bl[c])**2:0;
   const r1=gblur(hp,lm,nx,ny,o.windowKm/h);for(let c=0;c<nc;c++)r1[c]=Math.sqrt(r1[c]);
-  // 2. shortening, as an axial vector field (s cos 2t, s sin 2t) on the sheet's grid, t the shortening axis
-  const sf=sheet.strainField(),snc=sheet.nx*sheet.ny,qc=new Float64Array(snc),qs=new Float64Array(snc);
-  for(let c=0;c<snc;c++){if(isNaN(sf.lmin[c]))continue;const s=Math.max(0,1-sf.lmin[c]);qc[c]=s*Math.cos(2*sf.dir[c]);qs[c]=s*Math.sin(2*sf.dir[c]);}
-  const Lb=o.latticeKm,lx0=B.x0,ly0=B.y0,lnx=Math.ceil(nx*h/Lb)+2,lny=Math.ceil(ny*h/Lb)+2,cs=new Float64Array(lnx*lny),sn=new Float64Array(lnx*lny),an=new Float64Array(lnx*lny).fill(1);
-  for(let J=0;J<lny;J++)for(let I=0;I<lnx;I++){const x=lx0+I*Lb,y=ly0+J*Lb,a=sheet.sample(qc,x,y),b=sheet.sample(qs,x,y),s=Math.hypot(a,b),k=J*lnx+I;
-    const st=Math.min(o.anisoMax,1+o.aniso*s);if(st<1.02){cs[k]=1;sn[k]=0;continue;}
-    const strike=0.5*Math.atan2(b,a)+Math.PI/2;cs[k]=Math.cos(strike);sn[k]=Math.sin(strike);an[k]=st;}
+  // 2. the shortening lattice (reliefInputs)
+  const Lb=o.latticeKm,lx0=B.x0,ly0=B.y0,{lnx,lny,cs,sn,an}=D.lat;
   // 3. trunk rivers: segments from each cell's centre to its receiver's, bucketed by the cells within burnMaxKm
-  const f=B.S.f,rec=B.rec,A=B.A,gside=new Float64Array(nc),segs=[];
+  const f=B.f,rec=B.rec,A=B.A,gside=new Float64Array(nc),segs=[];
   // (octave amplitudes first: the trench's sides depend on them)
   const nOct=Math.round(Math.log2(o.lamMaxKm/o.lamMinKm))+1,amp=[];for(let k=0;k<nOct;k++)amp.push(nrm*Math.pow(o.lamMaxKm/2**k/o.refKm,o.H));
   const sigma=Math.sqrt(amp.reduce((a,v)=>a+(v/nrm)**2,0)); // RMS of the added relief per unit r1 (octaves independent)
@@ -148,85 +158,151 @@ function flood(z,W,H,lab0){const n=W*H,src=new Int32Array(n).fill(-1),key=new Fl
       if(done[p]||lab0[p]>=0)continue;const kp=Math.max(z[p],kq);if(src[p]<0||kp<key[p]){src[p]=src[q];key[p]=kp;hp.push(p,kp);}}}
   const lab=new Int32Array(n);for(let q=0;q<n;q++)lab[q]=src[q]>=0?lab0[src[q]]:-1;
   return{lab,src};}
-// The selection's outline at L2's resolution, by strips: labels are computed on a fixed lattice of tiles (T x T L1
-// cells), each routed on itself plus a halo of k L1 cells, the halo's outer edge an outlet with L1's own labels. A
-// tile's labels depend only on its position, never on the selection, so two selections sharing a boundary compute
-// the same outline there. The halo is wide enough when no core cell takes its label from a guess: a core cell's
-// water reaches a real outlet (the sea, a sink), or the halo's edge where L1's label is sure (the L1 cells around all
-// share it); if it reaches the edge near an L1 divide, the halo doubles, up to kMax. (Two halos agreeing
-// with each other proved nothing: both sent the same water to the same uncertain edge.) The first halo is how far
-// L2's relief can move a divide: the added relief's RMS over L1's regional
-// slope at the cell (a contour on a slope s moves by about sigma / s), in L1 cells, from kMin to kMax, the most
-// over the tile. The regional slope is that of L1's surface blurred over slopeKm: the steepest drop to a neighbour
-// is usually the wall of a small valley L1 carved, and in flat country it hid how far water wanders at 500 m.
-// Tiles are routed for the L1 cells within max(band, k / 2) cells of the selection's outer edge; elsewhere a point
-// keeps its L1 cell's label.
+// A flood with given seeds: seed[q] set for outlets, each with its starting level key0[q], label lab0[q] and origin
+// org0[q]; every other point takes the label and origin of the point it was reached from, at the level
+// max(its height, that point's level). Returns lab, org and the level key.
+function floodSeeded(z,W,H,seed,key0,lab0,org0){const n=W*H,key=new Float64Array(n).fill(Infinity),lab=new Int32Array(n).fill(-1),org=new Int32Array(n).fill(-1),done=new Uint8Array(n),hp=new L1.Heap(9*n+8);
+  for(let q=0;q<n;q++)if(seed[q]){key[q]=key0[q];lab[q]=lab0[q];org[q]=org0[q];hp.push(q,key[q]);}
+  while(hp.n){const q=hp.pop();if(done[q])continue;done[q]=1;const i=q%W,j=(q/W)|0,kq=key[q];
+    for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){if(!di&&!dj)continue;const I=i+di,J=j+dj;if(I<0||J<0||I>=W||J>=H)continue;const p=J*W+I;
+      if(done[p]||seed[p])continue;const kp=Math.max(z[p],kq);if(kp<key[p]){key[p]=kp;lab[p]=lab[q];org[p]=org[q];hp.push(p,kp);}}}
+  return{lab,org,key};}
+// Pass A on one tile of W x W points (a pure function of its heights and outlets, so it can run anywhere): flood from
+// every edge point and every outlet point, each its own seed, and return the graph between seeds: for each pair whose
+// catchments touch, the lowest level at which water crosses between them (the greater of two touching points'
+// levels, least over all touching pairs). Minimax ("lowest highest point") distances between seeds are the same on
+// this graph as on the points (Barnes et al. 2014, 2016).
+function tileGraph(z,W,isOut){const n=W*W,seed=new Uint8Array(n),key0=new Float64Array(n),ids=new Int32Array(n);
+  const per=[];for(let i=0;i<W;i++)per.push(i);for(let j=1;j<W;j++)per.push(j*W+W-1);for(let i=W-2;i>=0;i--)per.push((W-1)*W+i);for(let j=W-2;j>=1;j--)per.push(j*W);
+  for(const q of per)seed[q]=1;for(let q=0;q<n;q++)if(isOut[q])seed[q]=1;
+  for(let q=0;q<n;q++){key0[q]=z[q];ids[q]=q;}
+  const {org,key}=floodSeeded(z,W,W,seed,key0,ids,ids),best=new Map();
+  for(let j=0;j<W;j++)for(let i=0;i<W;i++){const a=j*W+i,sa=org[a];
+    for(const [di,dj] of [[1,0],[0,1],[1,1],[-1,1]]){const I=i+di,J=j+dj;if(I<0||J<0||I>=W||J>=W)continue;const b=J*W+I,sb=org[b];if(sa===sb||isOut[sa]&&isOut[sb])continue;
+      const w=Math.max(key[a],key[b]),k=sa<sb?sa*n+sb:sb*n+sa,o=best.get(k);if(o===undefined||w<o)best.set(k,w);}}
+  const eu=new Int32Array(best.size),ev=new Int32Array(best.size),ew=new Float64Array(best.size);let m=0;for(const [k,w] of best){eu[m]=Math.floor(k/n);ev[m]=k%n;ew[m]=w;m++;}
+  return{per:Int32Array.from(per),eu,ev,ew};}
+// Pass A for one tile from scratch: its heights (the relief, evaluated), outlets (sea, land below sea level, L1 sinks;
+// outside the grid) with their L1 labels, then its graph. Shared by the page's main thread and its workers, which
+// build it from plain data (reliefInputs, and the drainage pass's land, lakes and basins).
+function tileMaker(R,B,o){const {nx,ny,h,x0,y0,land,lake}=B,f=Math.round(h/o.dx),dx=h/f,W=o.T*f,lab1=l1Labels(B),sink=c=>land[c]&&lake&&lake[c]>=2;
+  function make(TI,TJ){const z=new Float32Array(W*W),out=new Uint8Array(W*W),lab=new Int32Array(W*W).fill(-1),cell=new Int32Array(W*W).fill(-1);
+    for(let bj=0;bj<o.T;bj++)for(let bi=0;bi<o.T;bi++){const I=TI*o.T+bi,J=TJ*o.T+bj,inG=I<nx&&J<ny,c=inG?J*nx+I:-1;
+      for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;if(!inG){z[q]=-1;out[q]=1;continue;}
+        z[q]=R.z(x0+I*h+(u+.5)*dx,y0+J*h+(v+.5)*dx,R.o.lamMinKm);cell[q]=c;lab[q]=lab1[c];if(z[q]<=0||sink(c))out[q]=1;}}
+    return Object.assign({z,out,lab,cell,TI,TJ},tileGraph(z,W,out));}
+  return{make,lab1,f,dx,W,sink};}
+// The selection's outline at L2's resolution, stitched from tiles. Tiles are T x T L1 cells on a fixed lattice;
+// each is evaluated and reduced to its graph (pass A) once. For a selection, a domain of tiles is routed:
+//   - stitch: the tiles' graphs joined across their shared edges (touching edge points, crossing level the greater
+//     of the two heights) and flooded as one graph, from the outlets and from the domain's outer edge (labelled by
+//     L1); this gives the exact level, label and origin arriving at every tile's edge points;
+//   - pass B: each tile flooded again from its outlets and its edge points at those levels: the same labels as
+//     routing the whole domain at once (ties aside).
+// A label is a guess if its water reached the domain's outer edge where L1's label is not sure (an L1 cell within a
+// cell of another basin). The domain starts as the tiles of the L1 cells within `band` cells of the selection's outer
+// edge and grows by the tiles beyond the edge points that guesses came from, until no point in those L1 cells is a
+// guess (or maxTiles). Every L1 cell of the domain with no guess gets L2's labels; the rest keep L1's.
 function boundary(R,B,o){
-  o=Object.assign({dx:0.5,T:4,kMin:2,kMax:24,band:2,slopeKm:20},o);
-  const {nx,ny,h,e,land,lake}=B,f=Math.round(h/o.dx),dx=h/f,lab1=l1Labels(B),blocks=new Map(),tiles=new Map();
-  // the relief's RMS per unit of L1 roughness (all octaves, as drawn; an upper bound once the band is high-passed)
-  const sig=Math.sqrt(R.octaves.reduce((a,L)=>a+Math.pow(L/R.o.refKm,2*R.o.H),0));
-  const lm=Uint8Array.from(land),eS=gblur(e,lm,nx,ny,o.slopeKm/h),kc=new Uint8Array(nx*ny);
-  for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0,at=(I,J)=>eS[Math.max(0,Math.min(ny-1,J))*nx+Math.max(0,Math.min(nx-1,I))];
-    const s=Math.hypot(at(i+1,j)-at(i-1,j),at(i,j+1)-at(i,j-1))/(2*h),w=sig*R.r1[c]/Math.max(s,1e-6);kc[c]=Math.max(o.kMin,Math.min(o.kMax,Math.ceil(w/h)));}
-  const kOf=c=>kc[c];
-  // the surface at L2's resolution in one L1 cell, f x f values, when first needed
-  const block=c=>{let b=blocks.get(c);if(b)return b;b=new Float32Array(f*f);const i=c%nx,j=(c/nx)|0;
-    for(let v=0;v<f;v++)for(let u=0;u<f;u++)b[v*f+u]=R.z(B.x0+i*h+(u+.5)*dx,B.y0+j*h+(v+.5)*dx,R.o.lamMinKm);blocks.set(c,b);return b;};
-  const sink=c=>land[c]&&lake&&lake[c]>=2;
-  // L1 cells whose label is sure: every L1 cell within a cell shares it
-  const sure=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0;let ok=1;for(let dj=-1;dj<=1&&ok;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I>=0&&J>=0&&I<nx&&J<ny&&lab1[J*nx+I]!==lab1[c]){ok=0;break;}}sure[c]=ok;}
-  // a tile's labels: per core L1 cell, f x f labels
-  function tile(TI,TJ){const key=TI+","+TJ;let t=tiles.get(key);if(t)return t;const i0=TI*o.T,j0=TJ*o.T;let k=o.kMin;
-    for(let j=j0;j<j0+o.T;j++)for(let i=i0;i<i0+o.T;i++)if(i<nx&&j<ny)k=Math.max(k,kOf(j*nx+i));
-    // double the halo while a core cell's label is a guess (or to kMax)
-    let r=route(i0,j0,k),tries=1;while(r.guesses&&k<o.kMax){k=Math.min(o.kMax,2*k);r=route(i0,j0,k);tries++;}
-    t={k,tries,guesses:r.guesses,cells:r.out};tiles.set(key,t);return t;}
-  // the core cells' labels of the tile at (i0, j0), routed with a halo of k cells
-  function route(i0,j0,k){
-    const a0=i0-k,b0=j0-k,n1=o.T+2*k,W=n1*f,z=new Float32Array(W*W).fill(1e9),l0=new Int32Array(W*W).fill(-1);
-    for(let bj=0;bj<n1;bj++)for(let bi=0;bi<n1;bi++){const I=a0+bi,J=b0+bj;const inG=I>=0&&J>=0&&I<nx&&J<ny,c=inG?J*nx+I:-1,bl=inG?block(c):null,edge=bi===0||bj===0||bi===n1-1||bj===n1-1;
-      for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;if(!inG){z[q]=-1;l0[q]=-2;continue;}z[q]=bl[v*f+u];
-        const ring=edge&&(bi===0&&u===0||bj===0&&v===0||bi===n1-1&&u===f-1||bj===n1-1&&v===f-1);if(ring||z[q]<=0||sink(c))l0[q]=lab1[c];}}
-    const {lab,src}=flood(z,W,W,l0),out=new Map();let guesses=0;
-    for(let bj=k;bj<k+o.T;bj++)for(let bi=k;bi<k+o.T;bi++){const I=a0+bi,J=b0+bj;if(I<0||J<0||I>=nx||J>=ny)continue;const L=new Int32Array(f*f);
-      for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;L[v*f+u]=lab[q];
-        // a guess: the outlet is on the halo's edge (not sea or sink) in an L1 cell near a divide
-        const sq=src[q];if(sq>=0&&z[sq]>0){const sb=(sq/W/f)|0,sa=((sq%W)/f)|0,cc=(b0+sb)*nx+a0+sa;if(cc>=0&&cc<nx*ny&&!sink(cc)&&!sure[cc])guesses++;}}
-      out.set(J*nx+I,L);}
-    return{out,guesses};}
-  // The selection refined. Edge cells: selected with an unselected neighbour, or the reverse; then every L1 cell
-  // within max(band, k / 2) of one, k its tile's halo, gets L2 labels from its tile.
-  const tKey=c=>Math.floor((c%nx)/o.T)+","+Math.floor(((c/nx)|0)/o.T);
-  const tileAt=c=>tile(Math.floor((c%nx)/o.T),Math.floor(((c/nx)|0)/o.T));
-  function edgeCells(selC){const edge=[];for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0;let on=false;
-      for(let dj=-1;dj<=1&&!on;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I<0||J<0||I>=nx||J>=ny)continue;if(selC(J*nx+I)!==selC(c)&&(land[c]||land[J*nx+I])){on=true;break;}}if(on)edge.push(c);}
-    return edge;}
-  function nearCells(selC,edge){const near=new Set();
-    for(const c of edge){const d=Math.max(o.band,Math.ceil(Math.max(kc[c],tileAt(c).k)/2)),i=c%nx,j=(c/nx)|0;for(let dj=-d;dj<=d;dj++)for(let di=-d;di<=d;di++){const I=i+di,J=j+dj;if(I>=0&&J>=0&&I<nx&&J<ny)near.add(J*nx+I);}}
-    return near;}
-  // tiles a refinement still needs routed, [TI, TJ] each: the edge cells' first (the band's width depends on their
-  // halos), then the band's; empty when refine(sel) can run at once. Lets the page route a tile per frame.
-  // the selection as a flag per L1 cell (a set lookup per neighbour made the scan of a large grid slow)
-  const selFlags=sel=>{const inSel=new Set(sel.basins),fl=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++)if(lab1[c]>=0&&inSel.has(lab1[c]))fl[c]=1;return c=>fl[c]===1;};
-  function pending(sel){const selC=selFlags(sel),edge=edgeCells(selC),need=new Map();
-    for(const c of edge){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}if(need.size)return[...need.values()];
-    for(const c of nearCells(selC,edge)){const k=tKey(c);if(!tiles.has(k))need.set(k,k.split(",").map(Number));}return[...need.values()];}
-  function refine(sel){const t0=Date.now(),inSel=new Set(sel.basins),selC=selFlags(sel),near=nearCells(selC,edgeCells(selC));
-    const cells=new Map(),seen=new Set();for(const c of near){seen.add(tKey(c));cells.set(c,tileAt(c).cells.get(c));}
-    const inside=(x,y)=>{const i=Math.floor((x-B.x0)/h),j=Math.floor((y-B.y0)/h);if(i<0||j<0||i>=nx||j>=ny)return false;const c=j*nx+i,L=cells.get(c);
-      if(!L)return selC(c);const u=Math.min(f-1,Math.floor((x-B.x0-i*h)/dx)),v=Math.min(f-1,Math.floor((y-B.y0-j*h)/dx));return inSel.has(L[v*f+u]);};
+  o=Object.assign({dx:0.5,T:4,band:2,sureR:1,grow:0,maxTiles:4000},o);const stats=[];
+  const {nx,ny,h,land}=B,M=tileMaker(R,B,o),{f,dx,W,lab1,sink}=M,graphs=new Map(),tnx=Math.ceil(nx/o.T),tny=Math.ceil(ny/o.T);
+  // L1 cells whose label is sure: every L1 cell within sureR cells shares it
+  const sure=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0,d=o.sureR;let ok=1;for(let dj=-d;dj<=d&&ok;dj++)for(let di=-d;di<=d;di++){const I=i+di,J=j+dj;if(I>=0&&J>=0&&I<nx&&J<ny&&lab1[J*nx+I]!==lab1[c]){ok=0;break;}}sure[c]=ok;}
+  // pass A, once per tile (here, or by a worker: putGraph)
+  const graph=k=>{let g=graphs.get(k);if(!g){g=M.make(Math.floor(k/tny),k%tny);graphs.set(k,g);}return g;};
+  const putGraph=(k,g)=>{if(!graphs.has(k))graphs.set(k,g);};
+  const tileOfCell=c=>Math.floor((c%nx)/o.T)*tny+Math.floor(((c/nx)|0)/o.T);
+  // the selection as a flag per L1 cell
+  const selFlags=sel=>{const inSel=new Set(sel.basins),fl=new Uint8Array(nx*ny);for(let c=0;c<nx*ny;c++)if(lab1[c]>=0&&inSel.has(lab1[c]))fl[c]=1;return fl;};
+  // stitch and pass B over a domain (a set of tile keys); returns per tile the labels and whether each is a guess,
+  // and the domain-edge points the guesses came from
+  // final: pass B over every tile and the edge relabelling; otherwise (while the domain grows) pass B only over the
+  // tiles in `only`, enough to find the guesses
+  function solve(dom,final,only){const T0=Date.now(),keys=[...dom],gi=new Map();keys.forEach((k,t)=>gi.set(k,t));
+    // global node per (tile, seed point): edge points, then the outlets the tile's graph mentions
+    const off=[],nodeOf=[];let N=0;for(const k of keys){const g=graphs.get(k),m=new Map();for(const q of g.per)m.set(q,N++);for(let e=0;e<g.eu.length;e++)for(const q of [g.eu[e],g.ev[e]])if(!m.has(q))m.set(q,N++);nodeOf.push(m);}
+    const nz=new Float64Array(N),seed=new Uint8Array(N),nlab=new Int32Array(N).fill(-1),guessy=new Uint8Array(N),ntile=new Int32Array(N),npt=new Int32Array(N),U=[],V=[],Wt=[];
+    keys.forEach((k,t)=>{const g=graphs.get(k);for(const [q,id] of nodeOf[t]){nz[id]=g.z[q];ntile[id]=t;npt[id]=q;if(g.out[q]){seed[id]=1;nlab[id]=g.lab[q];}}
+      for(let e=0;e<g.eu.length;e++){U.push(nodeOf[t].get(g.eu[e]));V.push(nodeOf[t].get(g.ev[e]));Wt.push(g.ew[e]);}
+      // across the tile's edges: touching edge points of a neighbouring tile in the domain, or the domain's outer edge
+      const {TI,TJ}=g;for(const q of g.per){const u=q%W,v=(q/W)|0,X=TI*W+u,Y=TJ*W+v,a=nodeOf[t].get(q);let outer=false;
+        for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){if(!di&&!dj)continue;const u2=u+di,v2=v+dj;if(u2>=0&&v2>=0&&u2<W&&v2<W)continue;
+          const X2=X+di,Y2=Y+dj,T2I=Math.floor(X2/W),T2J=Math.floor(Y2/W),k2=T2I*tny+T2J;
+          if(X2<0||Y2<0||T2I>=tnx||T2J>=tny||!gi.has(k2)){outer=true;continue;}
+          if(k2<k)continue;const g2=graphs.get(k2),q2=(Y2-T2J*W)*W+(X2-T2I*W),b=nodeOf[gi.get(k2)].get(q2);U.push(a);V.push(b);Wt.push(Math.max(g.z[q],g2.z[q2]));}
+        if(outer&&!seed[a]){seed[a]=1;nlab[a]=g.lab[q];const c=g.cell[q];guessy[a]=c>=0&&!sure[c]&&!sink(c)?1:0;}}});
+    const T1=Date.now();
+    // the stitched graph, flooded
+    const deg=new Int32Array(N+1);for(let e=0;e<U.length;e++){deg[U[e]+1]++;deg[V[e]+1]++;}for(let i=0;i<N;i++)deg[i+1]+=deg[i];
+    const adj=new Int32Array(deg[N]),aw=new Float64Array(deg[N]),fp=deg.slice(0,N);for(let e=0;e<U.length;e++){adj[fp[U[e]]]=V[e];aw[fp[U[e]]++]=Wt[e];adj[fp[V[e]]]=U[e];aw[fp[V[e]]++]=Wt[e];}
+    const K=new Float64Array(N).fill(Infinity),L=new Int32Array(N).fill(-1),O=new Int32Array(N).fill(-1),dn=new Uint8Array(N),hp=new L1.Heap(deg[N]+N+8);
+    for(let i=0;i<N;i++)if(seed[i]){K[i]=nz[i];L[i]=nlab[i];O[i]=i;hp.push(i,K[i]);}
+    while(hp.n){const a=hp.pop();if(dn[a])continue;dn[a]=1;for(let p=deg[a];p<deg[a+1];p++){const b=adj[p];if(dn[b]||seed[b])continue;const k=Math.max(aw[p],K[a]);if(k<K[b]){K[b]=k;L[b]=L[a];O[b]=O[a];hp.push(b,k);}}}
+    const T2=Date.now();
+    // pass B per tile: edge points seeded at the stitched levels
+    const res=new Map();
+    const passB=(k,t)=>{const g=graphs.get(k),sd=new Uint8Array(W*W),k0=new Float64Array(W*W),l0=new Int32Array(W*W),o0=new Int32Array(W*W).fill(-1);
+      for(let q=0;q<W*W;q++)if(g.out[q]){sd[q]=1;k0[q]=g.z[q];l0[q]=g.lab[q];}
+      for(const q of g.per){const id=nodeOf[t].get(q);sd[q]=1;k0[q]=K[id];l0[q]=L[id];o0[q]=O[id];}
+      const r=floodSeeded(g.z,W,W,sd,k0,l0,o0),gs=new Uint8Array(W*W);for(let q=0;q<W*W;q++){const og=r.org[q];if(og>=0&&guessy[og])gs[q]=1;}
+      res.set(k,{lab:r.lab,org:r.org,key:r.key,guess:gs});};
+    keys.forEach((k,t)=>{if(final||only.has(k))passB(k,t);});const T3=Date.now();let iters=0,reflooded=0;
+    // The stitched levels are exact, but at an edge point reached at the same level from several sides, the graph
+    // chose a side by its own order. Routing the whole domain gives such a point the label of its lowest neighbour
+    // (where its water goes), so edge points take it, across seams too; tiles whose edge labels changed are flooded
+    // again, until none change.
+    for(let it=0;final&&it<50;it++){const dirty=new Set();
+      keys.forEach((k,t)=>{const g=graphs.get(k),r=res.get(k);for(const q of g.per){const id=nodeOf[t].get(q);if(seed[id])continue;const u=q%W,v=(q/W)|0,X=g.TI*W+u,Y=g.TJ*W+v;
+        let bk=Infinity,bl=-1,bo=-1;for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){if(!di&&!dj)continue;const X2=X+di,Y2=Y+dj,T2I=Math.floor(X2/W),T2J=Math.floor(Y2/W),k2=T2I*tny+T2J;
+          if(X2<0||Y2<0||T2I>=tnx||T2J>=tny)continue;const r2=res.get(k2);if(!r2)continue;const q2=(Y2-T2J*W)*W+X2-T2I*W;if(r2.key[q2]<bk){bk=r2.key[q2];bl=r2.lab[q2];bo=r2.org[q2];}}
+        if(bk<K[id]&&bl!==L[id]){L[id]=bl;O[id]=bo;dirty.add(t);}}});
+      iters++;if(!dirty.size)break;reflooded+=dirty.size;for(const t of dirty)passB(keys[t],t);}
+    stats.push({tiles:keys.length,nodes:N,edges:U.length,build:T1-T0,graph:T2-T1,passB:T3-T2,relabel:Date.now()-T3,iters,reflooded});
+    return{res,guessy,ntile,npt,keys};}
+  // the domain-edge point a guess came from, and the tiles beyond it (and within `grow` tiles of those: growing faster
+  // took fewer rounds but a larger domain, and cost more)
+  function beyond(S,og,add){const g=graphs.get(S.keys[S.ntile[og]]),q=S.npt[og],u=q%W,v=(q/W)|0,X=g.TI*W+u,Y=g.TJ*W+v,G=o.grow;
+    for(let dj=-1;dj<=1;dj++)for(let di=-1;di<=1;di++){const T2I=Math.floor((X+di)/W),T2J=Math.floor((Y+dj)/W);
+      for(let b=-G;b<=G;b++)for(let a=-G;a<=G;a++){const I=T2I+a,J=T2J+b;if(I<0||J<0||I>=tnx||J>=tny)continue;add(I*tny+J);}}}
+  // The selection refined, as a generator: yields after each tile evaluated, so the page can spread the work over
+  // frames; returns the result. Tiles evaluated before (for any selection) are reused.
+  // Yields {need: tile keys} whenever tiles must be evaluated (pass A); whoever drives it may supply them with putGraph
+  // before resuming (workers), or leave them to be evaluated here.
+  function* refineSteps(sel){const t0=Date.now(),fl=selFlags(sel),selC=c=>fl[c]===1;
+    // core: L1 cells within `band` of an edge cell (selected with an unselected neighbour on land, or the reverse)
+    const core=new Set();for(let c=0;c<nx*ny;c++){const i=c%nx,j=(c/nx)|0;let on=false;
+      for(let dj=-1;dj<=1&&!on;dj++)for(let di=-1;di<=1;di++){const I=i+di,J=j+dj;if(I<0||J<0||I>=nx||J>=ny)continue;if(fl[J*nx+I]!==fl[c]&&(land[c]||land[J*nx+I])){on=true;break;}}
+      if(on){const d=o.band;for(let dj=-d;dj<=d;dj++)for(let di=-d;di<=d;di++){const I=i+di,J=j+dj;if(I>=0&&J>=0&&I<nx&&J<ny)core.add(J*nx+I);}}}
+    const dom=new Set();for(const c of core)dom.add(tileOfCell(c));const coreTiles=new Set(dom);let S=null,rounds=0,evaluated=0;
+    const fill=function*(){const need=[...dom].filter(k=>!graphs.has(k));if(need.length){evaluated+=need.length;yield{need,evaluated,domain:dom.size,rounds};for(const k of need)graph(k);}};
+    for(;;){rounds++;yield*fill();
+      S=solve(dom,false,coreTiles);const add=new Set();
+      for(const c of core){const k=tileOfCell(c),r=S.res.get(k),bi=(c%nx)-Math.floor(k/tny)*o.T,bj=((c/nx)|0)-(k%tny)*o.T;
+        for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;if(r.guess[q])beyond(S,r.org[q],kk=>{if(!dom.has(kk))add.add(kk);});}}
+      if(!add.size||dom.size>=o.maxTiles)break;for(const k of add){if(dom.size>=o.maxTiles)break;dom.add(k);}}
+    S=solve(dom,true);
+    // labels per L1 cell: the core always, and any other L1 cell of the domain with no guess
+    const cells=new Map();let guessCells=0;
+    for(const k of dom){const r=S.res.get(k),TI=Math.floor(k/tny),TJ=k%tny;for(let bj=0;bj<o.T;bj++)for(let bi=0;bi<o.T;bi++){const I=TI*o.T+bi,J=TJ*o.T+bj;if(I>=nx||J>=ny)continue;const c=J*nx+I,Lc=new Int32Array(f*f);let g=0;
+      for(let v=0;v<f;v++)for(let u=0;u<f;u++){const q=(bj*f+v)*W+bi*f+u;Lc[v*f+u]=r.lab[q];g+=r.guess[q];}
+      if(core.has(c)){cells.set(c,Lc);if(g)guessCells++;}else if(!g)cells.set(c,Lc);}}
+    const inSel=new Set(sel.basins);
+    const inside=(x,y)=>{const i=Math.floor((x-B.x0)/h),j=Math.floor((y-B.y0)/h);if(i<0||j<0||i>=nx||j>=ny)return false;const c=j*nx+i,Lc=cells.get(c);
+      if(!Lc)return selC(c);const u=Math.min(f-1,Math.floor((x-B.x0-i*h)/dx)),v=Math.min(f-1,Math.floor((y-B.y0-j*h)/dx));return inSel.has(Lc[v*f+u]);};
     // land area: L1 cells refined count their land points in the selection; the rest count whole if selected
-    let area=0,areaL1=0;for(let c=0;c<nx*ny;c++){if(!land[c])continue;if(selC(c))areaL1+=h*h;const L=cells.get(c);if(!L){if(selC(c))area+=h*h;continue;}const bl=block(c);let n=0;for(let q=0;q<L.length;q++)if(inSel.has(L[q])&&bl[q]>0)n++;area+=n*dx*dx;}
-    let kMaxUsed=0,unsettled=0;for(const key of seen){const t=tiles.get(key);kMaxUsed=Math.max(kMaxUsed,t.k);if(t.guesses)unsettled++;}
-    return{inside,cells,nTiles:seen.size,nCells:near.size,areaKm2:area,areaL1Km2:areaL1,kMaxUsed,unsettled,ms:Date.now()-t0};}
-  // the same labelling routed over a whole box at once (the reference the strips are tested against): nX x nY cells
-  // of dx from (x0, y0), the box's edge an outlet with L1's labels
+    let area=0,areaL1=0;for(let c=0;c<nx*ny;c++){if(!land[c])continue;if(selC(c))areaL1+=h*h;const Lc=cells.get(c);if(!Lc){if(selC(c))area+=h*h;continue;}const g=graphs.get(tileOfCell(c)),bi=(c%nx)-Math.floor(tileOfCell(c)/tny)*o.T,bj=((c/nx)|0)-(tileOfCell(c)%tny)*o.T;let n=0;for(let v=0;v<f;v++)for(let u=0;u<f;u++)if(inSel.has(Lc[v*f+u])&&g.z[(bj*f+v)*W+bi*f+u]>0)n++;area+=n*dx*dx;}
+    return{inside,cells,solved:S,tileKey:(x,y)=>{const X=Math.floor((x-B.x0)/dx),Y=Math.floor((y-B.y0)/dx),TI=Math.floor(X/W),TJ=Math.floor(Y/W),k=TI*tny+TJ,r=S.res.get(k);if(!r)return null;const q=(Y-TJ*W)*W+X-TI*W;return{lab:r.lab[q],key:r.key[q],u:X-TI*W,v:Y-TJ*W};},nTiles:dom.size,evaluated,rounds,nCells:cells.size,coreCells:core.size,guessCells,areaKm2:area,areaL1Km2:areaL1,ms:Date.now()-t0};}
+  function refine(sel){const it=refineSteps(sel);let r;while(!(r=it.next()).done);return r.value;}
+  // the inputs a worker needs to build the same tiles: the relief's inputs (passed in), the grid and the outlets
+  const workerInputs=()=>({B:{nx,ny,h,x0:B.x0,y0:B.y0,land:B.land,lake:B.lake,basin:B.basin},o});
+  // the same labelling routed over a whole box at once (the reference the stitching is tested against): nX x nY
+  // points of dx from (x0, y0), the box's edge an outlet with L1's labels
   function full(x0,y0,nX,nY){const z=R.grid(x0,y0,dx,nX,nY,R.o.lamMinKm),l0=new Int32Array(nX*nY).fill(-1);
     for(let j=0;j<nY;j++)for(let i=0;i<nX;i++){const q=j*nX+i,x=x0+(i+.5)*dx,y=y0+(j+.5)*dx,ci=Math.floor((x-B.x0)/h),cj=Math.floor((y-B.y0)/h);
       if(ci<0||cj<0||ci>=nx||cj>=ny){l0[q]=-2;continue;}const c=cj*nx+ci;if(i===0||j===0||i===nX-1||j===nY-1||z[q]<=0||sink(c))l0[q]=lab1[c];}
     return{z,lab:flood(z,nX,nY,l0).lab};}
-  return{o,dx,f,lab1,tile,pending,refine,full,kOf,blocks,tiles};}
-return {relief,boundary,flood,l1Labels,makeGrad2,gblur};
-})();
+  return{o,dx,f,lab1,tny,refine,refineSteps,putGraph,ensure:graph,workerInputs,full,graphs,stats};}
+return {relief,reliefInputs,reliefFrom,boundary,tileMaker,flood,floodSeeded,tileGraph,l1Labels,makeGrad2,gblur};
+}
+const L2=L2module(SIM,L1);
 // ===== L2-END =====

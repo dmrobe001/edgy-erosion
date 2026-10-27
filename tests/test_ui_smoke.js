@@ -61,7 +61,7 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
     finally { global.requestAnimationFrame = raf; performance.now = now; }
     if (!l2V || !l2V.Z || !document.getElementById("l2stats").innerHTML.includes("Drawn at")) throw new Error("L2 relief preview not drawn");
     if (!s.ref || !document.getElementById("l2Info").innerHTML.includes("Outline at 500 m")) throw new Error("L2 outline not burnt in");
-    console.log("PASS ui smoke L2 outline: " + Math.round(s.ref.areaKm2) + " km² at 500 m (L1: " + Math.round(s.ref.areaL1Km2) + "), " + s.ref.nTiles + " tiles, halos up to " + s.ref.kMaxUsed + ", " + frames + " frames under a clock running 100 ms per reading");
+    console.log("PASS ui smoke L2 outline: " + Math.round(s.ref.areaKm2) + " km² at 500 m (L1: " + Math.round(s.ref.areaL1Km2) + "), " + s.ref.nTiles + " tiles (" + s.ref.evaluated + " evaluated, " + s.ref.rounds + " rounds), " + frames + " frames under a clock running 100 ms per reading");
     let zl = Infinity, zh = -Infinity; for (const v of l2V.Z) { zl = Math.min(zl, v); zh = Math.max(zh, v); }
     console.log("PASS ui smoke L2 relief preview: " + l2V.W + "x" + l2V.H + " px at " + l2V.s.toFixed(2) + " km/px, " + zl.toFixed(2) + " to " + zh.toFixed(2) + " km");
     console.log("PASS ui smoke L2 selection: " + s.basins.length + " basins (" + s.nWithin + " within 200 km, " + s.nEnclosed + " enclosed), " + (s.areaKm2 / 1e3).toFixed(0) + " thousand km², " + s.ms.toFixed(0) + " ms"); }
