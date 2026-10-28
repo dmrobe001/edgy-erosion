@@ -35,6 +35,8 @@ A ratio of roughly 5–10× between levels gives five or six levels from planet 
 
 Everything is deterministic given the seed and settings (seed text, resolution, initial plate count, start mode, continental crust target, net-rotation option). The same inputs always produce the same world.
 
+**What that is for, and what it is not.** Determinism is a tool: it lets a session be rerun, lets L1 replay L0's history exactly, and lets tests catch accidental changes. It is not a goal in itself. Getting the physics right comes first, and a change that improves the physics is welcome even when it changes every number downstream. Tests should check physical expectations and invariants (budgets that close, ranges against Earth) more than exact matches to an earlier build; a bit-for-bit match to a wrong answer is worth nothing. Sessions saved by an earlier build rerun with that build's sources (`tools/session.js` finds the commit).
+
 ---
 
 ## 2. Quick start
