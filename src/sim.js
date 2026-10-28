@@ -416,7 +416,8 @@ class World{
     const decay=Math.pow(0.97,dt);let mergeKey=-1;
     for(const [k,v] of this.pairs){const nv=v*decay;if(nv<0.5){this.pairs.delete(k);continue;}this.pairs.set(k,nv);
       if(nv>C.COLL_LOG&&!this.collLogged.has(k)){this.collLogged.add(k);this.log("collide",`Continents on plates ${Math.floor(k/4096)} and ${k%4096} begin to collide; mountains rise`,this.pairLoc.get(k));}
-      if(nv>C.MERGE&&mergeKey<0)mergeKey=k;}
+      if(mergeKey<0&&this.weldReady(k,nv))mergeKey=k;}
+    if(mergeKey<0)mergeKey=this.weldCandidate();
     if(mergeKey>=0)this.merge(plates[Math.floor(mergeKey/4096)],plates[mergeKey%4096]);
     const alive=plates.filter(p=>p.alive);
     const rate=(alive.length<this.targetPlates?2.5:1)/C.SPLIT_TAU;
@@ -426,6 +427,9 @@ class World{
         let pick=r()*tot,P=cands[0];for(const p of cands){pick-=Math.pow(p.area,1.5);if(pick<=0){P=p;break;}}this.split(P);}
     }
   }
+  // welding: a pair whose collision counter crosses MERGE (the marker core replaces this rule when driven by forces)
+  weldReady(k,nv){return nv>C.MERGE;}
+  weldCandidate(){return -1;}
   // angular velocities: random walk in direction, speed relaxes toward each plate's preferred speed
   // (an unconstrained 3D random walk drifts outward in magnitude until it hits the cap)
   walkVelocities(){const {dt,rand:r,plates}=this;

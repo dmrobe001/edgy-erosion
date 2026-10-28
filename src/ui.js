@@ -170,6 +170,12 @@ function render(){
   if(marks){for(const h of world.hotspots){const p=project(h.v);if(!p)continue;const rad=Math.max(4,5*dpr);
     ctx.lineWidth=Math.max(1.5,1.6*dpr);ctx.strokeStyle="rgba(0,0,0,.55)";ctx.beginPath();ctx.arc(p[0],p[1],rad+1,0,7);ctx.stroke();
     ctx.strokeStyle="#ffcf4a";ctx.beginPath();ctx.arc(p[0],p[1],rad,0,7);ctx.stroke();}}
+  // the mantle's flow beneath (marker core driven by forces): thin pale arrows on the plates' scale
+  if(marks&&world.mc){const n=260,k=28*10/SIM.R_KM;ctx.lineCap="round";
+    for(let q=0;q<n;q++){const z=1-2*(q+0.5)/n,r=Math.sqrt(1-z*z),ph=q*2.399963229728653,c=[r*Math.cos(ph),r*Math.sin(ph),z],v=MESH.mantleAt(world.mc,c[0],c[1],c[2]);
+      const e=[c[0]+v[0]*k,c[1]+v[1]*k,c[2]+v[2]*k],el=Math.hypot(...e);e[0]/=el;e[1]/=el;e[2]/=el;const a=project(c),b=project(e);if(!a||!b)continue;if(proj==="flat"&&a[2]!==b[2])continue;
+      ctx.strokeStyle="rgba(170,215,255,.7)";ctx.lineWidth=Math.max(1,1.1*dpr);ctx.beginPath();ctx.moveTo(a[0],a[1]);ctx.lineTo(b[0],b[1]);ctx.stroke();
+      ctx.fillStyle="rgba(170,215,255,.85)";ctx.beginPath();ctx.arc(b[0],b[1],1.4*dpr,0,7);ctx.fill();}}
   if(marks){
     for(const P of world.plates){if(!P.alive||P.area<world.N*0.006)continue;const c=P.c;
       const v=[P.W[1]*c[2]-P.W[2]*c[1],P.W[2]*c[0]-P.W[0]*c[2],P.W[0]*c[1]-P.W[1]*c[0]];const k=28;
@@ -232,7 +238,7 @@ class WorkerWorld{
     if(m.type==="ready"){Object.assign(this,{hotspots:m.hotspots,dt:m.dt,cellKm:m.cellKm,contTarget:m.contTarget,helper:m.helper});this.ready=true;return;}
     if(m.type==="state"||m.type==="stopped"){
       for(const k in m.view)this[k]=m.view[k];if(m.markers)this.markers=m.markers;
-      for(const k of ["t","steps","landFrac","contFrac","oceanAge","meanUnits","netRot","rmsSpeed","msPerStep","plates","nEvents","trench"])this[k]=m[k];
+      for(const k of ["t","steps","landFrac","contFrac","oceanAge","meanUnits","netRot","rmsSpeed","msPerStep","plates","nEvents","trench","mc"])this[k]=m[k];
       if(m.events.length){this.events.push(...m.events);if(this.events.length>400)this.events.splice(0,this.events.length-400);}
       if(m.type==="stopped")this.running=false;this.fresh=true;this.stateAt=performance.now();if(this.onstate)this.onstate();return;}
     if(m.type==="error"){this.fail(m.message);return;}
@@ -263,7 +269,7 @@ const EMPTY_LOG='<li class="empty" style="border:0">No events yet.</li>';
 function build(){
   const wo={n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100};
   if(world&&world.terminate)world.terminate();
-  const cv=$("core").value;if(cv!=="lattice")wo.kin=cv==="meshwalk"?"walk":"forces";
+  const cv=$("core").value;if(cv!=="lattice"){wo.kin=cv==="meshwalk"?"walk":"forces";if(cv==="meshinit")wo.initiation=true;}
   world=cv!=="lattice"?makeMeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
   actions=[];l0LastInspect=l1LastInspect=null;l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;selMask=null;goode=null;runStart=runTarget=0;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();logAction({a:"build",settings:{seed:world.opts.seed,resolution:world.n,initialPlates:world.opts.nPlates,start:world.opts.mode,continentalTarget:world.contTarget}});
 }
@@ -800,7 +806,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const l1Extent=l1Geo&&S?{xKm:[l1Geo.cx-l1PW/2*l1Geo.s,l1Geo.cx+l1PW/2*l1Geo.s],yKm:[l1Geo.cy-l1PH/2*l1Geo.s,l1Geo.cy+l1PH/2*l1Geo.s],kmPerPx:l1Geo.s}:null;
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
-    settings:{core:w.core||"lattice",kinematics:w.core==="mesh"?w.opts.kin||"forces":"walk",seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:!(w.core==="mesh"&&(w.opts.kin||"forces")==="forces"),
+    settings:{core:w.core||"lattice",kinematics:w.core==="mesh"?w.opts.kin||"forces":"walk",initiation:!!w.opts.initiation,seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:!(w.core==="mesh"&&(w.opts.kin||"forces")==="forces"),
       stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value},l2:{radiusKm:l2Rad()}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
       L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null,

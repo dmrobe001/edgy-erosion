@@ -146,7 +146,7 @@ const MFIELDS={mId:Uint32Array,mKind:Uint8Array,mPlate:Int16Array,mA:Float64Arra
   mK:Uint8Array,mCol:Int32Array,mBorn:Float32Array,arcAdd:Float64Array,collAdd:Float64Array,mBn:Float32Array,
   iN:Uint8Array,iPlate:Int16Array,iSX:Float64Array,iSY:Float64Array,iSZ:Float64Array,iKind:Uint8Array,iWin:Int8Array,
   X0:Float64Array,Y0:Float64Array,Z0:Float64Array,dT:Float64Array,stamp:Int32Array,
-  sA:Float64Array,sTh:Float64Array,sOc:Float64Array,sCc:Float64Array,sFed:Float32Array,sFc:Float32Array,mU:Float64Array,iNrm:Float64Array,iLen:Float64Array};
+  sA:Float64Array,sTh:Float64Array,sOc:Float64Array,sCc:Float64Array,sFed:Float32Array,sFc:Float32Array,sSub:Int16Array,mU:Float64Array,iNrm:Float64Array,iLen:Float64Array};
 const MWIDTH={mBn:3,iPlate:3,iSX:3,iSY:3,iSZ:3,iNrm:3};
 function hash2(i,salt){let h=Math.imul(i,0x27d4eb2d)^salt;h=Math.imul(h^(h>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);h^=h>>>16;return[(h&0xffff)/65536-0.5,(h>>>16)/65536-0.5];}
 function rotM(W,ang){const w=Math.hypot(W[0],W[1],W[2]);if(w<=0||ang===0)return[1,0,0,0,1,0,0,0,1];
@@ -161,17 +161,25 @@ const PH={g:9.8,rhoM:3300,rhoW:1030,rhoOc:2900,rhoCc:2800,    // [measured] mant
   eRidge:-2600,rootH:150e3,                                    // [rule] ridge crest depth (as the elevation rule); continental root thickness
   drhoEcl:250,lEcl:80e3,lMax:700e3,                            // [measured] eclogite excess density, depth reached before it forms, slab length cap (660 km)
   lPlug:150e3,                                                 // [rule] longest buoyant plug of continental crust at the top of a slab
-  etaUM:3e20,rBend:200e3,cGeom:6,                              // [measured] upper-mantle viscosity, bending radius; [calibrated, provisionally] slab
-                                                               // shape factor: gave RMS 4-5 cm/yr at n = 48 before welding and slab attachment were
-                                                               // made independent of resolution. At n = 96 the mean speed is set by how few plates
-                                                               // survive welding, not by this (L0_MESH_SPEC.md §11.2)
+  etaUM:3e20,rBend:200e3,cGeom:10,                             // [measured] upper-mantle viscosity, bending radius; [calibrated] slab shape factor, fitted
+                                                               // at n = 96 to RMS plate speed 4-5 cm/yr with mantle flow and welding once collisions
+                                                               // stop (L0_MESH_SPEC.md §11.3)
   Cb:3e14,kKeel:5,                                             // [measured range, mid] basal drag eta/h (Pa s/m); [conjecture] factor under continents
   cSuc:0.2,                                                    // [calibrated in the spec's range 0.1-0.3, not fitted] trench suction
   cRidge:3e20,cTrench:1e21,cColl:1e22,                         // [conjecture: orders of magnitude, not fitted] interface coupling at low slip rates (Pa s)
   sRidge:3e11,sTrench:2e12,sColl:6e12,                         // [measured orders] its frictional limit (N/m): about 20 MPa over a 15 km fault at ridges and
                                                                // transforms; 15 MPa over 100-150 km of megathrust; the force Tibet transmits (5-7e12)
   weldCellKm2:4*Math.PI*R_KM*R_KM/(6*96*96),                   // [rule] the weld counter's unit of collided area: a cell of the n = 96 grid
-  tauDetach:10,                                                // [rule, Myr] a slab no longer fed detaches with this e-folding time (stands in for §4.6 break-off)
+  tauDetach:10,
+  weldStall:1,vStall:1,tauWeld:10,                            // [rule] weld once a collision stops (1; 0 = Stage 1's counter alone): a pair whose collision
+                                                               // counter has crossed MERGE welds after converging at under vStall cm/yr for tauWeld Myr
+  minPlateCells:10,                                            // [rule] plates smaller than this many n = 96 cells join their longest-bordering neighbour
+  initOn:0,ageInit:80,rateInit:3.3e-3,lSeed:150,               // [conjecture] subduction starting at old passive margins (off by default, §11.3): ocean at least ageInit Myr
+                                                               // old beside its plate's continent; rate per Myr per 1000 km of such margin; seed slab (km)
+  mantleRms:2,tauM:100,                                        // mantle flow (§6.1): [calibrated in the spec's range 1-3, mid, not fitted] RMS cm/yr;
+                                                               // [measured order: mantle overturn] OU time (Myr)
+  mantleDeg:[0,0.5,1,0.5,0.3],mantleTor:0.3,                   // [rule, after the spectrum's degree-2 peak] amplitude by degree; [conjecture] toroidal
+                                                               // amplitude relative to poloidal                                                // [rule, Myr] a slab no longer fed detaches with this e-folding time (stands in for §4.6 break-off)
   MYR:3.15576e13};
 // thermal boundary layer thickness at an age in Myr: half-space cooling, capped (plate model)
 function hth(age){return Math.min(PH.hMax,2.32*Math.sqrt(PH.kappa*(age>0?age:0)*PH.MYR));}
@@ -205,18 +213,81 @@ function cholSolve(A,b,n){for(let j=0;j<n;j++){let d=A[j*n+j];for(let k=0;k<j;k+
   const x=Float64Array.from(b);for(let i=0;i<n;i++){let s=x[i];for(let k=0;k<i;k++)s-=A[i*n+k]*x[k];x[i]=s/A[i*n+i];}
   for(let i=n-1;i>=0;i--){let s=x[i];for(let k=i+1;k<n;k++)s-=A[k*n+i]*x[k];x[i]=s/A[i*n+i];}return x;}
 
+// ---------- mantle flow (L0_MESH_SPEC.md §6.1, Stage 4) ----------
+// v_m = grad_s Phi + rhat x grad_s Psi, with Phi and Psi sums of real spherical harmonics of degree 1-4. On the unit
+// sphere a degree-l harmonic is a homogeneous harmonic polynomial f(x,y,z); its surface gradient is grad f - l f r.
+// Polynomials are maps from exponents "i,j,k" to coefficients, built once. Each basis field is scaled to unit RMS
+// speed over the sphere; fields of different (l, m, kind) are orthogonal, so the flow's mean square speed is the sum of
+// its coefficients' squares.
+const poly={v:(i,j,k,c=1)=>new Map([[i+","+j+","+k,c]]),
+  add(...ps){const o=new Map();for(const p of ps)for(const [k,c] of p)o.set(k,(o.get(k)||0)+c);return o;},
+  sc(p,a){const o=new Map();for(const [k,c] of p)o.set(k,c*a);return o;},
+  mul(a,b){const o=new Map();for(const [ka,ca] of a)for(const [kb,cb] of b){const x=ka.split(",").map(Number),y=kb.split(",").map(Number),k=(x[0]+y[0])+","+(x[1]+y[1])+","+(x[2]+y[2]);o.set(k,(o.get(k)||0)+ca*cb);}return o;}};
+function harmonicBasis(){const X=poly.v(1,0,0),Y=poly.v(0,1,0),Z=poly.v(0,0,1),m=poly.mul,a=poly.add,c=poly.sc;
+  const X2=m(X,X),Y2=m(Y,Y),Z2=m(Z,Z),R2=a(X2,Y2,Z2);
+  return [
+    [1,X],[1,Y],[1,Z],
+    [2,m(X,Y)],[2,m(Y,Z)],[2,m(Z,X)],[2,a(X2,c(Y2,-1))],[2,a(c(Z2,2),c(X2,-1),c(Y2,-1))],
+    [3,m(Y,a(c(X2,3),c(Y2,-1)))],[3,m(m(X,Y),Z)],[3,m(Y,a(c(Z2,5),c(R2,-1)))],[3,m(Z,a(c(Z2,5),c(R2,-3)))],[3,m(X,a(c(Z2,5),c(R2,-1)))],
+    [3,m(Z,a(X2,c(Y2,-1)))],[3,m(X,a(X2,c(Y2,-3)))],
+    [4,m(m(X,Y),a(X2,c(Y2,-1)))],[4,m(m(Y,Z),a(c(X2,3),c(Y2,-1)))],[4,m(m(X,Y),a(c(Z2,7),c(R2,-1)))],[4,m(m(Y,Z),a(c(Z2,7),c(R2,-3)))],
+    [4,a(c(m(Z2,Z2),35),c(m(Z2,R2),-30),c(m(R2,R2),3))],[4,m(m(X,Z),a(c(Z2,7),c(R2,-3)))],[4,m(a(X2,c(Y2,-1)),a(c(Z2,7),c(R2,-1)))],
+    [4,m(m(X,Z),a(X2,c(Y2,-3)))],[4,a(m(X2,a(X2,c(Y2,-3))),c(m(Y2,a(c(X2,3),c(Y2,-1))),-1))]]
+    .map(([l,p])=>({l,t:[...p].filter(e=>e[1]!==0).map(([k,c])=>[c,...k.split(",").map(Number)])}));}
+// value and gradient of a polynomial in terms [[c,i,j,k],...], with powers precomputed (P[0..4] for x, y, z)
+function polyGrad(t,px,py,pz,out){let f=0,gx=0,gy=0,gz=0;
+  for(const [c,i,j,k] of t){const a=px[i],b=py[j],d=pz[k];f+=c*a*b*d;if(i)gx+=c*i*px[i-1]*b*d;if(j)gy+=c*j*a*py[j-1]*d;if(k)gz+=c*k*a*b*pz[k-1];}
+  out[0]=f;out[1]=gx;out[2]=gy;out[3]=gz;}
+const MANTLE_GRID=new Map(); // grid size -> basis fields at its cells (45 x 3 x N)
+function mantleBasisOn(cube){let B=MANTLE_GRID.get(cube.N);if(B)return B;const N=cube.N,pos=cube.pos,px=[1,0,0,0,0],py=[1,0,0,0,0],pz=[1,0,0,0,0],o=[0,0,0,0],v=[0,0,0];
+  B=new Float32Array(MANTLE.length*3*N);
+  for(let k=0;k<MANTLE.length;k++)for(let i=0;i<N;i++){mantleField(MANTLE[k],pos[3*i],pos[3*i+1],pos[3*i+2],px,py,pz,o,v);const q=3*N*k+3*i;B[q]=v[0];B[q+1]=v[1];B[q+2]=v[2];}
+  MANTLE_GRID.set(N,B);return B;}
+// the basis fields: poloidal (grad_s f) and toroidal (rhat x grad_s f), each with its degree; degree-1 toroidal fields
+// are rigid rotations of the whole mantle, a choice of frame, and are left out
+const MANTLE=(()=>{const H=harmonicBasis(),F=[];for(const h of H){F.push({l:h.l,tor:false,t:h.t});if(h.l>1)F.push({l:h.l,tor:true,t:h.t});}
+  // unit RMS speed, measured over Fibonacci points
+  const n=4000,o=[0,0,0,0],px=[1,0,0,0,0],py=[1,0,0,0,0],pz=[1,0,0,0,0],v=[0,0,0];
+  for(const f of F){let ss=0;for(let q=0;q<n;q++){const z=1-2*(q+0.5)/n,r=Math.sqrt(1-z*z),ph=q*2.399963229728653,x=r*Math.cos(ph),y=r*Math.sin(ph);
+      mantleField(f,x,y,z,px,py,pz,o,v);ss+=v[0]*v[0]+v[1]*v[1]+v[2]*v[2];}
+    const k=1/Math.sqrt(ss/n);f.t=f.t.map(([c,i,j,kk])=>[c*k,i,j,kk]);}
+  return F;})();
+function mantleField(f,x,y,z,px,py,pz,o,v){for(let e=1;e<=4;e++){px[e]=px[e-1]*x;py[e]=py[e-1]*y;pz[e]=pz[e-1]*z;}
+  polyGrad(f.t,px,py,pz,o);const l=f.l,gx=o[1]-l*o[0]*x,gy=o[2]-l*o[0]*y,gz=o[3]-l*o[0]*z;
+  if(f.tor){v[0]=y*gz-z*gy;v[1]=z*gx-x*gz;v[2]=x*gy-y*gx;}else{v[0]=gx;v[1]=gy;v[2]=gz;}}
+
 // The lattice core builds the starting state (so both cores start identically); toMarkers() then puts one marker
 // in each fixed cell, jittered within it, and drops the plates' lattices. From then on the markers are the crust.
 class MeshWorld extends World{
   constructor(o){super(o);this.core="mesh";this.forces=o.kin!=="walk";this.toMarkers();
     // Stage 2: velocities come from the force balance, so the start's random rotations are dropped; with no slabs yet,
     // the first motions come from gravitational potential energy alone (no spin-up)
-    if(this.forces){for(const P of this.plates)P.W.fill(0);this.classifyInterfaces();this.solveVelocities();this.updateStats(true);}}
+    if(this.forces){for(const P of this.plates)P.W.fill(0);
+      this.mantle=o.mantle!==false;if(this.mantle)this.initMantle(String(o.seed));this.initOn=o.initiation!==undefined?!!o.initiation:!!PH.initOn;
+      this.classifyInterfaces();this.solveVelocities();this.updateStats(true);}}
+  // ---------- mantle flow ----------
+  // Coefficients start from the stationary distribution (the mantle was already convecting; only slabs start at zero),
+  // then each follows an Ornstein-Uhlenbeck process with time tauM. Its own random stream (state in mrs), so the
+  // mantle does not disturb the other draws. The flow is tabulated on the fixed grid (cm/yr) every 2 Myr.
+  initMantle(seed){let h=0x6d2b79f5;for(let i=0;i<seed.length;i++)h=Math.imul(h^seed.charCodeAt(i),2654435761);this.mrs=(h^0x9e3779b9)>>>0;
+    const w=MANTLE.map(f=>PH.mantleDeg[f.l]*(f.tor?PH.mantleTor:1)),s2=w.reduce((a,b)=>a+b*b,0);
+    this.msig=Float64Array.from(w,x=>x*PH.mantleRms/Math.sqrt(s2));this.mc=Float64Array.from(this.msig,x=>x*this.mgauss());
+    this.vm=new Float32Array(3*this.N);this.vmT=-1e9;this.tabulateMantle();}
+  mrand(){let a=this.mrs=(this.mrs+0x6D2B79F5)>>>0;a=Math.imul(a^a>>>15,1|a);a=a+Math.imul(a^a>>>7,61|a)^a;return((a^a>>>14)>>>0)/4294967296;}
+  mgauss(){let u=0;while(u===0)u=this.mrand();return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*this.mrand());}
+  mantleStep(){const e=Math.exp(-this.dt/PH.tauM),q=Math.sqrt(1-e*e);for(let k=0;k<this.mc.length;k++)this.mc[k]=this.mc[k]*e+this.msig[k]*q*this.mgauss();
+    if(this.t-this.vmT>=2-1e-9)this.tabulateMantle();}
+  // the flow is linear in its coefficients: the basis fields are evaluated once per grid (cached outside the world's
+  // state, so snapshots stay small) and each tabulation is a weighted sum
+  tabulateMantle(){const N=this.N,vm=this.vm,mc=this.mc,B=mantleBasisOn(this.cube);vm.fill(0);let ss=0;
+    for(let k=0;k<MANTLE.length;k++){const c=mc[k],o=3*N*k;if(!c)continue;for(let q=0;q<3*N;q++)vm[q]+=c*B[o+q];}
+    for(let i=0;i<N;i++)ss+=(vm[3*i]**2+vm[3*i+1]**2+vm[3*i+2]**2)*this.cube.area[i];
+    this.mantleRmsNow=Math.sqrt(ss/(4*Math.PI));this.vmT=this.t;}
   allocMarkers(cap){this.mcap=cap;for(const k in MFIELDS){const w=MWIDTH[k]||1;this[k]=new MFIELDS[k](cap*w);}this.freeM=[];this.nSlots=0;this.nextId=1;}
   growMarkers(){const cap=Math.ceil(this.mcap*1.5);for(const k in MFIELDS){const w=MWIDTH[k]||1,a=new MFIELDS[k](cap*w);a.set(this[k]);this[k]=a;}this.mcap=cap;this.tri.growV(cap);}
   newMarker(kind){let m;if(this.freeM.length)m=this.freeM.pop();else{if(this.nSlots>=this.mcap)this.growMarkers();m=this.nSlots++;}
     this.mKind[m]=kind;this.mId[m]=this.nextId++;this.arcAdd[m]=0;this.collAdd[m]=0;this.mBn[3*m]=this.mBn[3*m+1]=this.mBn[3*m+2]=0;this.iN[m]=0;this.mBorn[m]=this.t;
-    this.sA[m]=this.sTh[m]=this.sOc[m]=this.sCc[m]=0;this.sFed[m]=this.sFc[m]=-1e9;return m;}
+    this.sA[m]=this.sTh[m]=this.sOc[m]=this.sCc[m]=0;this.sFed[m]=this.sFc[m]=-1e9;this.sSub[m]=-1;return m;}
   freeMarker(m){this.tri.remove(m);this.mKind[m]=0;this.freeM.push(m);}
   setPos(m,x,y,z){const l=Math.hypot(x,y,z),T=this.tri;T.X[m]=x/l;T.Y[m]=y/l;T.Z[m]=z/l;}
   toMarkers(){
@@ -439,12 +510,12 @@ class MeshWorld extends World{
       this.trench[lk(x-r[0]*h,y-r[1]*h,z-r[2]*h)]=1;
       const age=this.t-this.mB[m],c=lk(x+r[0]*h*C.SLAB_INBOARD,y+r[1]*h*C.SLAB_INBOARD,z+r[2]*h*C.SLAB_INBOARD);
       this.slab[this.slabQ*this.N+c]+=A*Math.min(1,Math.sqrt(Math.max(0,age)/80));
-      if(this.forces)this.feedSlab(at(0),A,this.mT[m],hth(age),0);
+      if(this.forces)this.feedSlab(at(0),A,this.mT[m],hth(age),0,L.id);
     } else {
       const bn=[this.mBn[3*m],this.mBn[3*m+1],this.mBn[3*m+2]],nl=Math.hypot(bn[0],bn[1],bn[2]);
       const f=nl>0.5?Math.abs(r[0]*bn[0]+r[1]*bn[1]+r[2]*bn[2])/nl:1,V=this.mT[m]*A;
       for(let k=0;k<4;k++){const w=f*C.COLLW[k]+(k===0?1-f:0),tm=at(k);if(tm>=0)this.collAdd[tm]+=V*w;else this.led("lostCollisionNoTarget",V*w);}
-      this.led("contCollisionOut",-V);if(this.forces)this.feedSlab(at(0),A,this.mT[m],0,1);
+      this.led("contCollisionOut",-V);if(this.forces)this.feedSlab(at(0),A,this.mT[m],0,1,L.id);
       // the weld counter counts collided area in cells of the page's default grid (n = 96, where its thresholds were
       // set), so welding does not depend on resolution
       const key=Math.min(Wp,L.id)*4096+Math.max(Wp,L.id);this.pairs.set(key,(this.pairs.get(key)||0)+A/PH.weldCellKm2);this.pairLoc.set(key,[x,y,z]);}
@@ -473,8 +544,11 @@ class MeshWorld extends World{
   assignOceanAreas(){const T=this.tri,tv=T.tv,ns=this.nSlots,kind=this.mKind,off=this.off,adj=this.adj,R2=R_KM*R_KM;
     const dual=this._dual&&this._dual.length>=ns?this._dual:(this._dual=new Float64Array(ns+1024));dual.fill(0,0,ns);
     for(let t=0;t<T.nT;t++){if(!T.tAlive[t])continue;const a=T.tCache[4*t]/3,o=3*t;dual[tv[o]]+=a;dual[tv[o+1]]+=a;dual[tv[o+2]]+=a;} // areas cached by buildAdjacency
-    for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;let c=0;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR)c++;if(!c)continue;
-      const sh=dual[m]/c;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR)dual[adj[e]]+=sh;}
+    // (an interface marker's area goes to its oceanic neighbours only: continental markers carry their own area, so a
+    // share given to them would fall out of the budget)
+    const K=this.mK;
+    for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;let c=0;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR&&!K[adj[e]])c++;if(!c)continue;
+      const sh=dual[m]/c;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR&&!K[adj[e]])dual[adj[e]]+=sh;}
     for(let m=0;m<ns;m++)if(kind[m]===INTERIOR&&!this.mK[m])this.mA[m]=dual[m]*R2;}
   // ---------- forces and the torque balance (Stage 2, L0_MESH_SPEC.md §4, §5.1) ----------
   // Slab records hang beneath the overriding plate: each consumed marker adds its area, thermal deficit and crust to the
@@ -483,7 +557,7 @@ class MeshWorld extends World{
   // Continental lithosphere's mantle root is taken as neutrally buoyant (§4.1); its crust is recorded in sCc. Two clocks:
   // sFed, when ocean last went down (or the record was last found behind an active oceanic trench); sFc, when
   // continental crust last went down.
-  feedSlab(f,Akm2,Tkm,h,cont){if(f<0)return;const A=Akm2*1e6;this.sA[f]+=A;
+  feedSlab(f,Akm2,Tkm,h,cont,sub){if(f<0)return;const A=Akm2*1e6;this.sA[f]+=A;this.sSub[f]=sub;
     if(cont){this.sCc[f]+=A*Tkm*1e3;this.sFc[f]=this.t;}else{this.sTh[f]+=A*h;this.sOc[f]+=A*Tkm*1e3;this.sFed[f]=this.t;}}
   // the slab's pull (N), §4.3: the thermal deficit, plus oceanic crust that is eclogite below lEcl and buoyant above it,
   // minus the buoyancy of continental crust dragged down with an arriving margin. Consumption moves continental crust's
@@ -533,7 +607,15 @@ class MeshWorld extends World{
     // basal drag (per plate: sum of c (I - r r^T) over its markers, from the moments of c), and each column's GPE
     term("Kbasal");const mom=new Float64Array(7*n),cb=PH.Cb*1e6*R2,mK=this.mK,mT=this.mT,mB=this.mB,mA=this.mA;
     for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const K_=mK[m];U[m]=gpe(K_,mT[m],t-mB[m]);const i=idx[pl[m]];if(i<0)continue;
-      const c=cb*(K_?PH.kKeel:1)*mA[m],x=X[m],y=Y[m],z=Z[m],o=7*i;mom[o]+=c;mom[o+1]+=c*x*x;mom[o+2]+=c*y*y;mom[o+3]+=c*z*z;mom[o+4]+=c*x*y;mom[o+5]+=c*x*z;mom[o+6]+=c*y*z;}
+      // each marker is a patch of crust: besides drag on its velocity, it resists spinning about its own centre, with
+      // the area times the squared radius of gyration of a disc (A/2pi), which the point sum leaves out (a plate of one
+      // marker would otherwise spin freely about its own axis)
+      const c=cb*(K_?PH.kKeel:1)*mA[m],g=1-mA[m]/(2*Math.PI*R_KM*R_KM),x=X[m],y=Y[m],z=Z[m],o=7*i;mom[o]+=c;mom[o+1]+=c*g*x*x;mom[o+2]+=c*g*y*y;mom[o+3]+=c*g*z*z;mom[o+4]+=c*g*x*y;mom[o+5]+=c*g*x*z;mom[o+6]+=c*g*y*z;}
+    // mantle traction: the same drag acting on the mantle's velocity, torque R c (rhat x v_m) per marker
+    if(this.mantle){term("bmantle");const vm=this.vm,lk=this.cube.lookup,cv=PH.Cb*1e6*R*0.01/(PH.MYR/1e6);
+      for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const i=idx[pl[m]];if(i<0)continue;const x=X[m],y=Y[m],z=Z[m],c=cv*(mK[m]?PH.kKeel:1)*mA[m],g=3*lk(x,y,z);
+        addTq(i,c,y*vm[g+2]-z*vm[g+1],z*vm[g]-x*vm[g+2],x*vm[g+1]-y*vm[g]);}
+      term("Kbasal");}
     for(let i=0;i<n;i++){const o=7*i,d=3*i*N3+3*i,c=mom[o];
       K[d]+=c-mom[o+1];K[d+N3+1]+=c-mom[o+2];K[d+2*N3+2]+=c-mom[o+3];K[d+1]-=mom[o+4];K[d+N3]-=mom[o+4];K[d+2]-=mom[o+5];K[d+2*N3]-=mom[o+5];K[d+N3+2]-=mom[o+6];K[d+2*N3+1]-=mom[o+6];}
     for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;let s=0,c=0;for(let e=off[m];e<off[m+1];e++){const v=adj[e];if(kind[v]===INTERIOR){s+=U[v];c++;}}U[m]=c?s/c:0;}
@@ -568,14 +650,16 @@ class MeshWorld extends World{
       const nx=sg*this.iNrm[3*m],ny=sg*this.iNrm[3*m+1],nz=sg*this.iNrm[3*m+2];          // from the subducting side toward the overriding side
       const a=[y*nz-z*ny,z*nx-x*nz,x*ny-y*nx],fL=fs[1-win],fW=fs[win];
       const hb=fL>=0?(this.mK[fL]?PH.hMax:hth(t-this.mB[fL])):hth(0),Cs=PH.cGeom*PH.etaUM*(1+hb/PH.rBend)**3;
-      term("Kresist");if(idx[Lp]>=0)addOuter(idx[Lp],Cs*w*R2,a);
+      // a slab also resists being dragged along the trench: edgewise drag of a disc in Stokes flow is 2/3 of broadside
+      // drag [derived], on the sinking part only (sideways motion does not bend it); along-strike velocity is omega.(-n)
+      term("Kresist");if(idx[Lp]>=0){addOuter(idx[Lp],Cs*w*R2,a);addOuter(idx[Lp],(2/3)*PH.cGeom*PH.etaUM*w*R2,[nx,ny,nz]);}
       if(fL>=0&&!this.mK[fL])plates[Lp].subLen+=w/1e3;
       tq.set(m,trench.length);trench.push(m,Lp,Wp,fW,Cs,coll?1:0,nx,ny,nz);}
     // Each slab record pulls at the nearest trench interface marker of its own (overriding) plate within two rings;
     // a record behind a trench where ocean goes down is still attached (behind a collision it is left to break off)
     const Fm=new Float64Array(trench.length/9),seen=this._seenR&&this._seenR.length>=ns?this._seenR:(this._seenR=new Int32Array(ns+1024));let mark=(this._seenN||0);
     for(let r=0;r<ns;r++){if(kind[r]!==INTERIOR||!(this.sA[r]>0))continue;const P=pl[r];let best=-1,bd=Infinity;mark++;seen[r]=mark;
-      const look=v=>{const q=tq.get(v);if(q===undefined||trench[q+2]!==P)return;const d=this.dist2(v,r);if(d<bd){bd=d;best=q;}};
+      const sub=this.sSub[r],look=v=>{const q=tq.get(v);if(q===undefined||trench[q+2]!==P||!this.kin(trench[q+1],sub))return;const d=this.dist2(v,r);if(d<bd){bd=d;best=q;}};
       for(let e=off[r];e<off[r+1];e++){const v=adj[e];seen[v]=mark;if(kind[v]===IFACE)look(v);}
       if(best<0)for(let e=off[r];e<off[r+1];e++){const v=adj[e];for(let f2=off[v];f2<off[v+1];f2++){const u=adj[f2];if(seen[u]===mark)continue;seen[u]=mark;if(kind[u]===IFACE)look(u);}}
       if(best<0)continue;Fm[best/9]+=this.slabForce(r);if(!trench[best+5])this.sFed[r]=t;}
@@ -605,6 +689,11 @@ class MeshWorld extends World{
         change=Math.max(change,Math.abs(v-ce[c])/ce[c]);ce[c]=v;}
       if(change<0.02)break;}
     this.couplingIters=iters;
+    // per plate pair: shared boundary length (km) and length-weighted mean square slip ((cm/yr)^2), for welding
+    const contact=new Map(),cmy=MY/1e6*100;
+    for(let c=0;c<nc;c++){const q=8*c,a=pid[cpl[q]],b2=pid[cpl[q+1]],key=Math.min(a,b2)*4096+Math.max(a,b2),sl=slip(om.subarray(3*cpl[q],3*cpl[q]+3),om.subarray(3*cpl[q+1],3*cpl[q+1]+3),q)*cmy,l=cpl[q+4]/1e3;
+      const e=contact.get(key)||[0,0];e[0]+=l;e[1]+=l*sl*sl;contact.set(key,e);}
+    for(const e of contact.values())e[1]/=e[0];
     if(bud){bud.Kcouple=new Float64Array(N3*N3);addCoupling(bud.Kcouple,1);}
     // invariant I7 (tests): the torques balance, |K omega - b| / |b|
     if(K0){let r2=0,b2=0;for(let i=0;i<N3;i++){let s=-b[i];for(let j=0;j<N3;j++)s+=K0[i*N3+j]*om[j];r2+=s*s;b2+=b[i]*b[i];}this.solveResidual=b2>0?Math.sqrt(r2/b2):0;}
@@ -616,7 +705,7 @@ class MeshWorld extends World{
       const a=plates[Lp].W,c=plates[Wp].W,dx=a[0]-c[0],dy=a[1]-c[1],dz=a[2]-c[2],v=((dy*z-dz*y)*nx+(dz*x-dx*z)*ny+(dx*y-dy*x)*nz)*R_KM/10;
       const key=Math.min(Lp,Wp)*4096+Math.max(Lp,Wp),e=pairs.get(key)||[0,0,0],l=this.iLen[m]/1e3;e[0]+=l;e[1]+=v*l;if(trench[q+5])e[2]+=l;pairs.set(key,e);}
     for(const e of pairs.values())e[1]/=e[0];
-    this.fstat={pairs,pullN:pullF,suctionN:sucF,gpeN:gpeF};
+    this.fstat={pairs,contact,pullN:pullF,suctionN:sucF,gpeN:gpeF};
     // the budget: per plate, each term's torque along the plate's own rotation axis (N m; driving > 0, resisting < 0)
     if(bud){const out={};for(const nm in bud){const v=new Float64Array(n),src=bud[nm];
         for(let i=0;i<n;i++){const wl=Math.hypot(om[3*i],om[3*i+1],om[3*i+2])||1;let s2=0;
@@ -624,12 +713,58 @@ class MeshWorld extends World{
         out[nm.slice(1)]=v;}
       out.plate=[];for(let p=0;p<np;p++)if(idx[p]>=0)out.plate[idx[p]]=p;this.fstat.budget=out;}}
   walkVelocities(){if(!this.forces)super.walkVelocities();}
+  // whether plate a is the plate that fed a slab, b: the same, its descendant by splits, or what it welded into
+  kin(a,b){if(b<0)return false;const pl=this.plates;let x=b;for(let i=0;i<8&&x!=null;i++){if(x===a)return true;x=pl[x].mergedInto;}
+    x=a;for(let i=0;i<8&&x!=null;i++){if(x===b)return true;x=pl[x].parent;}return false;}
+  // Plates below what the grid resolves [rule]: a plate smaller than minPlateCells cells of the n = 96 grid (about
+  // 90,000 km2), or than as many markers on a coarser grid, joins the neighbour it shares the longest boundary with. A plate of a marker or two has no meaningful
+  // rotation: its drag barely resists spin about its own centre, and that spin shows up as speed at its boundaries.
+  absorbSlivers(){if(!this.fstat||!this.fstat.contact)return;const minA=PH.minPlateCells*Math.max(PH.weldCellKm2,this.cellA),area=new Float64Array(this.plates.length);
+    for(let m=0;m<this.nSlots;m++)if(this.mKind[m]===INTERIOR)area[this.mPlate[m]]+=this.mA[m];
+    for(const P of this.plates){if(!P.alive||area[P.id]<=0||area[P.id]>=minA)continue;let best=-1,bl=0;
+      for(const [k,e] of this.fstat.contact){const a=Math.floor(k/4096),b=k%4096;if(a!==P.id&&b!==P.id)continue;const q=a===P.id?b:a;if(this.plates[q].alive&&e[0]>bl){bl=e[0];best=q;}}
+      if(best<0)continue;this._absorb=true;P.area=0;this.merge(this.plates[best],P);this._absorb=false;return;}} // one a step
+  // Subduction starting at an old passive margin [conjecture]: old oceanic lithosphere beside a continent on the same
+  // plate is dense enough to founder. Per plate, at a rate proportional to its length of such margin, the ocean
+  // connected to a chosen margin marker becomes a new plate, and the continent's edge gets a seed slab of that ocean
+  // (lSeed long), so the new trench pulls from its first step. Polarity follows (ocean under continent).
+  initiation(){const ns=this.nSlots,kind=this.mKind,pl=this.mPlate,K=this.mK,mo=this.mo,ma=this.ma,t=this.t,r=this.rand,hkm=this.h0*R_KM;
+    const marg=new Map(); // plate -> qualifying oceanic margin markers
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||K[m]||t-this.mB[m]<PH.ageInit)continue;const P=pl[m];
+      for(let e=mo[m];e<mo[m+1];e++){const j=ma[e];if(pl[j]===P&&K[j]){let a=marg.get(P);if(!a)marg.set(P,a=[]);a.push(m);break;}}}
+    for(const P of [...marg.keys()].sort((a,b)=>a-b)){const list=marg.get(P),L=list.length*hkm/1000;
+      if(r()>=1-Math.exp(-PH.rateInit*L*this.dt))continue;
+      const seed=list[Math.floor(r()*list.length)],region=[seed],inR=new Uint8Array(ns);inR[seed]=1;
+      for(let q=0;q<region.length;q++){const m=region[q];for(let e=mo[m];e<mo[m+1];e++){const j=ma[e];if(!inR[j]&&kind[j]===INTERIOR&&pl[j]===P&&!K[j]){inR[j]=1;region.push(j);}}}
+      // each side at least 60 cells of the n = 96 grid in area
+      const Pl=this.plates[P],minA=60*PH.weldCellKm2;let aR=0,aP=0;for(const m of region)aR+=this.mA[m];for(let m=0;m<ns;m++)if(kind[m]===INTERIOR&&pl[m]===P)aP+=this.mA[m];
+      if(aR<minA||aP-aR<minA)continue;
+      const Qp=this.addPlate(Pl.W);Qp.Q.set(Pl.Q);Qp.parent=Pl.id;for(const m of region)pl[m]=Qp.id;
+      // seed slabs beneath the continent's edge, one per continental marker beside the new plate's ocean
+      let seeded=0,cx=0,cy=0,cz=0;const X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z;
+      for(const m of region)for(let e=mo[m];e<mo[m+1];e++){const j=ma[e];if(pl[j]!==P||!K[j]||this.sFed[j]===t)continue;
+        this.feedSlab(j,PH.lSeed*hkm,this.mT[m],hth(t-this.mB[m]),0,Qp.id);seeded++;cx+=X[j];cy+=Y[j];cz+=Z[j];}
+      this.log("initiation",`Subduction begins along a passive margin: the old ocean of plate ${P} breaks away as plate ${Qp.id} and sinks beneath the continent`,norm3([cx,cy,cz]));
+      this.mStats.initiations=(this.mStats.initiations||0)+1;
+      this.maintainInterfaces();this.buildAdjacency();this.updateStats(true);return;}} // one a step
+  // Welding once a collision stops [rule]: a pair that has collided enough (Stage 1's counter crossed MERGE, latched)
+  // welds after its convergence (length-weighted across their convergent boundary; none counts as zero) stays under
+  // vStall for tauWeld while the plates still touch. A collision still converging (India) stays a boundary however
+  // much crust it has consumed.
+  weldReady(k,nv){if(!(this.forces&&PH.weldStall))return super.weldReady(k,nv);if(nv>C.MERGE)(this.latch||(this.latch=new Set())).add(k);return false;}
+  weldCandidate(){if(!(this.forces&&PH.weldStall)||!this.latch||!this.fstat||!this.fstat.contact)return -1;
+    const st=this.stall||(this.stall=new Map()),c=this.fstat.contact,pr=this.fstat.pairs;let best=-1;
+    for(const k of [...this.latch]){if(!c.has(k)){this.latch.delete(k);st.delete(k);continue;}
+      const e=pr.get(k),v=e?e[1]:0,s=v<PH.vStall?(st.get(k)||0)+this.dt:0;st.set(k,s);if(s>=PH.tauWeld-1e-9&&(best<0||k<best))best=k;}
+    if(best>=0){this.latch.delete(best);st.delete(best);}return best;}
   // ---------- one step ----------
   step(){const dt=this.dt,kind=this.mKind;
     {const b=Math.floor(this.t/C.SLAB_DT),q=((b%C.SLAB_BINS)+C.SLAB_BINS)%C.SLAB_BINS;if(this.slabT[q]!==b*C.SLAB_DT){this.slabT[q]=b*C.SLAB_DT;this.slab.fill(0,q*this.N,(q+1)*this.N);}this.slabQ=q;}
     for(let i=0;i<this.N;i++)this.trench[i]*=0.85;
-    this.classifyInterfaces();if(this.forces){this.slabUpkeep();this.solveVelocities();}this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
+    this.classifyInterfaces();if(this.forces){if(this.mantle)this.mantleStep();this.slabUpkeep();this.solveVelocities();}this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
     this.surfaceProcesses();this.recordFaults();
+    if(this.forces&&this.initOn)this.initiation(); // before t advances: the seed slab is fed at this step's time
+    if(this.forces)this.absorbSlivers();
     this.t+=dt;this.steps++;
     this.computeMarkerElev();if(this.deferView)this.viewStale=true;else this.computeView();
     this.updateStats(this.steps%4===0);this.hotspotEvents();this.plateEvents();
@@ -773,7 +908,8 @@ class MeshWorld extends World{
     const [Wn,L]=a.area>=b.area?[a,b]:[b,a];
     for(let m=0;m<this.nSlots;m++)if(this.mKind[m]===INTERIOR&&this.mPlate[m]===L.id)this.mPlate[m]=Wn.id;
     const tot=Wn.area+L.area;for(let k=0;k<3;k++)Wn.W[k]=(Wn.W[k]*Wn.area+L.W[k]*L.area)/tot;Wn.area=tot;Wn.contArea+=L.contArea;
-    this.log("suture",`Plates ${Wn.id} and ${L.id} weld into one along a suture`,Wn.c);
+    if(this._absorb)this.log("absorbed",`Plate ${L.id}, too small for the grid to resolve, joins plate ${Wn.id}`,Wn.c);
+    else this.log("suture",`Plates ${Wn.id} and ${L.id} weld into one along a suture`,Wn.c);
     L.mergedInto=Wn.id;this.kill(L);purge();this.maintainInterfaces();this.buildAdjacency();}
   kill(P){P.alive=false;P.area=0;}
   gc(){const {pool,fpool}=this;pool.mark.fill(0);fpool.mark.fill(0);
@@ -804,7 +940,7 @@ function workerMain(){
   const ch=new MessageChannel();ch.port1.onmessage=()=>tick();const later=()=>ch.port2.postMessage(0);
   const VIEW=["owner","wK","wT","wB","wS","wR","wRA","elev","bodyIdx"];
   const summary=()=>({t:w.t,steps:w.steps,landFrac:w.landFrac,contFrac:w.contFrac,oceanAge:w.oceanAge,meanUnits:w.meanUnits,netRot:w.netRot,rmsSpeed:w.rmsSpeed,
-    msPerStep:ms,plates:w.plates.map(P=>({id:P.id,alive:P.alive,hue:P.hue,W:P.W.slice(),c:P.c.slice(),area:P.area,contArea:P.contArea,Q:Array.from(P.Q),parent:P.parent,mergedInto:P.mergedInto})),
+    msPerStep:ms,mc:w.mc?Array.from(w.mc):null,plates:w.plates.map(P=>({id:P.id,alive:P.alive,hue:P.hue,W:P.W.slice(),c:P.c.slice(),area:P.area,contArea:P.contArea,Q:Array.from(P.Q),parent:P.parent,mergedInto:P.mergedInto})),
     nEvents:w.nEvents,trench:w.trench.slice()});
   const takeEvents=()=>{for(const e of w.events)if(e.n>lastEv)evBuf.push(e);lastEv=w.nEvents;const out=evBuf;evBuf=[];return out;};
   const markerCopy=()=>{const n=w.nSlots;return{X:w.tri.X.slice(0,n),Y:w.tri.Y.slice(0,n),Z:w.tri.Z.slice(0,n),K:w.mKind.slice(0,n),I:w.iKind.slice(0,n)};};
@@ -858,7 +994,10 @@ function viewHelperMain(){
     self.postMessage(out,tr);};
 }
 
-return {SphereTri,MeshWorld,workerMain,viewHelperMain,PH,gpe,hth,buoy};
+// the mantle's velocity (cm/yr, a 3-vector tangent at the unit vector x,y,z) for coefficients mc: for drawing
+function mantleAt(mc,x,y,z){const px=[1,0,0,0,0],py=[1,0,0,0,0],pz=[1,0,0,0,0],o=[0,0,0,0],v=[0,0,0],r=[0,0,0];
+  for(let k=0;k<MANTLE.length;k++){if(!mc[k])continue;mantleField(MANTLE[k],x,y,z,px,py,pz,o,v);r[0]+=mc[k]*v[0];r[1]+=mc[k]*v[1];r[2]+=mc[k]*v[2];}return r;}
+return {SphereTri,MeshWorld,workerMain,viewHelperMain,PH,gpe,hth,buoy,mantleAt};
 }
 const MESH=MESHmodule(SIM);
 // ===== MESH-END =====

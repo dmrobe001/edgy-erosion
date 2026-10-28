@@ -479,7 +479,65 @@ Plates are driven by the forces of §4 and a torque balance per plate (§5.1), i
 1. A weld rule that needs convergence to have stopped, not just collided area.
 2. Subduction initiation at old passive margins when GPE contrast exceeds a threshold.
 
-Each should raise the plate count, and with it speed and ρ, if the reading is right.
+Each should raise the plate count, and with it speed and ρ, if the reading is right. Both were tested, with mantle flow added first: §11.3.
+
+### 11.3 Mantle flow, and two rules tested against the Stage 2 failures
+
+§11.2 ended with a conjecture: the failing checks are controlled by the Stage 1 weld and split rules and by the missing mantle. Mantle flow (Stage 4's §6.1, brought forward) was built first, then the two proposed rules, each behind a switch, and the four combinations compared. `tools/stage2_checks.js --n=96 --t=600 --ph.<name>=<value>` reruns any of them.
+
+**Mantle flow, as built (§6.1):**
+
+- **Form:** v_m = ∇_s Φ + r̂ × ∇_s Ψ, with Φ and Ψ sums of real spherical harmonics of degree 1–4, written as homogeneous harmonic polynomials. On the unit sphere a degree-l harmonic f has surface gradient ∇f − l f r. The degree-1 toroidal fields are left out: they are rigid rotations of the whole mantle, a choice of frame.
+- **Scaling:** each of the 45 basis fields is scaled to unit RMS speed. They are mutually orthogonal, so the flow's mean square speed is the sum of its coefficients' squares (tested).
+- **Spectrum [rule]:** amplitude by degree 0.5, 1, 0.5, 0.3 for l = 1–4 (the degree-2 peak); toroidal at 0.3 of poloidal [conjecture]. Overall RMS 2 cm/yr, the middle of the spec's 1–3 [not fitted].
+- **Time:** each coefficient is an Ornstein–Uhlenbeck process with τ_m = 100 Myr, started from its stationary distribution: the mantle was already convecting, and only slabs start from zero. It draws from its own random stream.
+- **Grid and coupling:** tabulated on the fixed grid every 2 Myr. It drives the plates through the basal drag of §4.7: torque R c (r̂ × v_m) per marker. Dynamic topography from its upwelling is not built.
+
+**Rule 1: welding once a collision stops [rule].** A plate pair whose collision counter has crossed Stage 1's threshold (collided area) is latched. It welds once its convergence (length-weighted over their convergent boundary; none counts as zero) has stayed under 1 cm/yr for 10 Myr while the plates still touch. A collision still converging (India) stays a boundary however much crust it has consumed. A first version required the whole shared boundary to slip at under 0.5 cm/yr. With mantle drift and friction-limited coupling no long boundary between rigid plates gets that still: no plate welded in 500 Myr.
+
+**Rule 2: subduction starting at old passive margins [conjecture].**
+- **Where:** oceanic markers at least 80 Myr old beside continental crust of the same plate are margin.
+- **How often:** per plate, at 3.3×10⁻³ per Myr per 1,000 km of such margin.
+- **What happens:** the ocean connected to a chosen margin marker becomes a new plate. Each continental marker beside it gets a seed slab of that ocean, 150 km long, so the new trench pulls from its first step. This stands in for the foundering that starts real subduction.
+
+**Fixes found on the way.** These change the default model too:
+
+| Problem | Fix |
+|---|---|
+| The area budget broke (3.8%) once trenches formed along continents | An interface marker's surrounding area went to all its interior neighbours, but continental markers carry their own area, so their shares fell out. It now goes to oceanic neighbours only (within about 1% again) |
+| Tiny plates ran at 35–66 cm/yr | A slab record pulled at its nearest trench marker even when another plate had made that slab. Each record now remembers the plate that fed it, followed through splits and welds |
+| A plate of one marker "spun" at 10⁵–10⁶ cm/yr | Drag on a point cannot resist spin about that point. Each marker now resists spin as a disc of its area, and plates smaller than 10 cells of the n = 96 grid (about 90,000 km², or 10 markers on a coarser grid) join their longest-bordering neighbour, logged as "absorbed" |
+| Microplates spun under off-centre pull at up to 80 cm/yr | Slab resistance acted only on motion into the trench. A slab dragged along the trench resists too: edgewise drag of a disc in Stokes flow is 2/3 of broadside drag [derived], applied to the sinking part only (sideways motion does not bend the slab) |
+
+**The four combinations.** n = 96, c_geom = 12, three seeds, 100–600 Myr; ranges are across seeds:
+
+| | Mantle only | + rule 1 | + rule 2 | + both |
+|---|---|---|---|---|
+| Plates larger than 1% (Earth about 13) | 7–8 | **11–12** | 17–20 | 19–21 |
+| Subduction starts / welds / timed rifts per Gyr | 0 / 60–64 / 54–56 | 0 / 16–20 / 12–20 | 110–162 / 20–26 / 0 | 124–160 / 8–10 / 0 |
+| RMS speed (cm/yr) | 2.7–3.1 | 3.6–4.0 | 3.2–3.3 | 3.1–3.3 |
+| Forsyth–Uyeda ρ | 0.25–0.47 | 0.44–0.56 | 0.58–0.75 | 0.65–0.69 |
+| A plate larger than 1% faster than 10 cm/yr | 2–15% of steps | 0–1% | 37–48% | 33–47% |
+| Net rotation, median (°/Myr) | 0.07 | 0.07–0.08 | 0.04–0.05 | 0.03–0.04 |
+
+- **Mantle flow alone does not cure the Stage 2 failures.** A large plate integrates a degree-2 flow over a large area and feels little net torque. With mantle flow and the Stage 1 counter, the world churns: welds and timed rifts both run at about 60 per Gyr, and about 8 plates survive.
+- **Rule 1 brings the plate count to Earth's** and raises speed and the speed–trench correlation.
+- **Rule 2 is right in kind but over-produces.** It keeps the world reorganising and gives the strongest speed–trench correlation. But it adds small oceanic plates faster than welds remove them, and with full slabs and little drag they run near the free sinking speed (about 14 cm/yr at c_geom = 12): the tail fattens and net rotation falls below Earth's estimates. At a quarter of the rate, starts fell only to 62–78 per Gyr (older margins accumulate), with 16–17 plates and the same tail. So the problem is in the rule's form, not just its rate. It stays available as an option (`initiation: true`; the page's experimental core option) and is off by default.
+
+**Default now:** mantle flow and rule 1, rule 2 off, c_geom refitted to 10. Record: `tools/stage2_checks.js --n=96 --t=600`, three seeds, 100–600 Myr:
+
+| Check | Result |
+|---|---|
+| RMS speed 4–5 cm/yr (fitted) | 4.46, 3.81, 4.37 |
+| Forsyth–Uyeda ρ > 0.5 | 0.46, 0.38, 0.51 (per-sample medians 0.42–0.50): **marginal, below on two seeds**. At c_geom = 12 it is 0.44–0.56 |
+| Collision slows convergence 2–4× within 20 Myr | Once collision is half the pair's boundary: 2–4× in 30% of cases, 2× or more in 40%, stopped in 10%; median 1.3–1.8×. **Closer, still short of typical** |
+| Net rotation < 0.4°/Myr | Medians 0.087–0.091, maxima 0.16–0.17 |
+| Speed tail | A plate larger than 1% faster than 10 cm/yr 0–33% of steps, faster than 15 cm/yr at most 1.3%; longest spell above 10 cm/yr 0–64 Myr |
+| Plates larger than 1% | 10.6–11.9 (Earth about 13) |
+| Welds and timed rifts per Gyr | 14–20 and 14–22 |
+| Cost | About 310 ms a step at n = 96 headless, against 150 with the random walk: 5.3 substeps a step against 2.5, and about 55 ms for the force balance |
+
+**What remains [conjecture].** The plates are still split by Stage 1's timer, and welded by a rule. New subduction starts only where the timer happens to split a plate. The next real gains should come from Stage 5: cracks that follow damage instead of the timer, and initiation where forces exceed strength, rather than either rule here.
 
 Statistics reported at every stage, against Earth:
 

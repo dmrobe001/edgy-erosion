@@ -68,10 +68,23 @@ const contV = w => { let v = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m
   let mono = true; for (let a = 0; a < 200; a += 5) if (gpe(0, 7, a + 5) > gpe(0, 7, a) + 1) mono = false;
   ok(mono, `GPE falls with ocean age (ridges push)`);
   // uniform ocean, no slabs: every torque cancels, so nothing moves
-  const w = new MESH.MeshWorld({ ...opts, n: 16, seed: "still" });
+  const w = new MESH.MeshWorld({ ...opts, n: 16, seed: "still", mantle: false });
   for (let m = 0; m < w.nSlots; m++) if (w.mKind[m] === 1) { w.mK[m] = 0; w.mT[m] = 7; w.mB[m] = -50; w.sA[m] = 0; }
   w.checkSolve = true; w.solveVelocities(); const vmax = Math.max(...w.plates.filter(P => P.alive).map(P => Math.hypot(...P.W))) * 6371 / 10;
   ok(vmax < 1e-9, `uniform ocean with no slabs: no plate moves (fastest ${vmax.toExponential(1)} cm/yr)`);
+  // mantle flow (§6.1): basis fields orthonormal, so the tabulated RMS equals the root sum of squared coefficients;
+  // a uniform ocean with no slabs moves only by the mantle's drag, so no faster than the mantle
+  const wm = new MESH.MeshWorld({ ...opts, n: 16, seed: "drift" }), expect = Math.sqrt(wm.mc.reduce((a, b) => a + b * b, 0));
+  ok(Math.abs(wm.mantleRmsNow / expect - 1) < 0.02, `mantle flow: RMS on the grid ${wm.mantleRmsNow.toFixed(3)} cm/yr against ${expect.toFixed(3)} from its coefficients`);
+  for (let m = 0; m < wm.nSlots; m++) if (wm.mKind[m] === 1) { wm.mK[m] = 0; wm.mT[m] = 7; wm.mB[m] = -50; wm.sA[m] = 0; }
+  wm.solveVelocities(); wm.updateStats(true);
+  ok(wm.rmsSpeed > 0.05 && wm.rmsSpeed <= wm.mantleRmsNow, `uniform ocean over flowing mantle: plates drift at ${wm.rmsSpeed.toFixed(2)} cm/yr, under the mantle's ${wm.mantleRmsNow.toFixed(2)}`);
+  // the experimental option: subduction starting at old passive margins keeps the ledger, the mesh and the area budget
+  { const wi = new MESH.MeshWorld({ ...opts, seed: "margins", initiation: true }); let worst = 0, bad = 0;
+    const contV = w => { let v = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m] === 1 && w.mK[m]) v += w.mA[m] * w.mT[m]; return v; };
+    while (wi.t < 80) { const v0 = contV(wi), l0 = { ...wi.ledger }; wi.step(); let d = 0; for (const k in wi.ledger) if (k.startsWith("cont")) d += wi.ledger[k] - (l0[k] || 0);
+      worst = Math.max(worst, Math.abs(contV(wi) - v0 - d) / v0); if (wi.steps % 10 === 0) { const a = wi.audit(); if (!a.mesh.ok || Math.abs(a.closure) > 0.02) bad++; } }
+    ok(worst < 1e-8 && bad === 0 && (wi.mStats.initiations || 0) > 0, `subduction starting at old margins (option): ${wi.mStats.initiations || 0} starts in 80 Myr; ledger worst ${worst.toExponential(1)}; mesh and area budget held`); }
   const w2 = new MESH.MeshWorld({ ...opts, seed: "balance" }); w2.checkSolve = true; let worst = 0;
   while (w2.t < 60) { w2.step(); worst = Math.max(worst, w2.solveResidual); }
   ok(worst < 1e-6, `torque balance (I7): |K omega - b| / |b| below 1e-6 at every step to 60 Myr (worst ${worst.toExponential(1)})`);

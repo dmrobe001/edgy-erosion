@@ -322,21 +322,23 @@ On the marker core's default option, plate velocities come from a balance of for
 - **Polarity.** Between two oceanic sides, the more buoyant column overrides (its crust against its cold boundary layer).
 - **No spin-up.** Every slab starts at zero length, so the first few tens of millions of years are driven by GPE alone and plates creep at under 1 cm/yr until slabs grow.
 - **Coupling** is linear in the slip rate up to a frictional limit: about 3×10¹¹ N/m at ridges and transforms, 2×10¹² at trenches, 6×10¹² in collisions.
-- **Welding** is still Stage 1's collision counter, now counting collided area (in cells of the n = 96 grid) so it does not depend on resolution.
-- **Constants** are literature mid-range values or labelled conjectures, except the slab's shape factor, which was to be fitted to Earth's RMS speed; at n = 96 it turned out not to control the mean speed (below).
+- **Mantle flow.** The mantle beneath moves at about 2 cm/yr RMS, in a pattern of spherical harmonics of degree 1–4 that peaks at degree 2. Its coefficients wander with a time constant of 100 Myr. It drags on plate bases through the same basal drag. **Marks** draws it as thin pale blue arrows.
+- **Welding** happens once a collision has stopped. A pair that has collided enough (Stage 1's counter) welds after converging at under 1 cm/yr for 10 Myr, so a collision still converging (India) stays a boundary.
+- **Small plates.** Plates smaller than about 90,000 km² (10 cells at n = 96) join their longest-bordering neighbour: the grid cannot resolve their rotation.
+- **Subduction starting at old passive margins** (old ocean beside a continent breaks away and sinks) is built but off by default; the **Core** menu's experimental option turns it on. It makes too many small, fast plates.
+- **Constants** are literature mid-range values or labelled conjectures, except the slab's shape factor, fitted at n = 96 to Earth's RMS plate speed of 4–5 cm/yr.
 
-**Measured** (`tools/stage2_checks.js --n=96 --t=600`, three seeds, 100–600 Myr; details in `L0_MESH_SPEC.md` §11.2):
+**Measured** (`tools/stage2_checks.js --n=96 --t=600`, three seeds, 100–600 Myr; details and the comparison of variants in `L0_MESH_SPEC.md` §11.2–11.3):
 
-- **Net rotation** 0.08–0.09°/Myr (median), within Earth's estimated 0.1–0.4 or just under: an outcome, since the frame is the mantle's.
-- **Speed tail:** a plate larger than 1% of the sphere moves faster than 10 cm/yr 11–16% of the time and faster than 15 cm/yr up to 2.4%, in spells of up to about 20 Myr (India: 15–18 cm/yr for about 15 Myr).
-- **RMS speed is 2.6–3.2 cm/yr, below Earth's 4–5, and the slab coefficient does not fix it.** Speed cycles between about 1.5 and 6 cm/yr over 100–200 Myr, with spells when the world nearly stops.
-- **Forsyth & Uyeda's correlation** (plates with more trench move faster) is weak: rank correlation 0.26–0.47, against more than 0.5 sought.
-- **Collisions stop rather than slow:** about 40% of contacts stop or reverse within 20 Myr; few slow by Earth's 2–4 times.
-- About 6 plates larger than 1% of the sphere survive, against Earth's 10 or so.
+- **RMS speed** 3.8–4.5 cm/yr (fitted).
+- **Plates:** 11–12 larger than 1% of the sphere (Earth about 13); 14–20 welds and 14–22 rifts per Gyr.
+- **Net rotation** 0.09°/Myr (median), within Earth's estimated 0.1–0.4 or just under: an outcome, since the frame is the mantle's.
+- **Plates with more trench move faster** (Forsyth & Uyeda 1975): rank correlation 0.38–0.51, against more than 0.5 sought. Marginal.
+- **Collisions slow convergence** 2–4 times within 20 Myr in about 30% of cases once they dominate a plate pair's boundary (Earth: India slowed about 3 times). The median is 1.3–1.8 times.
+- **Speed tail:** a plate larger than 1% of the sphere moves faster than 10 cm/yr up to a third of the time, faster than 15 cm/yr at most 1.3%.
+- **Before these changes** (Stage 2 with Stage 1's weld counter and no mantle), the world welded down to about 6 plates, nearly stopped for long spells, and missed every speed check.
 
-**Reading [conjecture]:** with forces, colliding plates stay pressed together, Stage 1's weld counter fills, and the world welds down to a few large plates. When their slabs break off, nothing starts a new trench. The failing checks are the ones the Stage 1 weld and split rules and the missing mantle flow control; `L0_MESH_SPEC.md` §11.2 proposes two tests of this.
-
-**Cost:** about 210 ms a step at n = 96, against 121 with the random walk: faster plates need more substeps.
+**Cost:** about twice the random walk per step at n = 96 (about 310 against 150 ms headless): faster plates need twice the substeps, and the force balance takes about 55 ms.
 
 ---
 
@@ -754,7 +756,7 @@ Also:
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
 - **The marker core (section 3.14)** removes resampling from the material but is 3.5–4 times slower, settles at less continental crust (the lattice core's continents lean on resampled arc crust), and shows older seafloor. The view still samples moving markers, so the grid flickers.
-- **Forces (section 3.15):** RMS speed, the speed–trench correlation and collision slowdown miss Earth's values. The world welds down to about six large plates and nothing starts new trenches. There is no mantle flow yet (Stage 4), so the mantle is a fixed frame that only resists.
+- **Forces (section 3.15):** the speed–trench correlation is marginal and collisions slow convergence less often than on Earth. Plates still split by Stage 1's timer, and new trenches start only where it happens to split one; subduction starting at passive margins, as built, makes too many small, fast plates. Plumes and dynamic topography from the mantle are not built. Next, per `L0_MESH_SPEC.md`: deformation (Stage 3), or damage and cracking (Stage 5), which should replace the timer and the weld rule.
 - **L1:** see section 5.7.
 
 ---

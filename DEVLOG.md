@@ -239,6 +239,30 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
 
 The world welds down to a few large plates and starts no new trenches. The failing checks are those that Stage 1's weld and split rules and the missing mantle (Stage 4) control. That is a conjecture; §11.2 proposes two tests of it.
 
+## L0 marker core: mantle flow and two rules against the Stage 2 failures
+
+**What:** Stage 4's mantle flow brought forward (degree 1–4 spherical harmonics as harmonic polynomials, each coefficient an Ornstein–Uhlenbeck process, coupled through basal drag). Then the two rules proposed at the end of Stage 2, each behind a switch: welding only once a collision stops, and subduction starting at old passive margins. Details and tables: L0_MESH_SPEC.md §11.3.
+
+**What happened, in order:**
+- **Mantle flow alone changed little.** RMS speed 2.5–3.0 cm/yr, about 4.5 plates, the speed–trench correlation 0.25–0.36. A large plate averages a degree-2 flow over a large area.
+- **The first weld rule never fired.** It asked for the whole shared boundary to slip at under 0.5 cm/yr for 15 Myr, which rigid plates in a drifting mantle with friction-limited coupling never do. Rebuilt as proposed: a pair that has collided enough welds once its convergence stays under 1 cm/yr for 10 Myr.
+- **An edit duplicated a block of the class.** A slice between two comment markers, taken in the wrong order, copied the initiation method and kept the old weld methods, which overrode the new ones (JavaScript keeps the last definition). The tell: a rerun reproduced the previous numbers to every digit.
+- **Initiation broke the area budget** (3.8%). An interface marker's surrounding area was shared among all its interior neighbours, but continental markers carry their own area, so their shares fell out of the sum. New trenches along continents made that visible. Shares now go to oceanic neighbours only.
+- **Tiny plates ran away** (35–66 cm/yr). A slab record pulled at its nearest trench marker even where a different plate had made the slab. Records now remember which plate fed them, followed through splits and welds.
+- **A one-marker plate "moved" at 880,000 cm/yr**, and a weld averaged that into its neighbour (RMS 169 cm/yr for one step). Drag on a single point cannot resist spin about that point. Each marker now resists spin as a disc of its area, and plates below about 90,000 km² (or 10 markers on a coarser grid) join their longest-bordering neighbour.
+- **Microplates still spun under off-centre slab pull** (up to 80 cm/yr). Slab resistance acted only on motion into the trench. A slab dragged sideways resists too: edgewise Stokes drag on a disc is 2/3 of broadside, applied to the sinking part only.
+- **c_geom now controls speed.** At n = 48 it ran 12 → 4.3–4.4, 20 → 3.3–3.4, 30 → 2.7–2.9 cm/yr, all inside the spec's 10–100. At n = 96 with the final rules, 10 gives 3.8–4.5.
+
+**The comparison** (n = 96, three seeds, c_geom = 12): see §11.3.
+- The weld rule brings plates to 11–12 (Earth about 13), raises speed, and makes collisions slow rather than stop.
+- Initiation gives the best speed–trench correlation (0.58–0.75), but adds about 140 small oceanic plates per Gyr. They run near the free sinking speed (a large plate faster than 10 cm/yr 37–48% of the time) and push net rotation below Earth's estimates. A quarter of the rate barely changed that: older margins accumulate, so starts fell only to 62–78 per Gyr. The form of the rule, not its rate, is wrong. It is off by default and available as an option.
+
+**Measured (default: mantle flow and the weld rule; c_geom = 10; n = 96, three seeds, 100–600 Myr):**
+- RMS speed 3.8–4.5 cm/yr, with 11–12 plates.
+- Net rotation 0.09°/Myr.
+- Speed–trench correlation 0.38–0.51: marginal.
+- Collisions slow 2–4× in about 30% of cases once dominant.
+
 ## Things that turned out not to matter, or were left alone
 
 - **The first L1 fault-trace algorithm** (strict kind matching) mostly needed looser grouping, not a different tracer.

@@ -21,7 +21,8 @@ const spearman = (a, b) => { const rk = x => { const o = x.map((v, i) => [v, i])
 const med = x => { const s = [...x].sort((a, b) => a - b); return s.length ? s[Math.floor(s.length / 2)] : NaN; };
 const all = { rms: [], net: [], rho: [], coll: [], collHalf: [] };
 for (const seed of seeds) {
-  const w = new MESH.MeshWorld({ n, seed, nPlates: 10, mode: "scatter", nnr: true, contTarget: 0.4 }), t0 = Date.now();
+  const w = new MESH.MeshWorld({ n, seed, nPlates: 10, mode: "scatter", nnr: true, contTarget: 0.4 }), t0 = Date.now(), evN = {};
+  { const log = w.log; w.log = function (type, ...a) { if (this.t >= skip) evN[type] = (evN[type] || 0) + 1; return log.call(this, type, ...a); }; }
   const rms = [], net = [], xs = [], ys = [], perSample = [], series = [], onset = new Map(), onsetHalf = new Map(), coll = [], collHalf = [];
   let nBig = 0, steps = 0, fast10 = 0, fast15 = 0, any10 = 0, any15 = 0, spell = 0, longest = 0, nextS = skip;
   while (w.t < T) {
@@ -51,6 +52,8 @@ for (const seed of seeds) {
   console.log(`\nseed ${seed}, n=${n}, ${skip}-${T} Myr (${((Date.now() - t0) / steps).toFixed(0)} ms/step)`);
   console.log(`  rms speed  mean ${mean.toFixed(2)} cm/yr, range ${Math.min(...rms).toFixed(2)}-${Math.max(...rms).toFixed(2)}; every 10 Myr: ${series.filter((_, i) => i % 5 === 0).map(s => `${s[0]}:${s[1].toFixed(1)}`).join(" ")}`);
   console.log(`  plates larger than 1% of the sphere: ${(nBig / rms.length).toFixed(1)} on average (Earth: about 10)`);
+  const per = x => ((x || 0) * 1000 / (T - skip)).toFixed(0);
+  console.log(`  events per Gyr: subduction starts ${per(evN.initiation)}, welds ${per(evN.suture)}, timed rifts ${per(evN.rift)}, plates subducted away ${per(evN.lost)}`);
   console.log(`  net rotation  median ${med(net).toFixed(3)} deg/Myr, max ${Math.max(...net).toFixed(3)}`);
   console.log(`  Forsyth-Uyeda  pooled rho ${rho.toFixed(2)} (${xs.length} plate samples); per-sample median ${med(perSample).toFixed(2)} (${perSample.length} samples)`);
   console.log(`  tail  steps with a plate >1% faster than 10 cm/yr: ${(100 * fast10 / rms.length).toFixed(1)}%, 15: ${(100 * fast15 / rms.length).toFixed(1)}%; any plate: ${(100 * any10 / rms.length).toFixed(1)}%, ${(100 * any15 / rms.length).toFixed(1)}%; longest spell >10 (large plates) ${longest.toFixed(0)} Myr`);
