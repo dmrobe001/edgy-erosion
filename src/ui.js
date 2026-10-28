@@ -276,6 +276,17 @@ function makeMeshWorld(wo){
   w.onfail=msg=>{if(world!==w)return;noMeshWorker=true;w.terminate();running=false;$("play").textContent="Run";
     $("log").insertAdjacentHTML("afterbegin",`<li class="note">The marker core could not run in a worker (${String(msg).slice(0,120)}); it now runs on the page.</li>`);build();};
   return w;}
+// WebGPU: whether the page can reach a GPU, and which (shown in the statistics and saved in session exports)
+let gpuInfo={available:false,note:"checking"};
+(async()=>{try{if(typeof navigator==="undefined"||!navigator.gpu){gpuInfo={available:false,note:"no navigator.gpu"};}
+  else{const a=await navigator.gpu.requestAdapter();if(!a)gpuInfo={available:false,note:"no adapter"};
+    else{const i=a.info||(a.requestAdapterInfo?await a.requestAdapterInfo():{});
+      gpuInfo={available:true,vendor:i.vendor||"",architecture:i.architecture||"",device:i.device||"",description:i.description||"",fallback:!!a.isFallbackAdapter,
+        maxBufferMB:Math.round((a.limits&&a.limits.maxStorageBufferBindingSize||0)/1048576),f16:a.features?a.features.has("shader-f16"):false};}}}
+  catch(e){gpuInfo={available:false,note:"error: "+String(e&&e.message||e).slice(0,80)};}
+  const el=typeof document!=="undefined"&&document.getElementById("sGpu");if(el)el.textContent=gpuText();})();
+function gpuText(){const g=gpuInfo;if(!g.available)return "no ("+g.note+")";
+  return "yes"+(g.fallback?" (software)":"")+": "+([g.vendor,g.architecture,g.description].filter(x=>x).join(" ")||"adapter with no details")+(g.maxBufferMB?`, ${g.maxBufferMB} MB buffers`:"");}
 let noMeshWorker=false,meshViewHelper=true; // the second: build the view in a helper worker while the next step runs
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
@@ -809,7 +820,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
       L2:ho?{tilesShown:l1View==="tiles",selectedTile:l1TileSel,tile:l1TileSel>=0?ho.tiles[l1TileSel]:null,
         reliefPreview:l2V?{zoom:l2V.zoom,pan:l2V.pan,kmPerPx:l2V.s,box:{xKm:[l2V.x0,l2V.x1],yKm:[l2V.y0,l2V.y1]}}:null}:null},
     stats:{L0:{t:w.t,steps:w.steps,dt:w.dt,platesAlive:w.plates.filter(q=>q.alive).length,landFraction:w.landFrac,continentalFraction:w.contFrac,meanSeafloorAgeMyr:w.oceanAge,
-        meanUnitsPerContinentalColumn:w.meanUnits,crossOriginIsolated:typeof crossOriginIsolated!=="undefined"&&crossOriginIsolated,sharedArrayBuffer:typeof SharedArrayBuffer!=="undefined",cores:typeof navigator!=="undefined"?navigator.hardwareConcurrency||null:null,netRotationDegPerMyr:w.netRot,msPerStep:msEma,simulatedMyrPerSecond:rateEma,savedStates:snaps.map(x=>({t:x.t,steps:x.steps}))},
+        meanUnitsPerContinentalColumn:w.meanUnits,crossOriginIsolated:typeof crossOriginIsolated!=="undefined"&&crossOriginIsolated,sharedArrayBuffer:typeof SharedArrayBuffer!=="undefined",cores:typeof navigator!=="undefined"?navigator.hardwareConcurrency||null:null,webgpu:gpuInfo,netRotationDegPerMyr:w.netRot,msPerStep:msEma,simulatedMyrPerSecond:rateEma,savedStates:snaps.map(x=>({t:x.t,steps:x.steps}))},
       L1:sh?{history:sh.history,budget:sh.budget,msPerStep:l1Ms,basinsMs:S.bsMs,handoffMs:S.hoMs}:null},
     actions,events:w.events,
     landmass:S&&S.pick?{cells:Array.from(S.pick.cells),land:S.pick.land,ref:S.pick.ref}:null,
