@@ -434,6 +434,53 @@ The lattice core stays selectable in the page until Stage 1 passes, so both can 
 | Displayed-rock flicker | 0.55% of continental markers per step: resampling flicker gone from the material (the lattice's 5% is 90% resampling). The grid view still samples moving markers: 7–9% of cells per step |
 | Cost | 100–126 ms per step against 29–34: **about 3.5–4 times**, not within 2× |
 
+### 11.2 Stage 2 as built
+
+Plates are driven by the forces of §4 and a torque balance per plate (§5.1), in `MeshWorld.solveVelocities` (`src/mesh.js`); the constants are in `PH` there, each labelled measured, derived, rule, calibrated or conjecture. The random walk remains selectable (`kin: "walk"`, and the page's Stage 1 option). Checks: `tools/stage2_checks.js`, and the force checks in `tests/test_mesh.js`.
+
+**What the balance contains:**
+
+- **Unknowns:** one angular velocity per plate, in the mantle's frame (no net rotation is removed). Stokes flow, so no inertia: each step's velocities follow from that step's forces.
+- **Resisting:** basal drag per marker area, C_b = 3×10¹⁴ Pa s/m, five times larger under continental crust; slab resistance C_s·v_n per trench interface marker, on the subducting plate's velocity into the trench; interface coupling on the relative velocity of the two sides (3×10²⁰ Pa s at ridges and transforms, 10²¹ at trenches, 10²² where continent meets continent [conjecture: orders of magnitude, not fitted]), up to a frictional limit (below).
+- **Driving:** slab pull at each trench interface marker, toward the overriding plate; the gradient of GPE as a body force on every triangle; trench suction on the overriding plate, c_suc = 0.2, using the previous step's velocity into the trench.
+- **GPE** comes from floated columns (water, crust, a lithospheric mantle whose excess density falls linearly to zero at its base, asthenosphere), relative to a ridge [derived]. Ridge push at 100 Myr comes out 3.88×10¹² N/m, against Turcotte & Schubert's 3.9×10¹². The continental root's excess mass is set so 33 km of crust sits at sea level, as the elevation rule has it; a continent at sea level then has the GPE of 100 Myr old ocean.
+
+**Where the build departs from this spec**, and why:
+
+| Spec | Built | Why |
+|---|---|---|
+| Each trench interface marker carries its slab record (§4.3) | The record hangs from the overriding plate's interior marker nearest each consumed marker. It pulls at the nearest trench interface marker of its own plate within two rings | Interface markers come and go (§11.1); the overriding plate's markers ride with the trench. A first version pulled only where the record's marker was a trench marker's nearest frontier: 15% of the pull went unapplied at n = 48 and 25% at n = 96, one source of resolution dependence |
+| Slab pull counts the thermal deficit and eclogite (§4.3) | Also counts oceanic crust above lEcl = 80 km as buoyant. Continental crust going down forms a buoyant plug at the top of the slab, counted up to lPlug = 150 km long [rule; ultra-high-pressure rocks show continental crust reaching 100–200 km, measured] | Without crust buoyancy, young ocean would not resist. Consumption already moves continental crust's volume into the orogen, so the slab cannot keep all of it: the first version counted all of it, and buoyant records swamped the pull (Forsyth–Uyeda ρ = 0.08) |
+| Break-off after collision, Stage 5 (§4.6) | Built now as a rule: once no ocean has gone down behind a record for a step (and it is not behind an active oceanic trench), its oceanic part detaches with e-folding time 10 Myr. The plug of continental crust is exhumed on the same time scale once no more continental crust goes down | Without it, a slab behind a collision kept pulling for ever |
+| Polarity by length-weighted mean buoyancy (§4.6) | Each interface marker compares its two frontier markers' b (§4.1) for ocean against ocean; each stretch of boundary takes its markers' majority | The Stage 1 vote, with b in place of age. No hysteresis yet (Stage 5) |
+| Coupling capped at a frictional limit, reduced by damage (§4.8) | Linear up to the limit (secant coefficient by Picard iteration, from the previous step's velocities; stops when coefficients change by under 2%). Limits [measured orders]: 3×10¹¹ N/m at ridges and transforms (about 20 MPa over 15 km), 2×10¹² at trenches (about 15 MPa over 100–150 km of megathrust), 6×10¹² in collisions (the force Tibet transmits). No damage | Without the limit, coupling took the largest share of the driving torque (38–49%), so the fitted coefficient barely moved speeds. Damage is Stage 5 |
+| Welds by collision counter (Stage 1, until Stage 5) | The counter counts collided area in cells of the n = 96 grid (where its threshold of 180 was set), not markers consumed | Counting markers welded plates after a quarter of the collided area at n = 96 compared with n = 48: about 7 plates against 13, and with them a third of the difference in speed |
+| Mantle traction (§4.7, §6.1) | v_m = 0 | Mantle flow is Stage 4. The mantle is a fixed frame that resists |
+| c_geom of order 10–100 (§4.4), fitted to RMS speed | 6, provisionally | At n = 48, before welding and slab attachment were made independent of resolution, 6 gave RMS 4.3–4.9 cm/yr. At n = 96 (the chosen resolution) the mean speed does not respond to it: 2.0–3.2 cm/yr for c_geom = 3, 4 and 6 |
+| Boundary length per interface marker | Half the distance between its two nearest interface neighbours | Straightens the zigzag of edge midpoints: a great circle comes out 9% long (17% with the first estimate) |
+
+**Exit checks.** Three seeds, n = 96, 100–600 Myr (the first 100 Myr is the start's transient: slabs start at zero length); `tools/stage2_checks.js --n=96 --t=600`:
+
+| Check | Result |
+|---|---|
+| RMS speed 3–6 cm/yr after calibrating c_geom alone | 2.72, 3.15, 2.57 cm/yr. **Fails, and not for want of c_geom**: 3 and 4 give 2.0–3.2 too. Speeds cycle between about 1.5 and 6 cm/yr over 100–200 Myr, with spells near zero (below 0.2 cm/yr for up to 100 Myr on one seed) |
+| Plates with more trench move faster, rank correlation > 0.5 (Forsyth & Uyeda 1975) | Pooled ρ = 0.32, 0.26, 0.47; per-sample medians 0.40–0.43. **Fails.** With 13 plates (n = 48 before the welding fix) it was 0.51–0.63 without the frictional limit and 0.36–0.47 with it |
+| Collision slows convergence 2–4× within 20 Myr | **Fails the other way: collisions stop.** Of 105–120 contacts per seed, about 45% slow 2× or more and most of those (about 40% of all) stop or reverse; 3–7% fall in 2–4×. Median slowdown 1.6–2.2× at contact, 2.5× to "stopped" once collision is half the pair's boundary |
+| Net rotation < 0.4°/Myr | Medians 0.08–0.09°/Myr; maxima 0.25–0.31. **Passes** |
+| Speed tail: how often any plate exceeds 10 and 15 cm/yr | Plates larger than 1% of the sphere faster than 10 cm/yr 11–16% of steps; faster than 15 cm/yr 0.2–2.4%; longest spell above 10 cm/yr 16–22 Myr. Earth's best-documented extreme is India, 15–18 cm/yr for about 15 Myr |
+| Plate count (reported) | 5.6–5.9 plates larger than 1% of the sphere on average; Earth has about 10 |
+| I7 torque balance | Residual below 10⁻¹⁵ for each solve; the frictional limit is met to within the Picard tolerance (2%) |
+| Uniform ocean, no slabs | No plate moves (4×10⁻¹⁶ cm/yr): the GPE discretization exerts no torque from a uniform field |
+| Cost | About 210 ms a step at n = 96 headless, against 121 with the random walk: faster plates need 6.5 substeps a step against 2.7 |
+
+**What balances the driving torque** (`budget` in `solveVelocities`: each term's torque along each plate's rotation axis, summed over plates; n = 96, one seed, 150–350 Myr). Driving: slab pull 77%, GPE 12%, suction 11%. Taken up by basal drag 49%, slab resistance 29%, interface coupling 22%. Before the frictional limit, coupling took 38–49% and absorbed any change in c_geom.
+
+**Reading the failures [conjecture, to test next].** Under forces, colliding plates stay pressed together, so Stage 1's weld counter keeps filling, and the world welds down to about 6 large plates. Large plates carry more basal drag per kilometre of trench, which flattens the speed–trench relation, and when their slabs break off nothing starts a new trench: the world nearly stops until a timed split happens to open. Earth avoids this through what Stage 2 does not have: subduction starting where it is not already happening (at passive margins, at transforms, after a polarity flip) and mantle flow that keeps plates moving. The checks that fail are those the weld and split rules (Stage 1 stand-ins, to be replaced at Stage 5) and the missing mantle (Stage 4) control. Two cheap tests of this reading:
+1. A weld rule that needs convergence to have stopped, not just collided area.
+2. Subduction initiation at old passive margins when GPE contrast exceeds a threshold.
+
+Each should raise the plate count, and with it speed and ρ, if the reading is right.
+
 Statistics reported at every stage, against Earth:
 
 | Statistic | Earth |

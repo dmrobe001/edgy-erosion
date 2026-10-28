@@ -49,7 +49,7 @@ Everything is deterministic given the seed and settings (seed text, resolution, 
 - **Refine selected landmass** (top of the L1 panel) replays the last 10–30 Myr of the selected landmass from a saved state of L0 (kept every 10 Myr while L0 runs, so run L0 for a while first). L0 replays the window twice (tracing the crust, then driving the sheet) and ends exactly where it started. The L1 map then shows terrain, thickening, finite strain, strain rate, surface rock, mantle pull, rainfall, drainage basins and the L2 tiles.
 - **Extract handoff** traces the fault network, builds formations and domains, and overlays fault traces; **Download JSON** saves that L0 handoff.
 - **Export session** saves a small JSON log from which the session reruns exactly (section 2.1). Downloads use the Claude artifact runtime's downloads capability; opened as a plain local file, they are unavailable.
-- **Core** (under the world settings, applied by **Rebuild world**): the lattice core, or the marker core (section 3.14, Stage 1 of `L0_MESH_SPEC.md`), which carries the crust on markers on a Delaunay mesh. On the marker core, **Markers** draws every marker, with interface markers coloured by the kind of boundary; L1 refinement still needs the lattice core.
+- **Core** (under the world settings, applied by **Rebuild world**): the lattice core, or the marker core (section 3.14), which carries the crust on markers on a Delaunay mesh, with plates driven by forces (section 3.15) or, as Stage 1 was, by a random walk. On the marker core, **Markers** draws every marker, with interface markers coloured by the kind of boundary; L1 refinement still needs the lattice core.
 - Net rotation is always removed (section 3.8). The statistics the page no longer shows (plate count, continental fraction, mean seafloor age, units per column, net rotation, simulated rate) are in the session export.
 
 **Rebuild the page** from its parts after editing `src/`:
@@ -66,7 +66,8 @@ node tests/test_l1.js --n=96 --h=50 --win=20 --t0=1000 --land=3000   # L1 checks
 node tests/test_budget.js --t=2400 # full-length crust budget run
 node tests/bench.js --t=300        # ms per step at each resolution
 node tests/test_mesh.js --n=64 --t=300       # the marker core's invariants (section 3.14)
-node tools/compare_cores.js --n=96 --t=800   # the marker core against the lattice core, three seeds (about 15 minutes)
+node tools/compare_cores.js --n=96 --t=800   # the marker core against the lattice core, three seeds (about 15 minutes; --kin=walk for Stage 1's random walk)
+node tools/stage2_checks.js --n=96 --t=600   # plate speeds from forces against Earth: RMS, Forsyth-Uyeda, collisions, net rotation, tail, plate count (section 3.15; a few minutes a seed)
 ```
 
 ### 2.1 Session exports
@@ -96,13 +97,14 @@ plates.html            the built single-file page (what the artifact serves)
 build.sh               rebuilds plates.html from src/
 src/head.html          markup, styles, explanatory notes; ends with an opening <script> tag
 src/sim.js             the simulation core: a self-contained SIM module, usable in browser and Node
-src/mesh.js            the marker core (L0_MESH_SPEC.md Stage 1): spherical Delaunay triangulation, MeshWorld (MESH module)
+src/mesh.js            the marker core (L0_MESH_SPEC.md Stages 1-2): spherical Delaunay triangulation, MeshWorld, forces and torque balance (MESH module)
 src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff, basin selection (L1 module)
 src/l2.js              L2: the relief L2 starts from, as a function of position; basin outlines burnt in at 500 m; the L2 pass (L2 module)
 src/ui.js              rendering, controls, inspector, handoff panel, L1 and L2 panels
 tests/                 headless tests and benchmarks (see section 3.13)
 tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
 tools/compare_cores.js the marker core against the lattice core on the same seeds (section 3.14)
+tools/stage2_checks.js plate speeds from the force balance against Earth (section 3.15)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
 ONTOLOGY.md            what each structure in the code is (field, material, pattern, ...), and what that shows
 L0_MESH_SPEC.md        proposal: L0 rebuilt on Lagrangian markers with a torque balance, mantle flow, plumes and cracking
@@ -272,7 +274,7 @@ All are tuned for plausible appearance, not fitted to Earth data.
 | `test_pinholes.js` | single-cell ocean pinholes inside freshly absorbed plates versus elsewhere |
 | `test_volume_budget.js` | continental volume sources and sinks, via a patched copy of the sim |
 | `test_l1.js` | L1: stream-power steady state and the viscous sheet against exact solutions; on a real landmass, exact replay, L0 untouched by the sheet, crust budget closure, bounded thickness and peaks, determinism; in the drainage pass, every land cell drains and basins partition the land; prints Hack's law |
-| `test_mesh.js` | the marker core: spherical triangulation (build, delete, reinsert, points on edges, flips); per step, the continental volume ledger, mesh validity, no edge between two plates' interior markers, unique ids; area budget; determinism and snapshot replay |
+| `test_mesh.js` | the marker core: spherical triangulation (build, delete, reinsert, points on edges, flips); per step, the continental volume ledger, mesh validity, no edge between two plates' interior markers, unique ids; area budget; determinism and snapshot replay; forces: ridge push from GPE, no motion from a uniform ocean, torque balance residual |
 | `bench.js` | ms per step, extraction and export cost at each resolution |
 
 Representative numbers from development, in Node.js on a single core:
@@ -283,9 +285,9 @@ Representative numbers from development, in Node.js on a single core:
 - **Events:** roughly 20–30 rifts and 20–30 sutures per 800 Myr, plus hotspot islands.
 - **Rock flicker:** about 5% of continental cells change displayed rock per step, about 90% of it from resampling.
 
-### 3.14 The marker core (Stage 1 of `L0_MESH_SPEC.md`)
+### 3.14 The marker core (Stages 1 and 2 of `L0_MESH_SPEC.md`)
 
-An alternative L0 core in `src/mesh.js`, chosen with **Core** before **Rebuild world**. It keeps the lattice core's kinematics and surface rules, but the crust lives on markers instead of plate lattices, so nothing is resampled.
+An alternative L0 core in `src/mesh.js`, chosen with **Core** before **Rebuild world**. The crust lives on markers instead of plate lattices, so nothing is resampled. It keeps the lattice core's surface rules. Since Stage 2 its plates are driven by forces (section 3.15); the **Stage 1** option keeps the lattice core's random-walk velocities, which the measurements below were made with.
 
 - **Start.** The lattice core builds the starting world; one marker is put in each of its cells (jittered within the cell by a fixed hash), carrying the cell's crust, rock column and fault record. The plates' lattices are then dropped.
 - **Mesh.** A Delaunay triangulation of the markers on the sphere (on a sphere it is their convex hull), kept up to date by insertion, deletion and edge flips. Markers inside a rigid plate keep their triangles; only triangles touching two plates change.
@@ -299,13 +301,42 @@ An alternative L0 core in `src/mesh.js`, chosen with **Core** before **Rebuild w
 - **In a Web Worker.** The page runs the marker core in a worker built from the modules' own sources (`SIMmodule`, `MESHmodule`, `MESH.workerMain`) and keeps a mirror: after each step the worker posts the fixed-grid view (copies, transferred), plates, statistics and new events; the inspector's column, the handoff, its export and the L1 preview fields are asked for and arrive later. If a worker cannot start, the page steps the core itself. In Chromium at n = 96 the page keeps drawing at 60 frames a second while it runs (frames 17 ms apart, against 350 ms when the core steps on the page), but the simulation is no faster (7.6 against 7.3 Myr a second; the lattice core runs 17.8): one worker still does the whole step. The worker's world matches a headless run exactly.
 - **A second worker for the view.** The page has no shared memory in claude.ai (`crossOriginIsolated` is false and `SharedArrayBuffer` is undefined; the statistics row shows this), so workers only exchange copies. Of the step, only the fixed-grid view is separable: the dynamics read the markers, not the view (the hotspot island check now reads the marker its cell shows). So the step worker hands a copy of the markers, their neighbour lists and the rock columns to a helper worker and starts the next step; the view comes back and goes to the page with that step's summary. Measured in Chromium at n = 96, 25 s each, alternating: 7.5 and 8.1 Myr a second with the helper, 7.2 and 7.3 without: about 8% faster, and noisy. The rest of the step is a chain of operations on one triangulation, so more workers would not help without shared memory.
 
-**Measured** (`tools/compare_cores.js`, three seeds, n = 96, 800 Myr, against the lattice core on the same seeds; details in `L0_MESH_SPEC.md` §11.1 and `DEVLOG.md`):
+**Measured with the random walk** (`tools/compare_cores.js --kin=walk`, three seeds, n = 96, 800 Myr, against the lattice core on the same seeds; details in `L0_MESH_SPEC.md` §11.1 and `DEVLOG.md`):
 
 - The invariants hold: volume ledger to about 10⁻⁹, mesh valid at every check, ids unique, runs deterministic and replayable from a snapshot (`tests/test_mesh.js`).
 - Resampling flicker is gone from the material: displayed rock changes on 0.55% of continental markers a step, the lattice core's surface-process share.
 - Continental crust settles about 4 points lower (0.35–0.36 against 0.39–0.40) and seafloor is older (236–268 Myr against 124–206 at 800 Myr). The lattice core counts about 3.5 times as many oceanic contacts as the marker core consumes, and each deposits arc crust; seafloor turnover is the same on both, so the lattice's extra arc crust comes from resampling.
 - Land fraction, plate count, rifts and sutures stay in the lattice core's ranges, which vary more between seeds than between cores.
 - It cost 100–126 ms a step at n = 96 against 29–34 ms for the comparison; caching what rigid plate interiors cannot change has since brought it to about 103 ms headless. In Chromium, in its worker with the view helper, it simulates 9.6 Myr a second against the lattice core's 18.3.
+
+### 3.15 Plates driven by forces (Stage 2 of `L0_MESH_SPEC.md`)
+
+On the marker core's default option, plate velocities come from a balance of forces instead of a random walk. Every force acts locally (per marker, per triangle, or per boundary marker), so torques follow from where forces act. The plan and its reasoning are in `L0_MESH_SPEC.md` §4–5; what was built, and where it departs from the plan, is in §11.2 there.
+
+- **Slab pull.** A marker consumed at a trench adds to a slab record held by the nearest marker of the overriding plate: its area, the thermal deficit of its age (half-space cooling, capped at 125 km thick), and its crust. The record pulls the subducting plate toward the trench with g × (thermal deficit + oceanic crust, buoyant above 80 km depth and eclogite below + a buoyant plug of continental crust at most 150 km long). Slabs are capped at 700 km long. So older and longer slabs pull harder, and pull varies along a trench.
+- **Break-off.** Once no ocean has gone down behind a record, its oceanic part detaches over about 10 Myr; a continental plug left behind is exhumed over the same time once continental crust stops going down.
+- **Resistance.** Slab resistance C_s·v at each trench, stiffer for older, thicker plates bending; basal drag under every marker, five times stronger under continents; coupling across every boundary, strongest in collisions.
+- **Gravitational potential energy (GPE).** Each column is floated isostatically and its GPE integrated; −∇GPE acts as a body force on every triangle. This is ridge push (3.9×10¹² N/m at 100 Myr, as in Turcotte & Schubert) and the spreading of high ground, as one force.
+- **Trench suction.** Where a slab sinks faster than its plate feeds it, the overriding plate is pulled toward the trench.
+- **The balance.** Each step every plate gets the one angular velocity that balances these torques (Stokes flow: no inertia). The frame is the mantle's, so net rotation is a result.
+- **Polarity.** Between two oceanic sides, the more buoyant column overrides (its crust against its cold boundary layer).
+- **No spin-up.** Every slab starts at zero length, so the first few tens of millions of years are driven by GPE alone and plates creep at under 1 cm/yr until slabs grow.
+- **Coupling** is linear in the slip rate up to a frictional limit: about 3×10¹¹ N/m at ridges and transforms, 2×10¹² at trenches, 6×10¹² in collisions.
+- **Welding** is still Stage 1's collision counter, now counting collided area (in cells of the n = 96 grid) so it does not depend on resolution.
+- **Constants** are literature mid-range values or labelled conjectures, except the slab's shape factor, which was to be fitted to Earth's RMS speed; at n = 96 it turned out not to control the mean speed (below).
+
+**Measured** (`tools/stage2_checks.js --n=96 --t=600`, three seeds, 100–600 Myr; details in `L0_MESH_SPEC.md` §11.2):
+
+- **Net rotation** 0.08–0.09°/Myr (median), within Earth's estimated 0.1–0.4 or just under: an outcome, since the frame is the mantle's.
+- **Speed tail:** a plate larger than 1% of the sphere moves faster than 10 cm/yr 11–16% of the time and faster than 15 cm/yr up to 2.4%, in spells of up to about 20 Myr (India: 15–18 cm/yr for about 15 Myr).
+- **RMS speed is 2.6–3.2 cm/yr, below Earth's 4–5, and the slab coefficient does not fix it.** Speed cycles between about 1.5 and 6 cm/yr over 100–200 Myr, with spells when the world nearly stops.
+- **Forsyth & Uyeda's correlation** (plates with more trench move faster) is weak: rank correlation 0.26–0.47, against more than 0.5 sought.
+- **Collisions stop rather than slow:** about 40% of contacts stop or reverse within 20 Myr; few slow by Earth's 2–4 times.
+- About 6 plates larger than 1% of the sphere survive, against Earth's 10 or so.
+
+**Reading [conjecture]:** with forces, colliding plates stay pressed together, Stage 1's weld counter fills, and the world welds down to a few large plates. When their slabs break off, nothing starts a new trench. The failing checks are the ones the Stage 1 weld and split rules and the missing mantle flow control; `L0_MESH_SPEC.md` §11.2 proposes two tests of this.
+
+**Cost:** about 210 ms a step at n = 96, against 121 with the random walk: faster plates need more substeps.
 
 ---
 
@@ -722,7 +753,8 @@ Also:
 - **Formation identity is inferred** at handoff from rock type, origin plate and age. Recording an explicit depositional-episode ID when each unit forms would be cleaner.
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
-- **The marker core (section 3.14)** removes resampling from the material but is 3.5–4 times slower, settles at less continental crust (the lattice core's continents lean on resampled arc crust), and shows older seafloor. The view still samples moving markers, so the grid flickers. Next, per `L0_MESH_SPEC.md`: speed (warm starts, workers), then local forces and a torque balance (Stage 2).
+- **The marker core (section 3.14)** removes resampling from the material but is 3.5–4 times slower, settles at less continental crust (the lattice core's continents lean on resampled arc crust), and shows older seafloor. The view still samples moving markers, so the grid flickers.
+- **Forces (section 3.15):** RMS speed, the speed–trench correlation and collision slowdown miss Earth's values. The world welds down to about six large plates and nothing starts new trenches. There is no mantle flow yet (Stage 4), so the mantle is a fixed frame that only resists.
 - **L1:** see section 5.7.
 
 ---

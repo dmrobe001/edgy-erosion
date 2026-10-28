@@ -61,6 +61,21 @@ const contV = w => { let v = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m
   const w3 = new MESH.MeshWorld(opts); w3.restore(snap); while (w3.t < Tend) w3.step();
   ok(hash(w3) === end, `restore at step ${snapHashAt} and replay ends in the same state`);
 }
+// ---------- part 2b: the forces of Stage 2 ----------
+{
+  const { gpe, PH } = MESH, rp = gpe(0, 7, 0) - gpe(0, 7, 100);
+  ok(rp > 3.5e12 && rp < 4.5e12, `ridge push at 100 Myr from the GPE of floated columns: ${rp.toExponential(2)} N/m (Turcotte & Schubert: about 3.9e12)`);
+  let mono = true; for (let a = 0; a < 200; a += 5) if (gpe(0, 7, a + 5) > gpe(0, 7, a) + 1) mono = false;
+  ok(mono, `GPE falls with ocean age (ridges push)`);
+  // uniform ocean, no slabs: every torque cancels, so nothing moves
+  const w = new MESH.MeshWorld({ ...opts, n: 16, seed: "still" });
+  for (let m = 0; m < w.nSlots; m++) if (w.mKind[m] === 1) { w.mK[m] = 0; w.mT[m] = 7; w.mB[m] = -50; w.sA[m] = 0; }
+  w.checkSolve = true; w.solveVelocities(); const vmax = Math.max(...w.plates.filter(P => P.alive).map(P => Math.hypot(...P.W))) * 6371 / 10;
+  ok(vmax < 1e-9, `uniform ocean with no slabs: no plate moves (fastest ${vmax.toExponential(1)} cm/yr)`);
+  const w2 = new MESH.MeshWorld({ ...opts, seed: "balance" }); w2.checkSolve = true; let worst = 0;
+  while (w2.t < 60) { w2.step(); worst = Math.max(worst, w2.solveResidual); }
+  ok(worst < 1e-6, `torque balance (I7): |K omega - b| / |b| below 1e-6 at every step to 60 Myr (worst ${worst.toExponential(1)})`);
+}
 // ---------- part 3: the worker protocol ----------
 // MESH.workerMain runs against a fake worker scope: init, run to 20 Myr, one more step, ask
 // for a column and the handoff; the views it posts must match a MeshWorld stepped directly.

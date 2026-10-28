@@ -209,6 +209,36 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
 
 ---
 
+## L0 marker core, Stage 2 (`src/mesh.js`): plates driven by forces
+
+**What:** the random walk in plate velocities replaced by a torque balance per plate over local forces (L0_MESH_SPEC.md §4–5, §11.2): slab pull from slab records, slab resistance, basal drag, interface coupling, GPE as a body force, trench suction. One coefficient fitted (the slab's shape factor c_geom, to RMS speed 4–5 cm/yr); the rest checked against Earth without tuning, in `tools/stage2_checks.js`.
+
+**Problems and fixes, in order:**
+- **Plates crawled (0.2–0.5 cm/yr) and summed slab pull went negative.** Slab records were set to detach a step after their marker was last fed. At these speeds a trench consumes one marker per tens of Myr, so slabs broke off between feedings. A record now stays attached while it is behind an active trench. Slabs then grew: summed pull 1.5×10²¹ N, Earth's order.
+- **No correlation between speed and trench (Forsyth–Uyeda ρ = 0.08).** Per-plate breakdown: slab records were net buoyant on most plates. Continental crust consumed at collisions was counted as buoyant slab crust, but consumption already moves its volume into the orogen: a double count. With continental crust adding only length, ρ rose to 0.53–0.62 and pull was positive everywhere.
+- **Boundary lengths.** A great circle measured 17% long, from the zigzag of interface markers at edge midpoints; half the distance between each marker's two nearest interface neighbours brings it to 9%. The long perimeters of evolved plates (55,000–77,000 km for 14–21% of the sphere) are real roughness.
+- **Collisions did not slow convergence (median ratio about 1).** Two causes. With no continental crust in the slab, nothing buoyant fought the pull. The fix: a plug of continental crust at the top of the slab, at most 150 km long, the depth ultra-high-pressure rocks show continental crust reaching. And continental feed refreshed the record's "still attached" clock, so a slab behind a collision never broke off. Now two clocks: the oceanic part detaches about 10 Myr after ocean stops going down; the plug is exhumed about 10 Myr after continental crust stops. The median slowdown rose to 1.4–1.7×, still short of Earth's 2–4×.
+- **The measurement of collisions.** The first definition of onset (any continent-against-continent contact) caught single promontories between plates barely converging. It now needs 400 km of contact between plates converging at 1 cm/yr or more, counted after the start's transient; a second line asks for contact over half the pair's convergent boundary. Both are reported.
+- **Calibration, first at n = 48.** RMS speed against c_geom (three seeds, 100–500 Myr): 30 → 1.8; 12 → 2.8–3.3; 8 → 3.5–4.5; 6 → 4.3–4.9; 5 → 4.8–6.3. Chosen: 6, below the spec's guessed 10–100, or 18 with the upper-mantle viscosity at the bottom of its range. Lower c_geom fattens the tail: at 5, a large plate exceeds 10 cm/yr half the time.
+- **Cost.** At first 341 ms a step at n = 96 against 121 with the random walk. `placeAt` ran 48 times a step for 8 substeps, because each of about 20 inverted triangles a step was repaired with its own undo and retry; they are now repaired together. The solve's GPE columns allocated a closure per call, and the per-triangle loop an array and three `Math.hypot` calls. Now 211 ms; most of the rest is real: faster plates need 6.5 substeps a step against 2.7.
+- **The lattice core's "RMS speed"** was |ω|R per plate (its fastest point), not an RMS over the crust. Both cores now report the RMS over the crust's area of |ω × r|. The lattice core's random walk gives about 2.5 cm/yr by that measure.
+
+- **The fit was at the wrong resolution, and the resolution mattered.** The n = 96 runs gave 3.4 cm/yr against n = 48's 4.3 at the same c_geom, and lowering c_geom at n = 96 did not speed plates up. A torque budget (each term's torque along each plate's rotation axis) showed interface coupling taking the largest share of the driving torque, 38–49%. Its coefficients were conjectures, and as a linear drag it grew with every gain in speed, absorbing changes in c_geom. The spec's frictional limit (§4.8) was added; coupling then took 22–29%.
+- **Two sources of resolution dependence.**
+  - Slab records pulled only where their marker was a trench marker's nearest frontier: 85% of the pull was applied at n = 48, 75% at n = 96. Records now pull at their nearest trench marker within two rings.
+  - The weld counter counted markers consumed, so at n = 96 plates welded after a quarter of the collided area they needed at n = 48: about 7 plates against 13. It now counts collided area in n = 96 cells. With both fixes, n = 48 and n = 96 agree (2.7–2.9 against 2.9–3.2 cm/yr). The n = 48 "passes" above had leaned on the extra plates.
+
+**Measured** (three seeds, n = 96, 100–600 Myr; L0_MESH_SPEC.md §11.2):
+- RMS speed 2.6–3.2 cm/yr, and c_geom = 3, 4 or 6 all give 2.0–3.2.
+- Forsyth–Uyeda ρ 0.26–0.47.
+- Collisions mostly stop instead of slowing 2–4×.
+- About 6 plates larger than 1% of the sphere.
+- Speeds cycle over 100–200 Myr with spells near zero.
+- Net rotation 0.08–0.09°/Myr.
+- Budget: basal drag 49%, slab resistance 29%, coupling 22%.
+
+The world welds down to a few large plates and starts no new trenches. The failing checks are those that Stage 1's weld and split rules and the missing mantle (Stage 4) control. That is a conjecture; §11.2 proposes two tests of it.
+
 ## Things that turned out not to matter, or were left alone
 
 - **The first L1 fault-trace algorithm** (strict kind matching) mostly needed looser grouping, not a different tracer.

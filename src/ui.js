@@ -263,7 +263,8 @@ const EMPTY_LOG='<li class="empty" style="border:0">No events yet.</li>';
 function build(){
   const wo={n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100};
   if(world&&world.terminate)world.terminate();
-  world=$("core").value==="mesh"?makeMeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
+  const cv=$("core").value;if(cv!=="lattice")wo.kin=cv==="meshwalk"?"walk":"forces";
+  world=cv!=="lattice"?makeMeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
   actions=[];l0LastInspect=l1LastInspect=null;l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;selMask=null;goode=null;runStart=runTarget=0;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();logAction({a:"build",settings:{seed:world.opts.seed,resolution:world.n,initialPlates:world.opts.nPlates,start:world.opts.mode,continentalTarget:world.contTarget}});
 }
 // the marker core runs in a worker where the browser allows it, otherwise here
@@ -291,7 +292,7 @@ let noMeshWorker=false,meshViewHelper=true; // the second: build the view in a h
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
   const t=world.t;$("clock").innerHTML=t>=1000?fmtT(t)+"<small>billion years</small>":fmtT(t)+"<small>million years</small>";
-  $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";$("sDxDt").textContent=`${Math.round(world.cellKm)} km / ${+world.dt.toFixed(2)} Myr`;
+  $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";$("sSpd").textContent=`${(world.rmsSpeed||0).toFixed(1)} cm/yr, ${(world.netRot||0).toFixed(2)}°/Myr`;$("sDxDt").textContent=`${Math.round(world.cellKm)} km / ${+world.dt.toFixed(2)} Myr`;
   $("sMs").textContent=msEma?msEma.toFixed(1)+" ms":"–";
   $("sPar").textContent=`${typeof crossOriginIsolated!=="undefined"&&crossOriginIsolated?"yes":"no"}${typeof SharedArrayBuffer==="undefined"?" (no SharedArrayBuffer)":""}, ${navigator.hardwareConcurrency||"?"}`;
   const ev=world.events,last=world._lastN||0;
@@ -799,7 +800,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const l1Extent=l1Geo&&S?{xKm:[l1Geo.cx-l1PW/2*l1Geo.s,l1Geo.cx+l1PW/2*l1Geo.s],yKm:[l1Geo.cy-l1PH/2*l1Geo.s,l1Geo.cy+l1PH/2*l1Geo.s],kmPerPx:l1Geo.s}:null;
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
-    settings:{core:w.core||"lattice",seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
+    settings:{core:w.core||"lattice",kinematics:w.core==="mesh"?w.opts.kin||"forces":"walk",seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:!(w.core==="mesh"&&(w.opts.kin||"forces")==="forces"),
       stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value},l2:{radiusKm:l2Rad()}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
       L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null,

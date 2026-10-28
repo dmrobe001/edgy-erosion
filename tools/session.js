@@ -17,7 +17,8 @@ function load(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
 function l0Hash(w) { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; }
 // a session saved on the marker core (settings.core "mesh") needs the marker module, loaded on demand
 function newWorld(sess, SIM) { const s = sess.settings, o = { n: s.resolution, seed: s.seed, nPlates: s.initialPlates, mode: s.start, nnr: true, contTarget: s.continentalTarget };
-  if (s.core === "mesh") { const MESH = SIM.MESH || require(path.join(ROOT, "tests", "lib.js")).loadMesh(SIM); return new MESH.MeshWorld(o); }
+  // kinematics: "forces" (Stage 2) or "walk"; sessions saved before Stage 2 have none and ran the random walk
+  if (s.core === "mesh") { o.kin = s.kinematics || "walk"; const MESH = SIM.MESH || require(path.join(ROOT, "tests", "lib.js")).loadMesh(SIM); return new MESH.MeshWorld(o); }
   return new SIM.World(o); }
 
 function reproduce(sess, SIM, L1, log = () => {}, L2 = null) {

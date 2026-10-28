@@ -120,6 +120,7 @@ button:disabled{opacity:.5;cursor:default}
     <div class="clock num" id="clock">0<small>million years</small></div>
     <div class="stats mini">
       <div>Land above sea<b class="num" id="sLand">–</b></div>
+      <div title="Root mean square over the crust's area of plate velocity in the mantle frame (Earth: about 4–5 cm/yr), and the net rotation of the whole lithosphere (Earth: 0.1–0.4°/Myr by different estimates)">Plate speed (RMS), net rotation<b class="num" id="sSpd">–</b></div>
       <div>Cell (dx) / step (dt)<b class="num" id="sDxDt">–</b></div>
       <div>Compute per step<b class="num" id="sMs">–</b></div>
       <div title="Whether this page may share memory between Web Workers (crossOriginIsolated), and the processor cores the browser reports">Shared memory, cores<b class="num" id="sPar">–</b></div>
@@ -166,7 +167,7 @@ button:disabled{opacity:.5;cursor:default}
       <label><span class="field-label">Resolution</span>
         <select id="grid"><option value="64">Coarse, ~160 km cells</option><option value="96" selected>Medium, ~105 km cells</option><option value="128">Fine, ~78 km cells</option></select></label>
       <label><span class="field-label">Core</span>
-        <select id="core"><option value="lattice" selected>Lattice (plates resampled on a grid)</option><option value="mesh">Markers on a mesh (new, Stage 1)</option></select></label>
+        <select id="core"><option value="lattice" selected>Lattice (plates resampled on a grid)</option><option value="mesh">Markers on a mesh, plates driven by forces (Stage 2)</option><option value="meshwalk">Markers on a mesh, random-walk velocities (Stage 1)</option></select></label>
       <button id="reset">Rebuild world</button>
     </div>
   </div>
@@ -267,11 +268,11 @@ button:disabled{opacity:.5;cursor:default}
     <p><span class="tag">Run L2.</span> Evolves the selected basins at 500 m for the run length at present rates: L1’s uplift, L1’s rainfall weighting the water, erodibility from the rock at the surface (sediments weak, cratonic basement strong), and rivers cutting by stream power. Hollows the run’s sediment can fill become flats; the outline is a fixed divide; afterwards the change averaged over each 10 km cell is removed, so L2 alters only what L1 can’t resolve. Views: terrain (rivers draining 5 km² and more in blue), change (incision blue, fill red), drainage area, and stream order (Strahler).</p>
     <p><span class="tag">L1 handoff.</span> Extract handoff freezes the world and packages what L1 needs: a rock column for every cell, a fault network traced from the slip each crust parcel has recorded, the event catalogue and current plate motions.</p>
     <p><span class="tag">Export session.</span> Saves a small JSON log from which the session reruns exactly: seed, settings and step counts; the selected point; the L1 refinement’s cell, saved state, window and settings; check values for the rerun; what each view shows and how it is zoomed and coloured (L0, the L1 map and the L2 tiles); the statistics, the event log and the actions taken. tools/session.js in the repository reruns it.</p>
-    <p><span class="tag">Core.</span> The lattice core stores each plate on its own grid and resamples the plates onto the fixed grid every step. The marker core (new; Stage 1 of the plan in L0_MESH_SPEC.md) carries the crust on markers that move with their plates, on a triangulated mesh, so nothing is resampled; it keeps the lattice core’s rules, starts from the same world, and is about four times slower. It runs in a background worker, so the page stays responsive while it does; the inspector’s column and the handoff take a moment to arrive. Markers draws them: faint dots inside plates, coloured dots on boundaries (ridge, trench or collision, transform; white at triple junctions). L1 refinement still needs the lattice core.</p>
+    <p><span class="tag">Core.</span> The lattice core stores each plate on its own grid and resamples the plates onto the fixed grid every step. The marker core (new; L0_MESH_SPEC.md) carries the crust on markers that move with their plates, on a triangulated mesh, so nothing is resampled; it keeps the lattice core’s surface rules, starts from the same world, and is about four times slower. Its default (Stage 2) drives the plates by forces instead of a random walk: slabs pull where ocean sinks at trenches, older and longer slabs harder; the sinking slab and its bend resist; gravitational potential energy pushes from ridges and high ground; the mantle drags on plate bases, more under continents; a slab that sinks faster than its plate feeds it pulls the overriding plate toward the trench; and the sides of each boundary are coupled, most strongly in collisions. Each step every plate gets the one rotation that balances these torques. There is no spin-up: at the start no slab has formed, so plates creep for the first few tens of millions of years until slabs grow. The Stage 1 option keeps the random walk, for comparison. It runs in a background worker, so the page stays responsive while it does; the inspector’s column and the handoff take a moment to arrive. Markers draws them: faint dots inside plates, coloured dots on boundaries (ridge, trench or collision, transform; white at triple junctions). L1 refinement still needs the lattice core.</p>
     <h3>What’s modeled, and what’s faked</h3>
       <p><span class="tag">Grid.</span> A cube-sphere: six faces of n × n cells projected onto an Earth-sized sphere, with constant-time lookup of the cell under any direction. Cell sizes vary by about ±25% across a face.</p>
-      <p><span class="tag">Plates.</span> Each plate stores its crust in its own body frame and rotates rigidly about an Euler pole, with angular velocity drifting randomly. Each plate’s speed relaxes toward its own preferred value (a free 3D random walk would creep outward until it hit the 8 cm/yr cap). Every step, each fixed cell asks which plates now cover it.</p>
-      <p><span class="tag">Net rotation.</span> Independent random plate motions add up to a shared spin of the whole lithosphere over the mantle, which grows over time, like the flying ice cube in molecular dynamics. Every step computes that shared spin (each cell’s velocity weighted by its area, minus the part along its own position) and subtracts it from every plate. Relative motions, and so all boundaries and faults, are unchanged; only hotspot tracks and continents’ latitudes are affected. Earth’s lithosphere does drift slowly relative to hotspots, roughly 0.1–0.4° per million years by different estimates, so keeping some would not be wrong, just unconstrained; the page always removes it.</p>
+      <p><span class="tag">Plates.</span> On the lattice core (and the marker core’s Stage 1 option), each plate stores its crust in its own body frame and rotates rigidly about an Euler pole, with angular velocity drifting randomly. Each plate’s speed relaxes toward its own preferred value (a free 3D random walk would creep outward until it hit the 8 cm/yr cap). Every step, each fixed cell asks which plates now cover it.</p>
+      <p><span class="tag">Net rotation.</span> Independent random plate motions add up to a shared spin of the whole lithosphere over the mantle, which grows over time, like the flying ice cube in molecular dynamics. Every step computes that shared spin (each cell’s velocity weighted by its area, minus the part along its own position) and subtracts it from every plate. Relative motions, and so all boundaries and faults, are unchanged; only hotspot tracks and continents’ latitudes are affected. Earth’s lithosphere does drift slowly relative to hotspots, roughly 0.1–0.4° per million years by different estimates, so keeping some would not be wrong, just unconstrained; the lattice core always removes it. The marker core driven by forces does not: its frame is the mantle’s, against which basal drag acts, so its net rotation is a result (shown with the plate speed).</p>
       <p><span class="tag">Boundaries.</span> Where two plates overlap, denser crust is consumed: oceanic under continental, older oceanic under younger. Subduction thickens the overriding plate 1–3 cells inland and marks a trench. Continent–continent collision keeps all of the consumed crust: head-on, it underthrusts and thickens the winner a few cells inland; sideways, it piles up at the boundary. Continental slices pushed onto seafloor accrete as continent. Sustained collision welds plates. Uncovered cells get new seafloor of age zero, which is how ridges form.</p>
       <p><span class="tag">Rock columns.</span> Every crust parcel carries a stack of up to eight units, bottom to top, each with a rock type, formation time and thickness. Deposition pushes units: arc volcanics, hotspot or flood basalt, collisional metamorphics, marine shelf sediments, and clastic sediments shed by erosion. Erosion shaves the top and pops units, exposing older rock. Thickening at depth goes into the basement unit. Each unit remembers the plate it formed on. Same-type units from the same plate formed within 150 million years merge, and the two deepest fold together when the stack is full. Eroded sediment is spread over every lower neighbour in proportion to its drop. The Rock type map shows the rock with the most thickness in the top kilometre, not the topmost veneer.</p>
       <p><span class="tag">Faults.</span> At every plate-boundary cell, the relative motion is split into an across-boundary part (convergence or extension) and an along-boundary part. Those slips accumulate in the parcel’s fault record, along with the boundary’s strike, stored in the plate’s own frame so dead faults ride along with the crust. A record keeps the current and previous episode; a new one starts after 10 million years of quiet or of a different style. Continental collisions now thicken crust in proportion to the across-boundary share of motion, so oblique collisions build less relief.</p>
@@ -286,7 +287,7 @@ button:disabled{opacity:.5;cursor:default}
   </section>
 </main>
 <script>
-const BUILD_ID="96793a325461";
+const BUILD_ID="1eed4f2c2972";
 // ===== SIM-START =====
 // A function, so its source can be handed to a Web Worker (the marker core runs in one; see mesh.js)
 function SIMmodule(){
@@ -691,22 +692,17 @@ class World{
       if(centroids){P._c[0]+=p[3*i];P._c[1]+=p[3*i+1];P._c[2]+=p[3*i+2];}}
     for(const P of plates){if(!P.alive)continue;if(P.area>P.maxArea)P.maxArea=P.area;if(centroids&&P.area>0)P.c=norm3(P._c);}
     this.landFrac=land/N;this.contFrac=cont/N;this.oceanAge=on?oa/on:0;this.meanUnits=cont?units/cont:0;
-    if(centroids){this.netRot=Math.hypot(...this.netRotation())*180/Math.PI;let ss=0,sw=0;for(const P of plates)if(P.alive){const w=Math.hypot(...P.W);ss+=P.area*(w*R_KM/10)**2;sw+=P.area;}this.rmsSpeed=Math.sqrt(ss/(sw||1));}
+    // speed: the root mean square over the crust's area of |omega x r| (cm/yr)
+    if(centroids){this.netRot=Math.hypot(...this.netRotation())*180/Math.PI;const A=this.cube.area;let ss=0,sw=0;
+      for(let i=0;i<N;i++){const W=plates[owner[i]].W,d=W[0]*p[3*i]+W[1]*p[3*i+1]+W[2]*p[3*i+2];ss+=A[i]*(W[0]*W[0]+W[1]*W[1]+W[2]*W[2]-d*d);sw+=A[i];}
+      this.rmsSpeed=Math.sqrt(ss/(sw||1))*R_KM/10;}
   }
   hotspotEvents(){for(const h of this.hotspots){const up=this.elev[h.i]>0;
     if(up&&!h.wasUp&&!this.wK[h.i]&&this.t-h.last>15){this.log("island","A volcanic island emerges over a hotspot",h.v);h.last=this.t;}h.wasUp=up;}}
   plateEvents(){
     const {N,dt,rand:r,plates}=this;
     for(const P of plates){if(P.alive&&P.area===0){if(P.maxArea>N*0.01)this.log("lost",`Plate ${P.id} is fully subducted`,P.c);this.kill(P);}}
-    // angular velocities: random walk in direction, speed relaxes toward each plate's preferred speed
-    // (an unconstrained 3D random walk drifts outward in magnitude until it hits the cap)
-    const sig=0.08*10/R_KM*Math.sqrt(dt),relax=Math.min(1,dt/C.SPEED_TAU);
-    for(const P of plates){if(!P.alive)continue;for(let k=0;k<3;k++)P.W[k]+=gauss(r)*sig;
-      let w=Math.hypot(P.W[0],P.W[1],P.W[2]);
-      if(w>1e-12){const f=1+(P.w0/w-1)*relax;for(let k=0;k<3;k++)P.W[k]*=f;w*=f;}
-      if(w>this.wmax)for(let k=0;k<3;k++)P.W[k]*=this.wmax/w;
-      else if(w<this.wmin){const a=randUnit(r);for(let k=0;k<3;k++)P.W[k]=a[k]*this.wmin;}}
-    if(this.opts.nnr!==false)this.removeNetRotation();
+    this.walkVelocities();
     const decay=Math.pow(0.97,dt);let mergeKey=-1;
     for(const [k,v] of this.pairs){const nv=v*decay;if(nv<0.5){this.pairs.delete(k);continue;}this.pairs.set(k,nv);
       if(nv>C.COLL_LOG&&!this.collLogged.has(k)){this.collLogged.add(k);this.log("collide",`Continents on plates ${Math.floor(k/4096)} and ${k%4096} begin to collide; mountains rise`,this.pairLoc.get(k));}
@@ -720,6 +716,16 @@ class World{
         let pick=r()*tot,P=cands[0];for(const p of cands){pick-=Math.pow(p.area,1.5);if(pick<=0){P=p;break;}}this.split(P);}
     }
   }
+  // angular velocities: random walk in direction, speed relaxes toward each plate's preferred speed
+  // (an unconstrained 3D random walk drifts outward in magnitude until it hits the cap)
+  walkVelocities(){const {dt,rand:r,plates}=this;
+    const sig=0.08*10/R_KM*Math.sqrt(dt),relax=Math.min(1,dt/C.SPEED_TAU);
+    for(const P of plates){if(!P.alive)continue;for(let k=0;k<3;k++)P.W[k]+=gauss(r)*sig;
+      let w=Math.hypot(P.W[0],P.W[1],P.W[2]);
+      if(w>1e-12){const f=1+(P.w0/w-1)*relax;for(let k=0;k<3;k++)P.W[k]*=f;w*=f;}
+      if(w>this.wmax)for(let k=0;k<3;k++)P.W[k]*=this.wmax/w;
+      else if(w<this.wmin){const a=randUnit(r);for(let k=0;k<3;k++)P.W[k]=a[k]*this.wmin;}}
+    if(this.opts.nnr!==false)this.removeNetRotation();}
   merge(a,b){
     const purge=()=>{for(const k of [...this.pairs.keys()]){const x=Math.floor(k/4096),y=k%4096;if(x===a.id||y===a.id||x===b.id||y===b.id)this.pairs.delete(k);}};
     if(!a.alive||!b.alive){purge();return;}
@@ -986,7 +992,7 @@ class SphereTri{
     let flips=0;
     while(st.length){const t=st.pop();if(!this.tAlive[t])continue;
       for(let k=0;k<3;k++){const o=3*t,u=tn[o+k];if(u<0)continue;const j=this.edgeTo(u,t),d=tv[3*u+j];
-        if(this.incircle(tv[o],tv[o+1],tv[o+2],d)>IC_EPS){if(this.flip(t,k)){flips++;st.push(t,u);break;}}}}
+        if(this.incircle(tv[o],tv[o+1],tv[o+2],d)>IC_EPS){if(this.flip(t,k)){flips++;st.push(t,u);if(this.touched)this.touched.push(t,u);break;}}}}
     return flips;}
   // insert vertex v (coordinates already set); returns false if it coincides with an existing vertex. A point on an
   // edge splits the edge (two triangles become four), so no zero-area triangle is made.
@@ -1071,21 +1077,78 @@ const TRANSFORM=0,RIDGE=1,CONVERGENT=2,JUNCTION=3; // interface kinds
 const MFIELDS={mId:Uint32Array,mKind:Uint8Array,mPlate:Int16Array,mA:Float64Array,mT:Float32Array,mE:Float32Array,mB:Float32Array,mS:Float32Array,
   mK:Uint8Array,mCol:Int32Array,mBorn:Float32Array,arcAdd:Float64Array,collAdd:Float64Array,mBn:Float32Array,
   iN:Uint8Array,iPlate:Int16Array,iSX:Float64Array,iSY:Float64Array,iSZ:Float64Array,iKind:Uint8Array,iWin:Int8Array,
-  X0:Float64Array,Y0:Float64Array,Z0:Float64Array,dT:Float64Array,stamp:Int32Array};
-const MWIDTH={mBn:3,iPlate:3,iSX:3,iSY:3,iSZ:3};
+  X0:Float64Array,Y0:Float64Array,Z0:Float64Array,dT:Float64Array,stamp:Int32Array,
+  sA:Float64Array,sTh:Float64Array,sOc:Float64Array,sCc:Float64Array,sFed:Float32Array,sFc:Float32Array,mU:Float64Array,iNrm:Float64Array,iLen:Float64Array};
+const MWIDTH={mBn:3,iPlate:3,iSX:3,iSY:3,iSZ:3,iNrm:3};
 function hash2(i,salt){let h=Math.imul(i,0x27d4eb2d)^salt;h=Math.imul(h^(h>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);h^=h>>>16;return[(h&0xffff)/65536-0.5,(h>>>16)/65536-0.5];}
 function rotM(W,ang){const w=Math.hypot(W[0],W[1],W[2]);if(w<=0||ang===0)return[1,0,0,0,1,0,0,0,1];
   const ux=W[0]/w,uy=W[1]/w,uz=W[2]/w,c=Math.cos(ang),s=Math.sin(ang),t=1-c;
   return[c+ux*ux*t,ux*uy*t-uz*s,ux*uz*t+uy*s, uy*ux*t+uz*s,c+uy*uy*t,uy*uz*t-ux*s, uz*ux*t-uy*s,uz*uy*t+ux*s,c+uz*uz*t];}
 
+// ---------- Stage 2 physics (L0_MESH_SPEC.md §4): columns, slabs, and the constants of the force balance ----------
+// SI units throughout this block (m, kg, s, N); times in Myr only where noted. Each constant is labelled as in the spec:
+// [measured] a literature value or mid-range, [derived] follows from others, [rule] a modelling choice, [calibrated] fitted.
+const PH={g:9.8,rhoM:3300,rhoW:1030,rhoOc:2900,rhoCc:2800,    // [measured] mantle, sea water, oceanic and continental crust
+  alpha:3e-5,dTm:1300,kappa:1e-6,hMax:125e3,                   // [measured] expansivity, mantle - surface temperature, diffusivity; plate-model cap on thickness
+  eRidge:-2600,rootH:150e3,                                    // [rule] ridge crest depth (as the elevation rule); continental root thickness
+  drhoEcl:250,lEcl:80e3,lMax:700e3,                            // [measured] eclogite excess density, depth reached before it forms, slab length cap (660 km)
+  lPlug:150e3,                                                 // [rule] longest buoyant plug of continental crust at the top of a slab
+  etaUM:3e20,rBend:200e3,cGeom:6,                              // [measured] upper-mantle viscosity, bending radius; [calibrated, provisionally] slab
+                                                               // shape factor: gave RMS 4-5 cm/yr at n = 48 before welding and slab attachment were
+                                                               // made independent of resolution. At n = 96 the mean speed is set by how few plates
+                                                               // survive welding, not by this (L0_MESH_SPEC.md §11.2)
+  Cb:3e14,kKeel:5,                                             // [measured range, mid] basal drag eta/h (Pa s/m); [conjecture] factor under continents
+  cSuc:0.2,                                                    // [calibrated in the spec's range 0.1-0.3, not fitted] trench suction
+  cRidge:3e20,cTrench:1e21,cColl:1e22,                         // [conjecture: orders of magnitude, not fitted] interface coupling at low slip rates (Pa s)
+  sRidge:3e11,sTrench:2e12,sColl:6e12,                         // [measured orders] its frictional limit (N/m): about 20 MPa over a 15 km fault at ridges and
+                                                               // transforms; 15 MPa over 100-150 km of megathrust; the force Tibet transmits (5-7e12)
+  weldCellKm2:4*Math.PI*R_KM*R_KM/(6*96*96),                   // [rule] the weld counter's unit of collided area: a cell of the n = 96 grid
+  tauDetach:10,                                                // [rule, Myr] a slab no longer fed detaches with this e-folding time (stands in for §4.6 break-off)
+  MYR:3.15576e13};
+// thermal boundary layer thickness at an age in Myr: half-space cooling, capped (plate model)
+function hth(age){return Math.min(PH.hMax,2.32*Math.sqrt(PH.kappa*(age>0?age:0)*PH.MYR));}
+const HALF_ARD=0.5*PH.alpha*PH.rhoM*PH.dTm;                    // mean excess density of the boundary layer, about 64 kg/m3
+// column buoyancy per area relative to the asthenosphere (kg/m2; times g for a pressure), §4.1; continents' thermal
+// term is taken as cancelled by their depleted roots
+function buoy(K,Tkm,age){return K?(PH.rhoM-PH.rhoCc)*Tkm*1e3:(PH.rhoM-PH.rhoOc)*Tkm*1e3-HALF_ARD*hth(age);}
+// Gravitational potential energy of a column (N/m), §4.2: the vertical integral of lithostatic pressure from the surface
+// (sea level where there is water) to a depth below every root, with the column floated isostatically. Layers: water,
+// crust, a lithospheric mantle whose excess density falls linearly to zero at its base, then asthenosphere. The
+// asthenosphere's free level is set so a ridge sits at eRidge; the continental root's excess mass so that 33 km of
+// crust sits at sea level, as the elevation rule has it [derived from that rule]. Differences between columns are forces
+// per length: ridge push at 100 Myr comes out 3.9e12 N/m (Turcotte & Schubert give about 3.9e12). Returned relative to
+// a ridge column.
+const GPE_D=300e3,EA=(PH.eRidge*(PH.rhoM-PH.rhoW)-(PH.rhoM-PH.rhoOc)*7e3)/PH.rhoM,ROOT=(PH.rhoM-PH.rhoCc)*C.CONT_BASE*1e3+PH.rhoM*EA;
+function gpeRaw(K,Tkm,age){const g=PH.g,rm=PH.rhoM,T=Tkm*1e3;let rc,H,lith;
+  if(K){rc=PH.rhoCc;H=PH.rootH;lith=ROOT;}else{rc=PH.rhoOc;H=hth(age);lith=HALF_ARD*H;}
+  const mu=(rm-rc)*T-lith;let e=EA+mu/rm;if(e<0)e=(rm*EA+mu)/(rm-PH.rhoW);
+  // layers top down; for a layer of thickness h whose density goes linearly from a to b, with pressure P on top:
+  // integral of pressure = P h + g (a h^2/2 + (b - a) h^2/6), and the pressure below it = P + g (a + b) h / 2
+  let P=0,I=0,z=e<0?0:-e;
+  if(e<0){const h=-e,a=PH.rhoW;I+=g*a*h*h/2;P+=g*a*h;z+=h;}
+  I+=P*T+g*rc*T*T/2;P+=g*rc*T;z+=T;
+  if(H>0){const a=rm+2*lith/H;I+=P*H+g*(a*H*H/2+(rm-a)*H*H/6);P+=g*(a+rm)/2*H;z+=H;}
+  const h=GPE_D-z;I+=P*h+g*rm*h*h/2;return I;}
+const GPE0=gpeRaw(0,7,0);
+function gpe(K,Tkm,age){return gpeRaw(K,Tkm,age)-GPE0;}
+// symmetric positive-definite solve by Cholesky (n small: three unknowns per plate)
+function cholSolve(A,b,n){for(let j=0;j<n;j++){let d=A[j*n+j];for(let k=0;k<j;k++)d-=A[j*n+k]*A[j*n+k];d=Math.sqrt(Math.max(d,1e-300));A[j*n+j]=d;
+    for(let i=j+1;i<n;i++){let s=A[i*n+j];for(let k=0;k<j;k++)s-=A[i*n+k]*A[j*n+k];A[i*n+j]=s/d;}}
+  const x=Float64Array.from(b);for(let i=0;i<n;i++){let s=x[i];for(let k=0;k<i;k++)s-=A[i*n+k]*x[k];x[i]=s/A[i*n+i];}
+  for(let i=n-1;i>=0;i--){let s=x[i];for(let k=i+1;k<n;k++)s-=A[k*n+i]*x[k];x[i]=s/A[i*n+i];}return x;}
+
 // The lattice core builds the starting state (so both cores start identically); toMarkers() then puts one marker
 // in each fixed cell, jittered within it, and drops the plates' lattices. From then on the markers are the crust.
 class MeshWorld extends World{
-  constructor(o){super(o);this.core="mesh";this.toMarkers();}
+  constructor(o){super(o);this.core="mesh";this.forces=o.kin!=="walk";this.toMarkers();
+    // Stage 2: velocities come from the force balance, so the start's random rotations are dropped; with no slabs yet,
+    // the first motions come from gravitational potential energy alone (no spin-up)
+    if(this.forces){for(const P of this.plates)P.W.fill(0);this.classifyInterfaces();this.solveVelocities();this.updateStats(true);}}
   allocMarkers(cap){this.mcap=cap;for(const k in MFIELDS){const w=MWIDTH[k]||1;this[k]=new MFIELDS[k](cap*w);}this.freeM=[];this.nSlots=0;this.nextId=1;}
   growMarkers(){const cap=Math.ceil(this.mcap*1.5);for(const k in MFIELDS){const w=MWIDTH[k]||1,a=new MFIELDS[k](cap*w);a.set(this[k]);this[k]=a;}this.mcap=cap;this.tri.growV(cap);}
   newMarker(kind){let m;if(this.freeM.length)m=this.freeM.pop();else{if(this.nSlots>=this.mcap)this.growMarkers();m=this.nSlots++;}
-    this.mKind[m]=kind;this.mId[m]=this.nextId++;this.arcAdd[m]=0;this.collAdd[m]=0;this.mBn[3*m]=this.mBn[3*m+1]=this.mBn[3*m+2]=0;this.iN[m]=0;this.mBorn[m]=this.t;return m;}
+    this.mKind[m]=kind;this.mId[m]=this.nextId++;this.arcAdd[m]=0;this.collAdd[m]=0;this.mBn[3*m]=this.mBn[3*m+1]=this.mBn[3*m+2]=0;this.iN[m]=0;this.mBorn[m]=this.t;
+    this.sA[m]=this.sTh[m]=this.sOc[m]=this.sCc[m]=0;this.sFed[m]=this.sFc[m]=-1e9;return m;}
   freeMarker(m){this.tri.remove(m);this.mKind[m]=0;this.freeM.push(m);}
   setPos(m,x,y,z){const l=Math.hypot(x,y,z),T=this.tri;T.X[m]=x/l;T.Y[m]=y/l;T.Z[m]=z/l;}
   toMarkers(){
@@ -1189,7 +1252,9 @@ class MeshWorld extends World{
   frontier(m,p){const o=this.off,adj=this.adj;let best=-1,bd=Infinity;
     for(let e=o[m];e<o[m+1];e++){const v=adj[e];if(this.mKind[v]!==INTERIOR||this.mPlate[v]!==p)continue;const d=this.dist2(v,m);if(d<bd){bd=d;best=v;}}return best;}
   // the lattice core's overlap rule: continental beats oceanic, then thicker continent, then younger ocean
-  wins(a,b){const K=this.mK;if(K[a]!==K[b])return K[a]>K[b];if(K[a])return this.mT[a]>=this.mT[b];return this.mB[a]>=this.mB[b];}
+  // (with forces, L0_MESH_SPEC.md §4.6: between two oceanic columns the more buoyant one overrides, b of §4.1)
+  wins(a,b){const K=this.mK;if(K[a]!==K[b])return K[a]>K[b];if(K[a])return this.mT[a]>=this.mT[b];
+    if(this.forces)return buoy(0,this.mT[a],this.t-this.mB[a])>=buoy(0,this.mT[b],this.t-this.mB[b]);return this.mB[a]>=this.mB[b];}
   // kinds of interface at the start of a step, from the plates' relative velocity across the boundary
   classifyInterfaces(){const T=this.tri,X=T.X,Y=T.Y,Z=T.Z,plates=this.plates,o=this.off,adj=this.adj,pl=this.mPlate,kind=this.mKind,thr=2/R_KM;
     for(let m=0;m<this.nSlots;m++){if(kind[m]!==IFACE)continue;
@@ -1211,6 +1276,7 @@ class MeshWorld extends World{
       for(let e=o[m];e<o[m+1];e++){const v=adj[e];if(kind[v]!==INTERIOR)continue;if(pl[v]===p){cp[0]+=X[v];cp[1]+=Y[v];cp[2]+=Z[v];np++;}else if(pl[v]===q){cq[0]+=X[v];cq[1]+=Y[v];cq[2]+=Z[v];nq++;}}
       if(!np||!nq){this.iKind[m]=TRANSFORM;this.iWin[m]=-1;return;}
       const x=[X[m],Y[m],Z[m]];let n=[cp[0]/np-cq[0]/nq,cp[1]/np-cq[1]/nq,cp[2]/np-cq[2]/nq];const d=n[0]*x[0]+n[1]*x[1]+n[2]*x[2];n=norm3([n[0]-d*x[0],n[1]-d*x[1],n[2]-d*x[2]]);
+      this.iNrm[3*m]=n[0];this.iNrm[3*m+1]=n[1];this.iNrm[3*m+2]=n[2]; // from plate q toward plate p
       const Wp=plates[p].W,Wq=plates[q].W,v=cross([Wp[0]-Wq[0],Wp[1]-Wq[1],Wp[2]-Wq[2]],x),r=v[0]*n[0]+v[1]*n[1]+v[2]*n[2];
       if(r>thr){this.iKind[m]=RIDGE;this.iWin[m]=-1;}
       else if(r<-thr){this.iKind[m]=CONVERGENT;const fp=this.frontier(m,p),fq=this.frontier(m,q);this.iWin[m]=fp<0?1:fq<0?0:(this.wins(fp,fq)?0:1);}
@@ -1224,12 +1290,13 @@ class MeshWorld extends World{
     // every plate's rotation for fraction f of the step, flat (9 numbers a plate)
     const R=this._Rf&&this._Rf.length>=9*np?this._Rf:(this._Rf=new Float64Array(9*np+90));
     for(let p=0;p<np;p++){const P=this.plates[p];if(!P.alive)continue;R.set(rotM(P.W,f*Math.hypot(P.W[0],P.W[1],P.W[2])*this.dt),9*p);}
-    const kind=this.mKind,pl=this.mPlate,X0=this.X0,Y0=this.Y0,Z0=this.Z0,S0=this._S0,iP=this.iPlate,iN=this.iN,ns=this.nSlots;
+    const kind=this.mKind,pl=this.mPlate,X0=this.X0,Y0=this.Y0,Z0=this.Z0,S0=this._S0,iP=this.iPlate,iN=this.iN,ns=this.nSlots,iKind=this.iKind,iWin=this.iWin,iSX=this.iSX,iSY=this.iSY,iSZ=this.iSZ;
+    const alive=this._palive&&this._palive.length>=np?this._palive:(this._palive=new Uint8Array(np+64));for(let p=0;p<np;p++)alive[p]=this.plates[p].alive?1:0;
     for(let m=0;m<ns;m++){const k=kind[m];if(!k)continue;
       if(k===INTERIOR){const o=9*pl[m],x=X0[m],y=Y0[m],z=Z0[m];X[m]=R[o]*x+R[o+1]*y+R[o+2]*z;Y[m]=R[o+3]*x+R[o+4]*y+R[o+5]*z;Z[m]=R[o+6]*x+R[o+7]*y+R[o+8]*z;continue;}
-      const n=iN[m];let sx=0,sy=0,sz=0;const w=this.iKind[m]===CONVERGENT?this.iWin[m]:-1;
-      for(let s=0;s<n;s++){const p=iP[3*m+s];if(!this.plates[p].alive)continue;const o=9*p,q=3*m+s,x=S0[3*q],y=S0[3*q+1],z=S0[3*q+2];
-        const nx=R[o]*x+R[o+1]*y+R[o+2]*z,ny=R[o+3]*x+R[o+4]*y+R[o+5]*z,nz=R[o+6]*x+R[o+7]*y+R[o+8]*z;this.iSX[q]=nx;this.iSY[q]=ny;this.iSZ[q]=nz;
+      const n=iN[m];let sx=0,sy=0,sz=0;const w=iKind[m]===CONVERGENT?iWin[m]:-1;
+      for(let s=0;s<n;s++){const p=iP[3*m+s];if(!alive[p])continue;const o=9*p,q=3*m+s,x=S0[3*q],y=S0[3*q+1],z=S0[3*q+2];
+        const nx=R[o]*x+R[o+1]*y+R[o+2]*z,ny=R[o+3]*x+R[o+4]*y+R[o+5]*z,nz=R[o+6]*x+R[o+7]*y+R[o+8]*z;iSX[q]=nx;iSY[q]=ny;iSZ[q]=nz;
         if(w<0||w===s){sx+=nx;sy+=ny;sz+=nz;}}
       const l=Math.hypot(sx,sy,sz)||1;X[m]=sx/l;Y[m]=sy/l;Z[m]=sz/l;}}
   rebuildMesh(){const T=this.tri,vs=[];for(let m=0;m<this.nSlots;m++)if(this.mKind[m])vs.push(m);T.build(vs);T.broken=false;this.mStats.rebuilds++;
@@ -1248,14 +1315,17 @@ class MeshWorld extends World{
         const v=cross([Wa[0]-Wb[0],Wa[1]-Wb[1],Wa[2]-Wb[2]],x);maxRel=Math.max(maxRel,Math.hypot(v[0],v[1],v[2])*dt);}}
     let nsub=Math.max(1,Math.ceil(maxRel/(0.25*h))),fDone=0,df=1/nsub,depth=0;
     while(fDone<1-1e-12){const f=Math.min(1,fDone+df);const mixed=this.mixedTris();this.placeAt(f);
-      let bad=-1;const tv=T.tv;for(const t of mixed){if(!T.tAlive[t])continue;const o=3*t;if(T.orient(tv[o],tv[o+1],tv[o+2])<=0){bad=t;break;}}
-      if(bad>=0){const fix=this.culprit(bad);this.placeAt(fDone);
-        if(fix){fix();this.mStats.culprits=(this.mStats.culprits||0)+1;continue;}
+      // every triangle turned over by this substep, and the repair for each (found at the trial positions, applied at
+      // the last good ones, all at once)
+      let bad=-1;const tv=T.tv,fixes=[];for(const t of mixed){if(!T.tAlive[t])continue;const o=3*t;if(T.orient(tv[o],tv[o+1],tv[o+2])<=0){if(bad<0)bad=t;const fx=this.culprit(t);if(fx)fixes.push(fx);}}
+      if(bad>=0){this.placeAt(fDone);
+        if(fixes.length){for(const fx of fixes)fx();this.mStats.culprits=(this.mStats.culprits||0)+fixes.length;continue;}
         if(df>1/512){df/=2;depth++;continue;}
         // last resort: rebuild the triangulation at the new positions
         this.placeAt(f);const vs=[];for(let m=0;m<this.nSlots;m++)if(kind[m])vs.push(m);T.build(vs);this.mStats.rebuilds++;}
-      else T.legalize(mixed);
-      this.mStats.substeps++;fDone=f;this.consumeAtTrenches();}
+      // the triangles that may join two plates now: those that did, and those the flips rewrote (every new one)
+      let list=null;if(bad<0){T.touched=[];T.legalize(mixed);list=mixed.concat(T.touched);T.touched=null;}
+      this.mStats.substeps++;fDone=f;this.consumeAtTrenches(list);}
     this._S0=null;this._R=null;
     if(T.broken)this.rebuildMesh();
     for(const t of this.mixedTris())T.tOk[t]=0; // their shapes changed
@@ -1283,12 +1353,12 @@ class MeshWorld extends World{
     return null;}
   // loser markers within half a spacing of a convergent interface marker are consumed; so is any interior marker
   // that comes within a third of a spacing of another plate's interior marker (triple junctions, stray overlaps)
-  consumeAtTrenches(){const T=this.tri,kind=this.mKind,pl=this.mPlate,h=this.h0,lim=(0.3*h)**2,lim2=(0.3*h)**2,victims=[];
+  consumeAtTrenches(list){const T=this.tri,kind=this.mKind,pl=this.mPlate,h=this.h0,lim=(0.3*h)**2,lim2=(0.3*h)**2,victims=[];
     const tris=[],vs=[];
     for(const m of this._conv){if(kind[m]!==IFACE||this.iKind[m]!==CONVERGENT)continue;const w=this.iWin[m],W=this.iPlate[3*m+w];
       T.ring(m,tris,vs);for(const v of vs)if(kind[v]===INTERIOR&&pl[v]!==W&&this.dist2(v,m)<lim)victims.push(v,W,m);}
     const tv=T.tv;
-    for(const t of this.mixedTris()){for(let k=0;k<3;k++){const a=tv[3*t+(k+1)%3],b=tv[3*t+(k+2)%3];
+    for(const t of list||this.mixedTris()){if(!T.tAlive[t])continue;for(let k=0;k<3;k++){const a=tv[3*t+(k+1)%3],b=tv[3*t+(k+2)%3];
       if(a<b&&kind[a]===INTERIOR&&kind[b]===INTERIOR&&pl[a]!==pl[b]&&this.dist2(a,b)<lim2){const aw=this.wins(a,b);victims.push(aw?b:a,aw?pl[a]:pl[b],aw?a:b);}}}
     for(let q=0;q<victims.length;q+=3){const v=victims[q];if(kind[v]!==INTERIOR)continue;this.consume(v,victims[q+1],victims[q+2]);}}
   // consumption of one loser marker by winner plate Wp, near marker `near`: the lattice core's overlap side effects
@@ -1301,12 +1371,15 @@ class MeshWorld extends World{
       this.trench[lk(x-r[0]*h,y-r[1]*h,z-r[2]*h)]=1;
       const age=this.t-this.mB[m],c=lk(x+r[0]*h*C.SLAB_INBOARD,y+r[1]*h*C.SLAB_INBOARD,z+r[2]*h*C.SLAB_INBOARD);
       this.slab[this.slabQ*this.N+c]+=A*Math.min(1,Math.sqrt(Math.max(0,age)/80));
+      if(this.forces)this.feedSlab(at(0),A,this.mT[m],hth(age),0);
     } else {
       const bn=[this.mBn[3*m],this.mBn[3*m+1],this.mBn[3*m+2]],nl=Math.hypot(bn[0],bn[1],bn[2]);
       const f=nl>0.5?Math.abs(r[0]*bn[0]+r[1]*bn[1]+r[2]*bn[2])/nl:1,V=this.mT[m]*A;
       for(let k=0;k<4;k++){const w=f*C.COLLW[k]+(k===0?1-f:0),tm=at(k);if(tm>=0)this.collAdd[tm]+=V*w;else this.led("lostCollisionNoTarget",V*w);}
-      this.led("contCollisionOut",-V);
-      const key=Math.min(Wp,L.id)*4096+Math.max(Wp,L.id);this.pairs.set(key,(this.pairs.get(key)||0)+1);this.pairLoc.set(key,[x,y,z]);}
+      this.led("contCollisionOut",-V);if(this.forces)this.feedSlab(at(0),A,this.mT[m],0,1);
+      // the weld counter counts collided area in cells of the page's default grid (n = 96, where its thresholds were
+      // set), so welding does not depend on resolution
+      const key=Math.min(Wp,L.id)*4096+Math.max(Wp,L.id);this.pairs.set(key,(this.pairs.get(key)||0)+A/PH.weldCellKm2);this.pairLoc.set(key,[x,y,z]);}
     this.freeMarker(m);this.mStats.consumed++;}
   // Gaps: where an interface marker that is not at a convergent boundary has no interior marker of one of its plates
   // within GAP x spacing, a new oceanic marker of that plate is born between them (at a ridge, as the plates open; at
@@ -1335,11 +1408,159 @@ class MeshWorld extends World{
     for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;let c=0;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR)c++;if(!c)continue;
       const sh=dual[m]/c;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR)dual[adj[e]]+=sh;}
     for(let m=0;m<ns;m++)if(kind[m]===INTERIOR&&!this.mK[m])this.mA[m]=dual[m]*R2;}
+  // ---------- forces and the torque balance (Stage 2, L0_MESH_SPEC.md §4, §5.1) ----------
+  // Slab records hang beneath the overriding plate: each consumed marker adds its area, thermal deficit and crust to the
+  // record of the nearest interior marker of the plate that consumed it (that marker rides the overriding plate, as the
+  // trench does). A record is the slab beneath about one marker spacing of trench.
+  // Continental lithosphere's mantle root is taken as neutrally buoyant (§4.1); its crust is recorded in sCc. Two clocks:
+  // sFed, when ocean last went down (or the record was last found behind an active oceanic trench); sFc, when
+  // continental crust last went down.
+  feedSlab(f,Akm2,Tkm,h,cont){if(f<0)return;const A=Akm2*1e6;this.sA[f]+=A;
+    if(cont){this.sCc[f]+=A*Tkm*1e3;this.sFc[f]=this.t;}else{this.sTh[f]+=A*h;this.sOc[f]+=A*Tkm*1e3;this.sFed[f]=this.t;}}
+  // the slab's pull (N), §4.3: the thermal deficit, plus oceanic crust that is eclogite below lEcl and buoyant above it,
+  // minus the buoyancy of continental crust dragged down with an arriving margin. Consumption moves continental crust's
+  // volume into the overriding plate's orogen (the ledger), so the slab is not given that crust to keep: it counts only
+  // the plug a margin forms at the top of the slab before it is scraped off and exhumed, at most lPlug long [rule;
+  // ultra-high-pressure rocks show continental crust reaching 100-200 km, measured]. Length is area over one spacing.
+  slabForce(f){const a=this.sA[f];if(a<=0)return 0;const w=this.h0*R_KM*1e3,L=a/w,fd=L>PH.lEcl?1-PH.lEcl/L:0,plug=Math.min(this.sCc[f],C.CONT_BASE*1e3*PH.lPlug*w);
+    return PH.g*(HALF_ARD*this.sTh[f]+this.sOc[f]*(fd*PH.drhoEcl-(1-fd)*(PH.rhoM-PH.rhoOc))-(PH.rhoM-PH.rhoCc)*plug);}
+  // Slabs longer than lMax pass their deepest part on (scaled, keeping their mean make-up). Break-off [rule standing in
+  // for §4.6]: once no ocean has gone down behind a record (nor has it been found behind an active oceanic trench) for
+  // a step, its oceanic part detaches with e-folding time tauDetach; a buoyant plug of continental crust left behind
+  // is exhumed on the same time scale once no more continental crust goes down. So a collision runs: the margin's
+  // plug builds against the pull, the oceanic slab breaks off, the plug is left pushing back, then it too is gone.
+  slabUpkeep(){const w=this.h0*R_KM*1e3,cap=PH.lMax*w,dec=Math.exp(-this.dt/PH.tauDetach),t=this.t,dt=this.dt,kind=this.mKind;
+    for(let m=0;m<this.nSlots;m++){if(kind[m]!==INTERIOR||this.sA[m]<=0)continue;let f=1,fo=1,fc=1;
+      if(this.sA[m]>cap)f=cap/this.sA[m];
+      if(t-this.sFed[m]>1.5*dt)fo=dec;if(t-this.sFc[m]>1.5*dt)fc=dec;
+      if(f===1&&fo===1&&fc===1)continue;
+      // area goes with its parts: the oceanic share (by crust volume over 7 km) with fo, the rest with fc
+      const aO=Math.min(this.sA[m],this.sOc[m]/(C.OCEAN_T*1e3)),aC=this.sA[m]-aO;
+      this.sA[m]=f*(aO*fo+aC*fc);this.sTh[m]*=f*fo;this.sOc[m]*=f*fo;this.sCc[m]*=f*fc;
+      if(this.sA[m]<1e-3*w*w)this.sA[m]=this.sTh[m]=this.sOc[m]=this.sCc[m]=0;}}
+  // the length of boundary each interface marker stands for: half the distance between its two nearest interface
+  // neighbours (which straightens the zigzag of edge midpoints: a great circle comes out within a few per cent)
+  ifaceLengths(){const off=this.off,adj=this.adj,kind=this.mKind,h=this.h0,Rm=R_KM*1e3;
+    for(let m=0;m<this.nSlots;m++){if(kind[m]!==IFACE)continue;let d1=Infinity,d2=Infinity,v1=-1,v2=-1;
+      for(let e=off[m];e<off[m+1];e++){const v=adj[e];if(kind[v]!==IFACE)continue;const d=this.dist2(v,m);if(d<d1){d2=d1;v2=v1;d1=d;v1=v;}else if(d<d2){d2=d;v2=v;}}
+      let w=v2>=0?Math.sqrt(this.dist2(v1,v2))/2:v1>=0?Math.sqrt(d1):h;w=Math.min(2*h,Math.max(0.2*h,w));this.iLen[m]=w*Rm;}}
+  // One angular velocity per plate from the balance of torques (Stokes flow: no inertia), §5.1. Every force is local
+  // and linear in the velocities except suction, which uses the previous step's velocities:
+  //   basal drag (per marker area, stronger under continents), slab resistance (per trench interface marker, on the
+  //   subducting plate's velocity into the trench), interface coupling (on the relative velocity of the two sides);
+  //   driving: slab pull (at the trench, toward the overriding plate), the gradient of GPE (a body force over every
+  //   triangle), and trench suction on the overriding plate where the slab sinks faster than the plate feeds it.
+  // The system is symmetric positive definite, 3 unknowns a plate; the frame is the mantle's (no net rotation removed).
+  solveVelocities(){const plates=this.plates,np=plates.length,T=this.tri,X=T.X,Y=T.Y,Z=T.Z,kind=this.mKind,pl=this.mPlate,ns=this.nSlots,t=this.t;
+    const R=R_KM*1e3,R2=R*R,MY=PH.MYR,off=this.off,adj=this.adj,U=this.mU;
+    const idx=new Int32Array(np).fill(-1),cnt=new Int32Array(np);for(let m=0;m<ns;m++)if(kind[m]===INTERIOR)cnt[pl[m]]++;
+    let n=0;for(let p=0;p<np;p++)if(plates[p].alive&&cnt[p]>0)idx[p]=n++;const N3=3*n;let K=new Float64Array(N3*N3),b=new Float64Array(N3);
+    if(!n)return;
+    // diagnostics (this.budget): each term's own matrix or torque vector, to say afterwards what balanced what
+    const bud=this.budget?{}:null,term=nm=>{if(!bud)return;if(!bud[nm])bud[nm]=nm[0]==="K"?new Float64Array(N3*N3):new Float64Array(N3);if(nm[0]==="K")K=bud[nm];else b=bud[nm];};
+    const addProj=(i,j,c,x,y,z)=>{const o=3*i*N3+3*j;K[o]+=c*(1-x*x);K[o+1]-=c*x*y;K[o+2]-=c*x*z;K[o+N3]-=c*y*x;K[o+N3+1]+=c*(1-y*y);K[o+N3+2]-=c*y*z;
+      K[o+2*N3]-=c*z*x;K[o+2*N3+1]-=c*z*y;K[o+2*N3+2]+=c*(1-z*z);};
+    const addOuter=(i,c,a)=>{const o=3*i*N3+3*i;for(let r=0;r<3;r++)for(let q=0;q<3;q++)K[o+r*N3+q]+=c*a[r]*a[q];};
+    const addTq=(i,f,x,y,z)=>{b[3*i]+=f*x;b[3*i+1]+=f*y;b[3*i+2]+=f*z;};
+    // basal drag (per plate: sum of c (I - r r^T) over its markers, from the moments of c), and each column's GPE
+    term("Kbasal");const mom=new Float64Array(7*n),cb=PH.Cb*1e6*R2,mK=this.mK,mT=this.mT,mB=this.mB,mA=this.mA;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const K_=mK[m];U[m]=gpe(K_,mT[m],t-mB[m]);const i=idx[pl[m]];if(i<0)continue;
+      const c=cb*(K_?PH.kKeel:1)*mA[m],x=X[m],y=Y[m],z=Z[m],o=7*i;mom[o]+=c;mom[o+1]+=c*x*x;mom[o+2]+=c*y*y;mom[o+3]+=c*z*z;mom[o+4]+=c*x*y;mom[o+5]+=c*x*z;mom[o+6]+=c*y*z;}
+    for(let i=0;i<n;i++){const o=7*i,d=3*i*N3+3*i,c=mom[o];
+      K[d]+=c-mom[o+1];K[d+N3+1]+=c-mom[o+2];K[d+2*N3+2]+=c-mom[o+3];K[d+1]-=mom[o+4];K[d+N3]-=mom[o+4];K[d+2]-=mom[o+5];K[d+2*N3]-=mom[o+5];K[d+N3+2]-=mom[o+6];K[d+2*N3+1]-=mom[o+6];}
+    for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;let s=0,c=0;for(let e=off[m];e<off[m+1];e++){const v=adj[e];if(kind[v]===INTERIOR){s+=U[v];c++;}}U[m]=c?s/c:0;}
+    // GPE: on each triangle the force is -grad U times its area, = -(R/2) sum_k U_k (nhat x opposite edge_k); its torque
+    // goes a third to each corner's plate (an interface corner shares its third among its sides)
+    term("bgpe");const tv=T.tv,G=[0,0,0];let gpeF=0;
+    for(let q=0;q<T.nT;q++){if(!T.tAlive[q])continue;const o=3*q,a=tv[o],bb=tv[o+1],c=tv[o+2];
+      const abx=X[bb]-X[a],aby=Y[bb]-Y[a],abz=Z[bb]-Z[a],acx=X[c]-X[a],acy=Y[c]-Y[a],acz=Z[c]-Z[a];
+      let nx=aby*acz-abz*acy,ny=abz*acx-abx*acz,nz=abx*acy-aby*acx;const nl=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;nx/=nl;ny/=nl;nz/=nl;
+      // e_a = c-b, e_b = a-c, e_c = b-a; sum U_k e_k
+      const ua=U[a],ub=U[bb],uc=U[c];
+      const ex=ua*(X[c]-X[bb])+ub*(X[a]-X[c])+uc*(X[bb]-X[a]),ey=ua*(Y[c]-Y[bb])+ub*(Y[a]-Y[c])+uc*(Y[bb]-Y[a]),ez=ua*(Z[c]-Z[bb])+ub*(Z[a]-Z[c])+uc*(Z[bb]-Z[a]);
+      const fx=-0.5*R*(ny*ez-nz*ey),fy=-0.5*R*(nz*ex-nx*ez),fz=-0.5*R*(nx*ey-ny*ex);gpeF+=Math.sqrt(fx*fx+fy*fy+fz*fz);
+      let cx=X[a]+X[bb]+X[c],cy=Y[a]+Y[bb]+Y[c],cz=Z[a]+Z[bb]+Z[c];const cl=Math.sqrt(cx*cx+cy*cy+cz*cz)||1;cx/=cl;cy/=cl;cz/=cl;
+      G[0]=R*(cy*fz-cz*fy)/3;G[1]=R*(cz*fx-cx*fz)/3;G[2]=R*(cx*fy-cy*fx)/3;
+      if(kind[a]===INTERIOR&&kind[bb]===INTERIOR&&kind[c]===INTERIOR&&pl[a]===pl[bb]&&pl[a]===pl[c]){const i=idx[pl[a]];if(i>=0)addTq(i,3,G[0],G[1],G[2]);continue;}
+      for(let k3=0;k3<3;k3++){const v=tv[o+k3];if(kind[v]===INTERIOR){const i=idx[pl[v]];if(i>=0)addTq(i,1,G[0],G[1],G[2]);}
+        else{const k=this.iN[v];let live=0;for(let s2=0;s2<k;s2++)if(idx[this.iPlate[3*v+s2]]>=0)live++;
+          for(let s2=0;s2<k;s2++){const i=idx[this.iPlate[3*v+s2]];if(i>=0)addTq(i,1/live,G[0],G[1],G[2]);}}}}
+    // interfaces
+    this.ifaceLengths();
+    const trench=[],tq=new Map(),cpl=[]; // cpl: coupling entries (two plates, coefficient, limit, length, position)
+    for(const P of plates){P.perim=0;P.subLen=0;}
+    for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;const k=this.iN[m],w=this.iLen[m],x=X[m],y=Y[m],z=Z[m],conv=this.iKind[m]===CONVERGENT&&k===2;
+      let coll=false,fs=null;
+      if(conv){fs=[this.frontier(m,this.iPlate[3*m]),this.frontier(m,this.iPlate[3*m+1])];coll=fs[0]>=0&&fs[1]>=0&&this.mK[fs[0]]&&this.mK[fs[1]];}
+      const cI=conv?(coll?PH.cColl:PH.cTrench):PH.cRidge,sI=conv?(coll?PH.sColl:PH.sTrench):PH.sRidge;
+      for(let s1=0;s1<k;s1++){const P1=plates[this.iPlate[3*m+s1]];P1.perim+=w/1e3;
+        for(let s2=s1+1;s2<k;s2++){const i=idx[this.iPlate[3*m+s1]],j=idx[this.iPlate[3*m+s2]];if(i<0||j<0)continue;cpl.push(i,j,cI,sI,w,x,y,z);}}
+      if(!conv)continue;
+      const win=this.iWin[m],Lp=this.iPlate[3*m+1-win],Wp=this.iPlate[3*m+win],sg=win===0?1:-1;
+      const nx=sg*this.iNrm[3*m],ny=sg*this.iNrm[3*m+1],nz=sg*this.iNrm[3*m+2];          // from the subducting side toward the overriding side
+      const a=[y*nz-z*ny,z*nx-x*nz,x*ny-y*nx],fL=fs[1-win],fW=fs[win];
+      const hb=fL>=0?(this.mK[fL]?PH.hMax:hth(t-this.mB[fL])):hth(0),Cs=PH.cGeom*PH.etaUM*(1+hb/PH.rBend)**3;
+      term("Kresist");if(idx[Lp]>=0)addOuter(idx[Lp],Cs*w*R2,a);
+      if(fL>=0&&!this.mK[fL])plates[Lp].subLen+=w/1e3;
+      tq.set(m,trench.length);trench.push(m,Lp,Wp,fW,Cs,coll?1:0,nx,ny,nz);}
+    // Each slab record pulls at the nearest trench interface marker of its own (overriding) plate within two rings;
+    // a record behind a trench where ocean goes down is still attached (behind a collision it is left to break off)
+    const Fm=new Float64Array(trench.length/9),seen=this._seenR&&this._seenR.length>=ns?this._seenR:(this._seenR=new Int32Array(ns+1024));let mark=(this._seenN||0);
+    for(let r=0;r<ns;r++){if(kind[r]!==INTERIOR||!(this.sA[r]>0))continue;const P=pl[r];let best=-1,bd=Infinity;mark++;seen[r]=mark;
+      const look=v=>{const q=tq.get(v);if(q===undefined||trench[q+2]!==P)return;const d=this.dist2(v,r);if(d<bd){bd=d;best=q;}};
+      for(let e=off[r];e<off[r+1];e++){const v=adj[e];seen[v]=mark;if(kind[v]===IFACE)look(v);}
+      if(best<0)for(let e=off[r];e<off[r+1];e++){const v=adj[e];for(let f2=off[v];f2<off[v+1];f2++){const u=adj[f2];if(seen[u]===mark)continue;seen[u]=mark;if(kind[u]===IFACE)look(u);}}
+      if(best<0)continue;Fm[best/9]+=this.slabForce(r);if(!trench[best+5])this.sFed[r]=t;}
+    this._seenN=mark;
+    // slab pull on the subducting plate, suction on the overriding plate (from last step's velocity into the trench)
+    let pullF=0,sucF=0;
+    for(let q=0;q<trench.length;q+=9){const m=trench[q],Lp=trench[q+1],Wp=trench[q+2],Cs=trench[q+4],F=Fm[q/9];
+      if(F===0)continue;const x=X[m],y=Y[m],z=Z[m],nx=trench[q+6],ny=trench[q+7],nz=trench[q+8];
+      const ax=y*nz-z*ny,ay=z*nx-x*nz,az=x*ny-y*nx;pullF+=F;
+      term("bpull");if(idx[Lp]>=0)addTq(idx[Lp],R*F,ax,ay,az);term("bsuction");
+      const WL=plates[Lp].W,vn=R*(WL[0]*ax+WL[1]*ay+WL[2]*az)/MY,ex=F-Cs*this.iLen[m]*vn;
+      if(ex>0&&idx[Wp]>=0){const Fs=PH.cSuc*ex;sucF+=Fs;addTq(idx[Wp],-R*Fs,ax,ay,az);}}
+    if(bud){K=new Float64Array(N3*N3);b=new Float64Array(N3);for(const nm in bud){const src=bud[nm];if(nm[0]==="K")for(let i=0;i<N3*N3;i++)K[i]+=src[i];else for(let i=0;i<N3;i++)b[i]+=src[i];}}
+    // Interface coupling with a frictional limit (§4.8): traction c dv up to S, i.e. a secant coefficient
+    // min(c, S/|dv|), found by Picard iteration from the previous step's velocities (as L1 does for its power law)
+    const Kb=K,nc=cpl.length/8,ce=new Float64Array(nc),wv=p=>plates[p].W;
+    const slip=(oi,oj,q)=>{const x=cpl[q+5],y=cpl[q+6],z=cpl[q+7],dx=oi[0]-oj[0],dy=oi[1]-oj[1],dz=oi[2]-oj[2],d=dx*x+dy*y+dz*z;return R*Math.sqrt(Math.max(0,dx*dx+dy*dy+dz*dz-d*d));};
+    const pid=new Int32Array(n);for(let p=0;p<np;p++)if(idx[p]>=0)pid[idx[p]]=p;
+    for(let c=0;c<nc;c++){const q=8*c,dv=slip(wv(pid[cpl[q]]).map(v=>v/MY),wv(pid[cpl[q+1]]).map(v=>v/MY),q);ce[c]=Math.min(cpl[q+2],dv>0?cpl[q+3]/dv:Infinity);}
+    const addCoupling=(Kt,scale)=>{K=Kt;for(let c=0;c<nc;c++){const q=8*c,i=cpl[q],j=cpl[q+1],v=ce[c]*cpl[q+4]*R2*scale,x=cpl[q+5],y=cpl[q+6],z=cpl[q+7];
+      addProj(i,i,v,x,y,z);addProj(j,j,v,x,y,z);addProj(i,j,-v,x,y,z);addProj(j,i,-v,x,y,z);}};
+    let om=null,K0=null,iters=0;
+    for(let it=0;it<8;it++){iters++;const Kt=Kb.slice();addCoupling(Kt,1);
+      let dmax=0;for(let i=0;i<N3;i++)dmax=Math.max(dmax,Kt[i*N3+i]);for(let i=0;i<N3;i++)Kt[i*N3+i]+=1e-12*dmax;
+      K0=this.checkSolve?Kt.slice():null;om=cholSolve(Kt,b,N3);
+      let change=0;for(let c=0;c<nc;c++){const q=8*c,dv=slip(om.subarray(3*cpl[q],3*cpl[q]+3),om.subarray(3*cpl[q+1],3*cpl[q+1]+3),q),v=Math.min(cpl[q+2],dv>0?cpl[q+3]/dv:Infinity);
+        change=Math.max(change,Math.abs(v-ce[c])/ce[c]);ce[c]=v;}
+      if(change<0.02)break;}
+    this.couplingIters=iters;
+    if(bud){bud.Kcouple=new Float64Array(N3*N3);addCoupling(bud.Kcouple,1);}
+    // invariant I7 (tests): the torques balance, |K omega - b| / |b|
+    if(K0){let r2=0,b2=0;for(let i=0;i<N3;i++){let s=-b[i];for(let j=0;j<N3;j++)s+=K0[i*N3+j]*om[j];r2+=s*s;b2+=b[i]*b[i];}this.solveResidual=b2>0?Math.sqrt(r2/b2):0;}
+    for(let p=0;p<np;p++){const i=idx[p];if(i<0)continue;const W=plates[p].W;W[0]=om[3*i]*MY;W[1]=om[3*i+1]*MY;W[2]=om[3*i+2]*MY;}
+    // diagnostics: per converging plate pair, boundary length (km), mean convergence rate (cm/yr, length-weighted) and
+    // the length where both sides are continental (a collision); and the forces in play (N)
+    const pairs=new Map();
+    for(let q=0;q<trench.length;q+=9){const m=trench[q],Lp=trench[q+1],Wp=trench[q+2],x=X[m],y=Y[m],z=Z[m],nx=trench[q+6],ny=trench[q+7],nz=trench[q+8];
+      const a=plates[Lp].W,c=plates[Wp].W,dx=a[0]-c[0],dy=a[1]-c[1],dz=a[2]-c[2],v=((dy*z-dz*y)*nx+(dz*x-dx*z)*ny+(dx*y-dy*x)*nz)*R_KM/10;
+      const key=Math.min(Lp,Wp)*4096+Math.max(Lp,Wp),e=pairs.get(key)||[0,0,0],l=this.iLen[m]/1e3;e[0]+=l;e[1]+=v*l;if(trench[q+5])e[2]+=l;pairs.set(key,e);}
+    for(const e of pairs.values())e[1]/=e[0];
+    this.fstat={pairs,pullN:pullF,suctionN:sucF,gpeN:gpeF};
+    // the budget: per plate, each term's torque along the plate's own rotation axis (N m; driving > 0, resisting < 0)
+    if(bud){const out={};for(const nm in bud){const v=new Float64Array(n),src=bud[nm];
+        for(let i=0;i<n;i++){const wl=Math.hypot(om[3*i],om[3*i+1],om[3*i+2])||1;let s2=0;
+          for(let r=0;r<3;r++){let tq;if(nm[0]==="K"){tq=0;for(let j=0;j<N3;j++)tq-=src[(3*i+r)*N3+j]*om[j];}else tq=src[3*i+r];s2+=tq*om[3*i+r]/wl;}v[i]=s2;}
+        out[nm.slice(1)]=v;}
+      out.plate=[];for(let p=0;p<np;p++)if(idx[p]>=0)out.plate[idx[p]]=p;this.fstat.budget=out;}}
+  walkVelocities(){if(!this.forces)super.walkVelocities();}
   // ---------- one step ----------
   step(){const dt=this.dt,kind=this.mKind;
     {const b=Math.floor(this.t/C.SLAB_DT),q=((b%C.SLAB_BINS)+C.SLAB_BINS)%C.SLAB_BINS;if(this.slabT[q]!==b*C.SLAB_DT){this.slabT[q]=b*C.SLAB_DT;this.slab.fill(0,q*this.N,(q+1)*this.N);}this.slabQ=q;}
     for(let i=0;i<this.N;i++)this.trench[i]*=0.85;
-    this.classifyInterfaces();this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
+    this.classifyInterfaces();if(this.forces){this.slabUpkeep();this.solveVelocities();}this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
     this.surfaceProcesses();this.recordFaults();
     this.t+=dt;this.steps++;
     this.computeMarkerElev();if(this.deferView)this.viewStale=true;else this.computeView();
@@ -1452,14 +1673,16 @@ class MeshWorld extends World{
   // ---------- statistics, plates, events ----------
   updateStats(centroids){if(!this.mKind)return super.updateStats(centroids);
     const {plates,pool,t}=this,X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,ca=this.cellA;
-    for(const P of plates){P.area=0;P.contArea=0;P._c=[0,0,0];P.nM=0;}
+    for(const P of plates){P.area=0;P.contArea=0;P._c=[0,0,0];P.nM=0;P._v2=0;}
     let land=0,cont=0,tot=0,oa=0,on=0,units=0,nc=0;
     for(let m=0;m<this.nSlots;m++){if(this.mKind[m]!==INTERIOR)continue;const P=plates[this.mPlate[m]],a=this.mA[m];P.area+=a/ca;P.nM++;tot+=a;
       if(this.mK[m]){P.contArea+=a/ca;cont+=a;units+=pool.cnt[this.mCol[m]];nc++;}else{oa+=(t-this.mB[m])*a;on+=a;}if(this.mE[m]>0)land+=a;
-      if(centroids){P._c[0]+=X[m]*a;P._c[1]+=Y[m]*a;P._c[2]+=Z[m]*a;}}
+      if(centroids){P._c[0]+=X[m]*a;P._c[1]+=Y[m]*a;P._c[2]+=Z[m]*a;const W=P.W,d=W[0]*X[m]+W[1]*Y[m]+W[2]*Z[m];P._v2+=a*(W[0]*W[0]+W[1]*W[1]+W[2]*W[2]-d*d);}}
     for(const P of plates){if(!P.alive)continue;if(P.area>P.maxArea)P.maxArea=P.area;if(centroids&&P.area>0)P.c=norm3(P._c);if(P.nM===0)P.area=0;}
     this.landFrac=land/tot;this.contFrac=cont/tot;this.oceanAge=on?oa/on:0;this.meanUnits=nc?units/nc:0;this.markerArea=tot;
-    if(centroids){this.netRot=Math.hypot(...this.netRotation())*180/Math.PI;let ss=0,sw=0;for(const P of plates)if(P.alive){const w=Math.hypot(...P.W);ss+=P.area*(w*R_KM/10)**2;sw+=P.area;}this.rmsSpeed=Math.sqrt(ss/(sw||1));}}
+    // speeds: the root mean square over the crust's area of |omega x r| (cm/yr), per plate and overall
+    if(centroids){this.netRot=Math.hypot(...this.netRotation())*180/Math.PI;let ss=0;
+      for(const P of plates)if(P.alive){ss+=P._v2;P.vrms=P.area>0?Math.sqrt(P._v2/(P.area*ca))*R_KM/10:0;}this.rmsSpeed=Math.sqrt(ss/(tot||1))*R_KM/10;}}
   // net rotation over the markers' carried areas (the lattice core integrates over fixed cells)
   netRotation(){if(!this.mKind)return super.netRotation();const X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,M=this.cube.Minv,s=1/(R_KM*R_KM);let sx=0,sy=0,sz=0;
     for(let m=0;m<this.nSlots;m++){if(this.mKind[m]!==INTERIOR)continue;const W=this.plates[this.mPlate[m]].W,x=X[m],y=Y[m],z=Z[m],d=W[0]*x+W[1]*y+W[2]*z,a=this.mA[m]*s;
@@ -1567,7 +1790,7 @@ function viewHelperMain(){
     self.postMessage(out,tr);};
 }
 
-return {SphereTri,MeshWorld,workerMain,viewHelperMain};
+return {SphereTri,MeshWorld,workerMain,viewHelperMain,PH,gpe,hth,buoy};
 }
 const MESH=MESHmodule(SIM);
 // ===== MESH-END =====
@@ -3112,7 +3335,8 @@ const EMPTY_LOG='<li class="empty" style="border:0">No events yet.</li>';
 function build(){
   const wo={n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100};
   if(world&&world.terminate)world.terminate();
-  world=$("core").value==="mesh"?makeMeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
+  const cv=$("core").value;if(cv!=="lattice")wo.kin=cv==="meshwalk"?"walk":"forces";
+  world=cv!=="lattice"?makeMeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
   actions=[];l0LastInspect=l1LastInspect=null;l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;selMask=null;goode=null;runStart=runTarget=0;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();logAction({a:"build",settings:{seed:world.opts.seed,resolution:world.n,initialPlates:world.opts.nPlates,start:world.opts.mode,continentalTarget:world.contTarget}});
 }
 // the marker core runs in a worker where the browser allows it, otherwise here
@@ -3140,7 +3364,7 @@ let noMeshWorker=false,meshViewHelper=true; // the second: build the view in a h
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
   const t=world.t;$("clock").innerHTML=t>=1000?fmtT(t)+"<small>billion years</small>":fmtT(t)+"<small>million years</small>";
-  $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";$("sDxDt").textContent=`${Math.round(world.cellKm)} km / ${+world.dt.toFixed(2)} Myr`;
+  $("sLand").textContent=(world.landFrac*100).toFixed(1)+"%";$("sSpd").textContent=`${(world.rmsSpeed||0).toFixed(1)} cm/yr, ${(world.netRot||0).toFixed(2)}°/Myr`;$("sDxDt").textContent=`${Math.round(world.cellKm)} km / ${+world.dt.toFixed(2)} Myr`;
   $("sMs").textContent=msEma?msEma.toFixed(1)+" ms":"–";
   $("sPar").textContent=`${typeof crossOriginIsolated!=="undefined"&&crossOriginIsolated?"yes":"no"}${typeof SharedArrayBuffer==="undefined"?" (no SharedArrayBuffer)":""}, ${navigator.hardwareConcurrency||"?"}`;
   const ev=world.events,last=world._lastN||0;
@@ -3648,7 +3872,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const l1Extent=l1Geo&&S?{xKm:[l1Geo.cx-l1PW/2*l1Geo.s,l1Geo.cx+l1PW/2*l1Geo.s],yKm:[l1Geo.cy-l1PH/2*l1Geo.s,l1Geo.cy+l1PH/2*l1Geo.s],kmPerPx:l1Geo.s}:null;
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
-    settings:{core:w.core||"lattice",seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
+    settings:{core:w.core||"lattice",kinematics:w.core==="mesh"?w.opts.kin||"forces":"walk",seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:!(w.core==="mesh"&&(w.opts.kin||"forces")==="forces"),
       stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value},l2:{radiusKm:l2Rad()}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
       L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null,

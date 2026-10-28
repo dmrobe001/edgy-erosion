@@ -402,22 +402,17 @@ class World{
       if(centroids){P._c[0]+=p[3*i];P._c[1]+=p[3*i+1];P._c[2]+=p[3*i+2];}}
     for(const P of plates){if(!P.alive)continue;if(P.area>P.maxArea)P.maxArea=P.area;if(centroids&&P.area>0)P.c=norm3(P._c);}
     this.landFrac=land/N;this.contFrac=cont/N;this.oceanAge=on?oa/on:0;this.meanUnits=cont?units/cont:0;
-    if(centroids){this.netRot=Math.hypot(...this.netRotation())*180/Math.PI;let ss=0,sw=0;for(const P of plates)if(P.alive){const w=Math.hypot(...P.W);ss+=P.area*(w*R_KM/10)**2;sw+=P.area;}this.rmsSpeed=Math.sqrt(ss/(sw||1));}
+    // speed: the root mean square over the crust's area of |omega x r| (cm/yr)
+    if(centroids){this.netRot=Math.hypot(...this.netRotation())*180/Math.PI;const A=this.cube.area;let ss=0,sw=0;
+      for(let i=0;i<N;i++){const W=plates[owner[i]].W,d=W[0]*p[3*i]+W[1]*p[3*i+1]+W[2]*p[3*i+2];ss+=A[i]*(W[0]*W[0]+W[1]*W[1]+W[2]*W[2]-d*d);sw+=A[i];}
+      this.rmsSpeed=Math.sqrt(ss/(sw||1))*R_KM/10;}
   }
   hotspotEvents(){for(const h of this.hotspots){const up=this.elev[h.i]>0;
     if(up&&!h.wasUp&&!this.wK[h.i]&&this.t-h.last>15){this.log("island","A volcanic island emerges over a hotspot",h.v);h.last=this.t;}h.wasUp=up;}}
   plateEvents(){
     const {N,dt,rand:r,plates}=this;
     for(const P of plates){if(P.alive&&P.area===0){if(P.maxArea>N*0.01)this.log("lost",`Plate ${P.id} is fully subducted`,P.c);this.kill(P);}}
-    // angular velocities: random walk in direction, speed relaxes toward each plate's preferred speed
-    // (an unconstrained 3D random walk drifts outward in magnitude until it hits the cap)
-    const sig=0.08*10/R_KM*Math.sqrt(dt),relax=Math.min(1,dt/C.SPEED_TAU);
-    for(const P of plates){if(!P.alive)continue;for(let k=0;k<3;k++)P.W[k]+=gauss(r)*sig;
-      let w=Math.hypot(P.W[0],P.W[1],P.W[2]);
-      if(w>1e-12){const f=1+(P.w0/w-1)*relax;for(let k=0;k<3;k++)P.W[k]*=f;w*=f;}
-      if(w>this.wmax)for(let k=0;k<3;k++)P.W[k]*=this.wmax/w;
-      else if(w<this.wmin){const a=randUnit(r);for(let k=0;k<3;k++)P.W[k]=a[k]*this.wmin;}}
-    if(this.opts.nnr!==false)this.removeNetRotation();
+    this.walkVelocities();
     const decay=Math.pow(0.97,dt);let mergeKey=-1;
     for(const [k,v] of this.pairs){const nv=v*decay;if(nv<0.5){this.pairs.delete(k);continue;}this.pairs.set(k,nv);
       if(nv>C.COLL_LOG&&!this.collLogged.has(k)){this.collLogged.add(k);this.log("collide",`Continents on plates ${Math.floor(k/4096)} and ${k%4096} begin to collide; mountains rise`,this.pairLoc.get(k));}
@@ -431,6 +426,16 @@ class World{
         let pick=r()*tot,P=cands[0];for(const p of cands){pick-=Math.pow(p.area,1.5);if(pick<=0){P=p;break;}}this.split(P);}
     }
   }
+  // angular velocities: random walk in direction, speed relaxes toward each plate's preferred speed
+  // (an unconstrained 3D random walk drifts outward in magnitude until it hits the cap)
+  walkVelocities(){const {dt,rand:r,plates}=this;
+    const sig=0.08*10/R_KM*Math.sqrt(dt),relax=Math.min(1,dt/C.SPEED_TAU);
+    for(const P of plates){if(!P.alive)continue;for(let k=0;k<3;k++)P.W[k]+=gauss(r)*sig;
+      let w=Math.hypot(P.W[0],P.W[1],P.W[2]);
+      if(w>1e-12){const f=1+(P.w0/w-1)*relax;for(let k=0;k<3;k++)P.W[k]*=f;w*=f;}
+      if(w>this.wmax)for(let k=0;k<3;k++)P.W[k]*=this.wmax/w;
+      else if(w<this.wmin){const a=randUnit(r);for(let k=0;k<3;k++)P.W[k]=a[k]*this.wmin;}}
+    if(this.opts.nnr!==false)this.removeNetRotation();}
   merge(a,b){
     const purge=()=>{for(const k of [...this.pairs.keys()]){const x=Math.floor(k/4096),y=k%4096;if(x===a.id||y===a.id||x===b.id||y===b.id)this.pairs.delete(k);}};
     if(!a.alive||!b.alive){purge();return;}
