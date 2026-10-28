@@ -146,8 +146,8 @@ const MFIELDS={mId:Uint32Array,mKind:Uint8Array,mPlate:Int16Array,mA:Float64Arra
   mK:Uint8Array,mCol:Int32Array,mBorn:Float32Array,arcAdd:Float64Array,collAdd:Float64Array,mBn:Float32Array,
   iN:Uint8Array,iPlate:Int16Array,iSX:Float64Array,iSY:Float64Array,iSZ:Float64Array,iKind:Uint8Array,iWin:Int8Array,
   X0:Float64Array,Y0:Float64Array,Z0:Float64Array,dT:Float64Array,stamp:Int32Array,
-  sA:Float64Array,sTh:Float64Array,sOc:Float64Array,sCc:Float64Array,sFed:Float32Array,sFc:Float32Array,sSub:Int16Array,mU:Float64Array,iNrm:Float64Array,iLen:Float64Array};
-const MWIDTH={mBn:3,iPlate:3,iSX:3,iSY:3,iSZ:3,iNrm:3};
+  sA:Float64Array,sTh:Float64Array,sOc:Float64Array,sCc:Float64Array,sFed:Float32Array,sFc:Float32Array,sSub:Int16Array,mD:Float32Array,mXi:Float32Array,mSig:Float32Array,mSR:Float32Array,cHint:Int32Array,mU:Float64Array,iNrm:Float64Array,iLen:Float64Array};
+const MWIDTH={mBn:3,iPlate:3,iSX:3,iSY:3,iSZ:3,iNrm:3,mSig:6};
 function hash2(i,salt){let h=Math.imul(i,0x27d4eb2d)^salt;h=Math.imul(h^(h>>>16),0x7feb352d);h=Math.imul(h^(h>>>15),0x846ca68b);h^=h>>>16;return[(h&0xffff)/65536-0.5,(h>>>16)/65536-0.5];}
 function rotM(W,ang){const w=Math.hypot(W[0],W[1],W[2]);if(w<=0||ang===0)return[1,0,0,0,1,0,0,0,1];
   const ux=W[0]/w,uy=W[1]/w,uz=W[2]/w,c=Math.cos(ang),s=Math.sin(ang),t=1-c;
@@ -174,6 +174,16 @@ const PH={g:9.8,rhoM:3300,rhoW:1030,rhoOc:2900,rhoCc:2800,    // [measured] mant
   weldStall:1,vStall:1,tauWeld:10,                            // [rule] weld once a collision stops (1; 0 = Stage 1's counter alone): a pair whose collision
                                                                // counter has crossed MERGE welds after converging at under vStall cm/yr for tauWeld Myr
   minPlateCells:10,                                            // [rule] plates smaller than this many n = 96 cells join their longest-bordering neighbour
+  crackOn:1,stressEvery:5,stressNodes:8000,minCrackCells:60,                    // [rule] cracks from stress (1; replaces timed splits); stress solve every few Myr, on a grid
+                                                               // of this many nodes (about 250 km apart)
+  sOcean:1.5e13,sCont:6e12,strScale:6,strNoise:0.3,stressIters:1500,stressTol:1e-3,            // tensile strength, depth-integrated (N/m) [measured orders]: old ocean (at 100 Myr; rises with
+                                                               // the square root of age), continental crust at 33 km (weaker where thicker, twice in cratons);
+                                                               // [calibrated] overall scale, fitted at n = 96 to a rift rate of 15-60 per Gyr: 6 times these
+                                                               // literature values (L0_MESH_SPEC.md §11.4); [conjecture] lognormal spread per marker
+  residual:0.25,shearMul:3,                                    // [conjecture] strength left in fully damaged rock; [measured order] lithosphere's strength in
+                                                               // compression and shear relative to tension (brittle: several times)
+  tauDamage:10,tauHeal:300,dCrack:1,dCrackSide:0.7,dSuture:0.8,dOrogen:0.5, // damage (§7.1): growth time under overstress, healing time (Myr) [conjecture]; damage set on
+                                                               // a crack path and beside it, along a new suture, and in old orogenic belts at the start [rule]
   initOn:0,ageInit:80,rateInit:3.3e-3,lSeed:150,               // [conjecture] subduction starting at old passive margins (off by default, §11.3): ocean at least ageInit Myr
                                                                // old beside its plate's continent; rate per Myr per 1000 km of such margin; seed slab (km)
   mantleRms:2,tauM:100,                                        // mantle flow (§6.1): [calibrated in the spec's range 1-3, mid, not fitted] RMS cm/yr;
@@ -256,6 +266,33 @@ function mantleField(f,x,y,z,px,py,pz,o,v){for(let e=1;e<=4;e++){px[e]=px[e-1]*x
   polyGrad(f.t,px,py,pz,o);const l=f.l,gx=o[1]-l*o[0]*x,gy=o[2]-l*o[0]*y,gz=o[3]-l*o[0]*z;
   if(f.tor){v[0]=y*gz-z*gy;v[1]=z*gx-x*gz;v[2]=x*gy-y*gx;}else{v[0]=gx;v[1]=gy;v[2]=gz;}}
 
+// ---------- stress grid (L0_MESH_SPEC.md §7, Stage 5) ----------
+// A fixed triangulated grid of Fibonacci points, built once per size, on which each plate's stress is recovered: the
+// plate as a thin elastic sheet, loaded by the forces of the balance (which have zero net torque, the condition for
+// equilibrium of a spherical shell's tangential loads). With uniform stiffness the stress resultants (N/m) do not
+// depend on the stiffness, so none is chosen.
+const STRESS_GRID=new Map();
+function stressGrid(n){let G=STRESS_GRID.get(n);if(G)return G;const T=new SphereTri(n+16,2*n+64),vs=[];
+  for(let q=0;q<n;q++){const z=1-2*(q+0.5)/n,r=Math.sqrt(1-z*z),ph=q*2.399963229728653;T.X[q]=r*Math.cos(ph);T.Y[q]=r*Math.sin(ph);T.Z[q]=z;vs.push(q);}
+  T.build(vs);const tris=[];for(let t=0;t<T.nT;t++)if(T.tAlive[t])tris.push(T.tv[3*t],T.tv[3*t+1],T.tv[3*t+2]);
+  // node rings, for finding a node of a given plate near a point
+  const ring=Array.from({length:n},()=>new Set());for(let q=0;q<tris.length;q+=3){const a=tris[q],b=tris[q+1],c=tris[q+2];ring[a].add(b).add(c);ring[b].add(a).add(c);ring[c].add(a).add(b);}
+  G={n,T,X:T.X,Y:T.Y,Z:T.Z,tris:Int32Array.from(tris),ring:ring.map(r=>Int32Array.from(r))};STRESS_GRID.set(n,G);return G;}
+// a fixed pseudo-random number per marker id (standard normal), so a marker's strength noise travels with it
+function idNormal(id,salt){const [a,b]=hash2(id,salt);const u=a+0.5+1e-9,v=b+0.5;return Math.sqrt(-2*Math.log(u))*Math.cos(2*Math.PI*v);}
+// principal values of a tangent stress tensor S (6: xx yy zz xy xz yz) at unit position r, with the direction of the
+// smaller one (along which a tension crack runs): returns [s1, s2, tx, ty, tz]
+function principal(S,o,x,y,z,out){let e1x=-y,e1y=x,e1z=0;let l=Math.hypot(e1x,e1y);if(l<1e-6){e1x=1;e1y=0;e1z=0;l=1;}e1x/=l;e1y/=l;
+  const e2x=y*e1z-z*e1y,e2y=z*e1x-x*e1z,e2z=x*e1y-y*e1x;
+  const q=(ax,ay,az,bx,by,bz)=>ax*(S[o]*bx+S[o+3]*by+S[o+4]*bz)+ay*(S[o+3]*bx+S[o+1]*by+S[o+5]*bz)+az*(S[o+4]*bx+S[o+5]*by+S[o+2]*bz);
+  const a=q(e1x,e1y,e1z,e1x,e1y,e1z),b=q(e1x,e1y,e1z,e2x,e2y,e2z),c=q(e2x,e2y,e2z,e2x,e2y,e2z),m=(a+c)/2,d=Math.sqrt(((a-c)/2)**2+b*b);
+  out[0]=m+d;out[1]=m-d;const th=0.5*Math.atan2(2*b,a-c)+Math.PI/2,ct=Math.cos(th),st=Math.sin(th); // direction of s2
+  out[2]=ct*e1x+st*e2x;out[3]=ct*e1y+st*e2y;out[4]=ct*e1z+st*e2z;return out;}
+class MinHeap{constructor(){this.k=[];this.v=[];}push(key,val){const k=this.k,v=this.v;let i=k.length;k.push(key);v.push(val);
+    while(i>0){const p=(i-1)>>1;if(k[p]<=key)break;k[i]=k[p];v[i]=v[p];i=p;}k[i]=key;v[i]=val;}
+  pop(){const k=this.k,v=this.v,top=v[0],lk=k.pop(),lv=v.pop(),n=k.length;if(n){let i=0;for(;;){let c=2*i+1;if(c>=n)break;if(c+1<n&&k[c+1]<k[c])c++;if(k[c]>=lk)break;k[i]=k[c];v[i]=v[c];i=c;}k[i]=lk;v[i]=lv;}return top;}
+  get size(){return this.k.length;}}
+
 // The lattice core builds the starting state (so both cores start identically); toMarkers() then puts one marker
 // in each fixed cell, jittered within it, and drops the plates' lattices. From then on the markers are the crust.
 class MeshWorld extends World{
@@ -263,6 +300,7 @@ class MeshWorld extends World{
     // Stage 2: velocities come from the force balance, so the start's random rotations are dropped; with no slabs yet,
     // the first motions come from gravitational potential energy alone (no spin-up)
     if(this.forces){for(const P of this.plates)P.W.fill(0);
+      if(PH.crackOn)this.timedSplits=false; // plates split where they crack
       this.mantle=o.mantle!==false;if(this.mantle)this.initMantle(String(o.seed));this.initOn=o.initiation!==undefined?!!o.initiation:!!PH.initOn;
       this.classifyInterfaces();this.solveVelocities();this.updateStats(true);}}
   // ---------- mantle flow ----------
@@ -287,20 +325,22 @@ class MeshWorld extends World{
   growMarkers(){const cap=Math.ceil(this.mcap*1.5);for(const k in MFIELDS){const w=MWIDTH[k]||1,a=new MFIELDS[k](cap*w);a.set(this[k]);this[k]=a;}this.mcap=cap;this.tri.growV(cap);}
   newMarker(kind){let m;if(this.freeM.length)m=this.freeM.pop();else{if(this.nSlots>=this.mcap)this.growMarkers();m=this.nSlots++;}
     this.mKind[m]=kind;this.mId[m]=this.nextId++;this.arcAdd[m]=0;this.collAdd[m]=0;this.mBn[3*m]=this.mBn[3*m+1]=this.mBn[3*m+2]=0;this.iN[m]=0;this.mBorn[m]=this.t;
-    this.sA[m]=this.sTh[m]=this.sOc[m]=this.sCc[m]=0;this.sFed[m]=this.sFc[m]=-1e9;this.sSub[m]=-1;return m;}
+    this.sA[m]=this.sTh[m]=this.sOc[m]=this.sCc[m]=0;this.sFed[m]=this.sFc[m]=-1e9;this.sSub[m]=-1;this.mD[m]=0;this.mXi[m]=NaN;this.mSR[m]=0;this.cHint[m]=-1;this.mSig.fill(0,6*m,6*m+6);return m;}
   freeMarker(m){this.tri.remove(m);this.mKind[m]=0;this.freeM.push(m);}
   setPos(m,x,y,z){const l=Math.hypot(x,y,z),T=this.tri;T.X[m]=x/l;T.Y[m]=y/l;T.Z[m]=z/l;}
   toMarkers(){
     const {N,cube,plates,owner,wT,wB,wS,wK,wCol}=this,pos=cube.pos;
     this.h0=Math.sqrt(4*Math.PI/N);this.cellA=4*Math.PI*R_KM*R_KM/N;
-    const cap=Math.ceil(N*1.3);this.tri=new SphereTri(cap,2*cap+16);this.allocMarkers(cap);
+    const cap=Math.ceil(N*1.3);this.tri=new SphereTri(cap,2*cap+16);this.allocMarkers(cap);this.wD=new Float32Array(N);this.wSR=new Float32Array(N);
     const order=[];
     for(let i=0;i<N;i++){const m=this.newMarker(INTERIOR),x=pos[3*i],y=pos[3*i+1],z=pos[3*i+2];
       // jitter within the cell (a fixed hash): breaks the grid's co-circular quadruples and its lattice directions
       const e1=norm3(Math.abs(z)<0.9?cross([0,0,1],[x,y,z]):cross([1,0,0],[x,y,z])),e2=cross([x,y,z],e1),[a,b]=hash2(i,0x51ab),j=0.35*this.h0;
       this.setPos(m,x+j*(a*e1[0]+b*e2[0]),y+j*(a*e1[1]+b*e2[1]),z+j*(a*e1[2]+b*e2[2]));
       this.mPlate[m]=owner[i];this.mA[m]=cube.area[i]*R_KM*R_KM;this.mT[m]=wT[i];this.mB[m]=wB[i];this.mS[m]=wS[i];this.mK[m]=wK[i];this.mCol[m]=wCol[i];
-      this.mBorn[m]=0;order.push(m);}
+      this.mBorn[m]=0;order.push(m);
+      // old orogenic belts in the starting continents are past failures: they start damaged
+      {const c=wCol[i];for(let k=0;k<this.pool.cnt[c];k++)if(this.pool.R[c*SIM.U+k]===ROCK.OROGEN){this.mD[m]=PH.dOrogen;break;}}}
     for(const P of plates){P.T=P.B=P.S=P.K=P.col=P.clr=P.seen=null;}
     this.tri.build(order);
     this.ledger={};this.mStats={rebuilds:0,substeps:0,consumed:0,created:0,ifaceIns:0,ifaceDel:0};
@@ -637,14 +677,14 @@ class MeshWorld extends World{
           for(let s2=0;s2<k;s2++){const i=idx[this.iPlate[3*v+s2]];if(i>=0)addTq(i,1/live,G[0],G[1],G[2]);}}}}
     // interfaces
     this.ifaceLengths();
-    const trench=[],tq=new Map(),cpl=[]; // cpl: coupling entries (two plates, coefficient, limit, length, position)
+    const trench=[],tq=new Map(),cpl=[]; // cpl: coupling entries (two plates, coefficient, limit, length, position, interface marker)
     for(const P of plates){P.perim=0;P.subLen=0;}
     for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;const k=this.iN[m],w=this.iLen[m],x=X[m],y=Y[m],z=Z[m],conv=this.iKind[m]===CONVERGENT&&k===2;
       let coll=false,fs=null;
       if(conv){fs=[this.frontier(m,this.iPlate[3*m]),this.frontier(m,this.iPlate[3*m+1])];coll=fs[0]>=0&&fs[1]>=0&&this.mK[fs[0]]&&this.mK[fs[1]];}
       const cI=conv?(coll?PH.cColl:PH.cTrench):PH.cRidge,sI=conv?(coll?PH.sColl:PH.sTrench):PH.sRidge;
       for(let s1=0;s1<k;s1++){const P1=plates[this.iPlate[3*m+s1]];P1.perim+=w/1e3;
-        for(let s2=s1+1;s2<k;s2++){const i=idx[this.iPlate[3*m+s1]],j=idx[this.iPlate[3*m+s2]];if(i<0||j<0)continue;cpl.push(i,j,cI,sI,w,x,y,z);}}
+        for(let s2=s1+1;s2<k;s2++){const i=idx[this.iPlate[3*m+s1]],j=idx[this.iPlate[3*m+s2]];if(i<0||j<0)continue;cpl.push(i,j,cI,sI,w,x,y,z,m);}}
       if(!conv)continue;
       const win=this.iWin[m],Lp=this.iPlate[3*m+1-win],Wp=this.iPlate[3*m+win],sg=win===0?1:-1;
       const nx=sg*this.iNrm[3*m],ny=sg*this.iNrm[3*m+1],nz=sg*this.iNrm[3*m+2];          // from the subducting side toward the overriding side
@@ -665,33 +705,33 @@ class MeshWorld extends World{
       if(best<0)continue;Fm[best/9]+=this.slabForce(r);if(!trench[best+5])this.sFed[r]=t;}
     this._seenN=mark;
     // slab pull on the subducting plate, suction on the overriding plate (from last step's velocity into the trench)
-    let pullF=0,sucF=0;
+    let pullF=0,sucF=0;const Fsuc=new Float64Array(trench.length/9);
     for(let q=0;q<trench.length;q+=9){const m=trench[q],Lp=trench[q+1],Wp=trench[q+2],Cs=trench[q+4],F=Fm[q/9];
       if(F===0)continue;const x=X[m],y=Y[m],z=Z[m],nx=trench[q+6],ny=trench[q+7],nz=trench[q+8];
       const ax=y*nz-z*ny,ay=z*nx-x*nz,az=x*ny-y*nx;pullF+=F;
       term("bpull");if(idx[Lp]>=0)addTq(idx[Lp],R*F,ax,ay,az);term("bsuction");
       const WL=plates[Lp].W,vn=R*(WL[0]*ax+WL[1]*ay+WL[2]*az)/MY,ex=F-Cs*this.iLen[m]*vn;
-      if(ex>0&&idx[Wp]>=0){const Fs=PH.cSuc*ex;sucF+=Fs;addTq(idx[Wp],-R*Fs,ax,ay,az);}}
+      if(ex>0&&idx[Wp]>=0){const Fs=PH.cSuc*ex;sucF+=Fs;Fsuc[q/9]=Fs;addTq(idx[Wp],-R*Fs,ax,ay,az);}}
     if(bud){K=new Float64Array(N3*N3);b=new Float64Array(N3);for(const nm in bud){const src=bud[nm];if(nm[0]==="K")for(let i=0;i<N3*N3;i++)K[i]+=src[i];else for(let i=0;i<N3;i++)b[i]+=src[i];}}
     // Interface coupling with a frictional limit (§4.8): traction c dv up to S, i.e. a secant coefficient
     // min(c, S/|dv|), found by Picard iteration from the previous step's velocities (as L1 does for its power law)
-    const Kb=K,nc=cpl.length/8,ce=new Float64Array(nc),wv=p=>plates[p].W;
+    const Kb=K,nc=cpl.length/9,ce=new Float64Array(nc),wv=p=>plates[p].W;
     const slip=(oi,oj,q)=>{const x=cpl[q+5],y=cpl[q+6],z=cpl[q+7],dx=oi[0]-oj[0],dy=oi[1]-oj[1],dz=oi[2]-oj[2],d=dx*x+dy*y+dz*z;return R*Math.sqrt(Math.max(0,dx*dx+dy*dy+dz*dz-d*d));};
     const pid=new Int32Array(n);for(let p=0;p<np;p++)if(idx[p]>=0)pid[idx[p]]=p;
-    for(let c=0;c<nc;c++){const q=8*c,dv=slip(wv(pid[cpl[q]]).map(v=>v/MY),wv(pid[cpl[q+1]]).map(v=>v/MY),q);ce[c]=Math.min(cpl[q+2],dv>0?cpl[q+3]/dv:Infinity);}
-    const addCoupling=(Kt,scale)=>{K=Kt;for(let c=0;c<nc;c++){const q=8*c,i=cpl[q],j=cpl[q+1],v=ce[c]*cpl[q+4]*R2*scale,x=cpl[q+5],y=cpl[q+6],z=cpl[q+7];
+    for(let c=0;c<nc;c++){const q=9*c,dv=slip(wv(pid[cpl[q]]).map(v=>v/MY),wv(pid[cpl[q+1]]).map(v=>v/MY),q);ce[c]=Math.min(cpl[q+2],dv>0?cpl[q+3]/dv:Infinity);}
+    const addCoupling=(Kt,scale)=>{K=Kt;for(let c=0;c<nc;c++){const q=9*c,i=cpl[q],j=cpl[q+1],v=ce[c]*cpl[q+4]*R2*scale,x=cpl[q+5],y=cpl[q+6],z=cpl[q+7];
       addProj(i,i,v,x,y,z);addProj(j,j,v,x,y,z);addProj(i,j,-v,x,y,z);addProj(j,i,-v,x,y,z);}};
     let om=null,K0=null,iters=0;
     for(let it=0;it<8;it++){iters++;const Kt=Kb.slice();addCoupling(Kt,1);
       let dmax=0;for(let i=0;i<N3;i++)dmax=Math.max(dmax,Kt[i*N3+i]);for(let i=0;i<N3;i++)Kt[i*N3+i]+=1e-12*dmax;
       K0=this.checkSolve?Kt.slice():null;om=cholSolve(Kt,b,N3);
-      let change=0;for(let c=0;c<nc;c++){const q=8*c,dv=slip(om.subarray(3*cpl[q],3*cpl[q]+3),om.subarray(3*cpl[q+1],3*cpl[q+1]+3),q),v=Math.min(cpl[q+2],dv>0?cpl[q+3]/dv:Infinity);
+      let change=0;for(let c=0;c<nc;c++){const q=9*c,dv=slip(om.subarray(3*cpl[q],3*cpl[q]+3),om.subarray(3*cpl[q+1],3*cpl[q+1]+3),q),v=Math.min(cpl[q+2],dv>0?cpl[q+3]/dv:Infinity);
         change=Math.max(change,Math.abs(v-ce[c])/ce[c]);ce[c]=v;}
       if(change<0.02)break;}
     this.couplingIters=iters;
     // per plate pair: shared boundary length (km) and length-weighted mean square slip ((cm/yr)^2), for welding
     const contact=new Map(),cmy=MY/1e6*100;
-    for(let c=0;c<nc;c++){const q=8*c,a=pid[cpl[q]],b2=pid[cpl[q+1]],key=Math.min(a,b2)*4096+Math.max(a,b2),sl=slip(om.subarray(3*cpl[q],3*cpl[q]+3),om.subarray(3*cpl[q+1],3*cpl[q+1]+3),q)*cmy,l=cpl[q+4]/1e3;
+    for(let c=0;c<nc;c++){const q=9*c,a=pid[cpl[q]],b2=pid[cpl[q+1]],key=Math.min(a,b2)*4096+Math.max(a,b2),sl=slip(om.subarray(3*cpl[q],3*cpl[q]+3),om.subarray(3*cpl[q+1],3*cpl[q+1]+3),q)*cmy,l=cpl[q+4]/1e3;
       const e=contact.get(key)||[0,0];e[0]+=l;e[1]+=l*sl*sl;contact.set(key,e);}
     for(const e of contact.values())e[1]/=e[0];
     if(bud){bud.Kcouple=new Float64Array(N3*N3);addCoupling(bud.Kcouple,1);}
@@ -706,6 +746,31 @@ class MeshWorld extends World{
       const key=Math.min(Lp,Wp)*4096+Math.max(Lp,Wp),e=pairs.get(key)||[0,0,0],l=this.iLen[m]/1e3;e[0]+=l;e[1]+=v*l;if(trench[q+5])e[2]+=l;pairs.set(key,e);}
     for(const e of pairs.values())e[1]/=e[0];
     this.fstat={pairs,contact,pullN:pullF,suctionN:sucF,gpeN:gpeF};
+    // Loads for the stress solve (when due): every force of the balance as a vector on an interior marker of the plate
+    // it acts on (forces at interface markers go to that plate's frontier marker), with the solved velocities. Each
+    // plate's loads then sum to zero torque, to within the coupling's Picard tolerance.
+    if(this._loadsDue){const F=this._F&&this._F.length>=3*ns?this._F:(this._F=new Float64Array(3*ns+3072));F.fill(0,0,3*ns);
+      const add=(v,p,fx,fy,fz)=>{let m=v;if(kind[v]!==INTERIOR||pl[v]!==p){m=this.frontier(v,p);if(m<0)return;}F[3*m]+=fx;F[3*m+1]+=fy;F[3*m+2]+=fz;};
+      const vel=(p,x,y,z,o)=>{const i=idx[p];if(i<0){o[0]=o[1]=o[2]=0;return;}const a=om[3*i],b2=om[3*i+1],c=om[3*i+2];o[0]=R*(b2*z-c*y);o[1]=R*(c*x-a*z);o[2]=R*(a*y-b2*x);};
+      const v1=[0,0,0],v2=[0,0,0],vmS=0.01/(MY/1e6),cbA=PH.Cb*1e6,vm=this.vm,lk=this.cube.lookup;
+      for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const x=X[m],y=Y[m],z=Z[m];vel(pl[m],x,y,z,v1);const c=cbA*(mK[m]?PH.kKeel:1)*mA[m];
+        let ux=v1[0],uy=v1[1],uz=v1[2];if(this.mantle){const g=3*lk(x,y,z);ux-=vm[g]*vmS;uy-=vm[g+1]*vmS;uz-=vm[g+2]*vmS;}F[3*m]-=c*ux;F[3*m+1]-=c*uy;F[3*m+2]-=c*uz;}
+      for(let q=0;q<T.nT;q++){if(!T.tAlive[q])continue;const o=3*q,a=tv[o],bb=tv[o+1],c=tv[o+2];
+        const abx=X[bb]-X[a],aby=Y[bb]-Y[a],abz=Z[bb]-Z[a],acx=X[c]-X[a],acy=Y[c]-Y[a],acz=Z[c]-Z[a];
+        let nx=aby*acz-abz*acy,ny=abz*acx-abx*acz,nz=abx*acy-aby*acx;const nl=Math.sqrt(nx*nx+ny*ny+nz*nz)||1;nx/=nl;ny/=nl;nz/=nl;
+        const ua=U[a],ub=U[bb],uc=U[c],ex=ua*(X[c]-X[bb])+ub*(X[a]-X[c])+uc*(X[bb]-X[a]),ey=ua*(Y[c]-Y[bb])+ub*(Y[a]-Y[c])+uc*(Y[bb]-Y[a]),ez=ua*(Z[c]-Z[bb])+ub*(Z[a]-Z[c])+uc*(Z[bb]-Z[a]);
+        const fx=-0.5*R*(ny*ez-nz*ey)/3,fy=-0.5*R*(nz*ex-nx*ez)/3,fz=-0.5*R*(nx*ey-ny*ex)/3;
+        for(let k3=0;k3<3;k3++){const v=tv[o+k3];if(kind[v]===INTERIOR){if(idx[pl[v]]>=0){F[3*v]+=fx;F[3*v+1]+=fy;F[3*v+2]+=fz;}continue;}
+          const k=this.iN[v];let live=0;for(let s2=0;s2<k;s2++)if(idx[this.iPlate[3*v+s2]]>=0)live++;
+          for(let s2=0;s2<k;s2++){const p=this.iPlate[3*v+s2];if(idx[p]>=0)add(v,p,fx/live,fy/live,fz/live);}}}
+      for(let q=0;q<trench.length;q+=9){const m=trench[q],Lp=trench[q+1],Wp=trench[q+2],Cs=trench[q+4],x=X[m],y=Y[m],z=Z[m],nx=trench[q+6],ny=trench[q+7],nz=trench[q+8],w=this.iLen[m];
+        const tx=y*nz-z*ny,ty=z*nx-x*nz,tz=x*ny-y*nx;vel(Lp,x,y,z,v1);const vn=v1[0]*nx+v1[1]*ny+v1[2]*nz,vt=v1[0]*tx+v1[1]*ty+v1[2]*tz,ct=(2/3)*PH.cGeom*PH.etaUM*w;
+        const fn=Fm[q/9]-Cs*w*vn;add(m,Lp,fn*nx-ct*vt*tx,fn*ny-ct*vt*ty,fn*nz-ct*vt*tz);
+        const Fs=Fsuc[q/9];if(Fs)add(m,Wp,-Fs*nx,-Fs*ny,-Fs*nz);}
+      for(let c=0;c<nc;c++){const q=9*c,i=cpl[q],j=cpl[q+1],w=cpl[q+4],x=cpl[q+5],y=cpl[q+6],z=cpl[q+7],m=cpl[q+8],pi=pid[i],pj=pid[j];
+        vel(pi,x,y,z,v1);vel(pj,x,y,z,v2);const k2=ce[c]*w,dx=v1[0]-v2[0],dy=v1[1]-v2[1],dz=v1[2]-v2[2];
+        add(m,pi,-k2*dx,-k2*dy,-k2*dz);add(m,pj,k2*dx,k2*dy,k2*dz);}
+      this._loadsDue=false;this._loadsReady=true;}
     // the budget: per plate, each term's torque along the plate's own rotation axis (N m; driving > 0, resisting < 0)
     if(bud){const out={};for(const nm in bud){const v=new Float64Array(n),src=bud[nm];
         for(let i=0;i<n;i++){const wl=Math.hypot(om[3*i],om[3*i+1],om[3*i+2])||1;let s2=0;
@@ -724,6 +789,397 @@ class MeshWorld extends World{
     for(const P of this.plates){if(!P.alive||area[P.id]<=0||area[P.id]>=minA)continue;let best=-1,bl=0;
       for(const [k,e] of this.fstat.contact){const a=Math.floor(k/4096),b=k%4096;if(a!==P.id&&b!==P.id)continue;const q=a===P.id?b:a;if(this.plates[q].alive&&e[0]>bl){bl=e[0];best=q;}}
       if(best<0)continue;this._absorb=true;P.area=0;this.merge(this.plates[best],P);this._absorb=false;return;}} // one a step
+  // ---------- stress, strength and cracks (Stage 5, L0_MESH_SPEC.md §7) ----------
+  // Effective tensile strength of a marker's lithosphere, depth-integrated (N/m). Intrinsic: ocean strengthens with the
+  // square root of age (its cold layer thickens); continental lithosphere is weaker where its crust is thick (a hot,
+  // weak lower crust), and twice as strong in cratons (old continental cores, by the column's base unit). Times a
+  // lognormal factor from a smooth random field carried with the material, times 1 - (1 - residual) D: damage,
+  // the memory of past failure, down to a residual strength (faults and shear zones keep their friction).
+  strength(m){let S;
+    if(this.mK[m]){S=PH.sCont*Math.min(1.5,Math.max(0.5,C.CONT_BASE/this.mT[m]));if(this.pool.R[this.mCol[m]*SIM.U]===ROCK.CRATON)S*=2;}
+    else S=PH.sOcean*Math.sqrt(Math.min(150,Math.max(1,this.t-this.mB[m]))/100);
+    let xi=this.mXi[m];if(xi!==xi)xi=this.mXi[m]=this.heterogeneity(m);
+    return PH.strScale*S*Math.exp(PH.strNoise*xi)*(1-(1-PH.residual)*this.mD[m]);}
+  // Heterogeneity the model does not resolve, as a smooth random field with features about 500 km across (value
+  // noise at frequency 12, scaled to unit standard deviation), so it has a physical length scale rather than one
+  // draw per marker (which made the weakest point in a plate weaker at finer resolution). Evaluated where the marker
+  // sits in its plate's own frame the first time it is needed, then kept: it travels with the material.
+  heterogeneity(m){const Q=this.plates[this.mPlate[m]].Q,x=this.tri.X[m],y=this.tri.Y[m],z=this.tri.Z[m];
+    const bx=Q[0]*x+Q[3]*y+Q[6]*z,by=Q[1]*x+Q[4]*y+Q[7]*z,bz=Q[2]*x+Q[5]*y+Q[8]*z;return (this.noise(bx+11.3,by,bz,12,3)-0.499)/0.121;}
+  // The stress solve. Loads (from solveVelocities) go to the stress grid's nodes; each node belongs to the plate of
+  // the nearest marker, and a grid triangle belongs to a plate when its three nodes do, so each plate is a sheet of
+  // its own. A marker's load goes to the nearest node of its own plate around it. Each plate's loads are made exactly
+  // self-equilibrated (moving a load to a node shifts its torque slightly) by removing the rigid-rotation part.
+  // Linear elastic sheet, plane stress, linear triangles, Poisson's ratio 0.25; solved by conjugate gradients with a
+  // Jacobi preconditioner (a tiny spring to ground removes the rotations). Stress per triangle, averaged to nodes,
+  // interpolated to markers within their grid triangle (nodes of their own plate only).
+  stressStep(){const G=stressGrid(PH.stressNodes),T=this.tri,X=T.X,Y=T.Y,Z=T.Z,kind=this.mKind,pl=this.mPlate,ns=this.nSlots,F=this._F,nN=G.n,GX=G.X,GY=G.Y,GZ=G.Z,R=R_KM*1e3;
+    const np=this.nodePlate&&this.nodePlate.length===nN?this.nodePlate:(this.nodePlate=new Int16Array(nN));
+    const nh=this._nHint&&this._nHint.length===nN?this._nHint:(this._nHint=new Int32Array(nN).fill(-1));
+    for(let g=0;g<nN;g++){const t=T.locate(GX[g],GY[g],GZ[g],nh[g]>=0&&T.tAlive[nh[g]]?nh[g]:-1);nh[g]=t;let best=-1,bd=Infinity;
+      for(let k=0;k<3;k++){const v=T.tv[3*t+k];if(kind[v]!==INTERIOR)continue;const d=(X[v]-GX[g])**2+(Y[v]-GY[g])**2+(Z[v]-GZ[g])**2;if(d<bd){bd=d;best=v;}}
+      if(best<0){const v=T.tv[3*t];best=this.nearestOf(GX[g],GY[g],GZ[g],this.iN[v]?this.iPlate[3*v]:0,v);}
+      np[g]=best>=0&&this.plates[pl[best]].alive?pl[best]:-1;}
+    // elements: geometry in each triangle's own plane (metres)
+    const tr=G.tris,nt=tr.length/3,el=[];const nu=0.25,D11=1/(1-nu*nu),D12=nu*D11,D33=(1-nu)/2*D11;
+    const hasEl=new Uint8Array(nN),diag=new Float64Array(nN);
+    const E=new Float64Array(16*nt);let ne=0; // per element: a,b,c nodes (3), area, bx(3), by(3), e1(3), e2(3)
+    for(let q=0;q<nt;q++){const a=tr[3*q],b=tr[3*q+1],c=tr[3*q+2],p=np[a];if(p<0||np[b]!==p||np[c]!==p)continue;
+      const ux=(GX[b]-GX[a])*R,uy=(GY[b]-GY[a])*R,uz=(GZ[b]-GZ[a])*R,vx=(GX[c]-GX[a])*R,vy=(GY[c]-GY[a])*R,vz=(GZ[c]-GZ[a])*R;
+      let nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;const n2=Math.sqrt(nx*nx+ny*ny+nz*nz);nx/=n2;ny/=n2;nz/=n2;
+      const lu=Math.sqrt(ux*ux+uy*uy+uz*uz),e1x=ux/lu,e1y=uy/lu,e1z=uz/lu,e2x=ny*e1z-nz*e1y,e2y=nz*e1x-nx*e1z,e2z=nx*e1y-ny*e1x;
+      const xb=lu,xc=vx*e1x+vy*e1y+vz*e1z,yc=vx*e2x+vy*e2y+vz*e2z,A=0.5*xb*yc;if(!(A>0))continue;
+      // shape-function gradients for nodes at (0,0), (xb,0), (xc,yc)
+      const o=16*ne;E[o]=a;E[o+1]=b;E[o+2]=c;E[o+3]=A;
+      E[o+4]=(0-yc)/(2*A);E[o+5]=(yc-0)/(2*A);E[o+6]=0;E[o+7]=(xc-xb)/(2*A);E[o+8]=(0-xc)/(2*A);E[o+9]=xb/(2*A);
+      E[o+10]=e1x;E[o+11]=e1y;E[o+12]=e1z;E[o+13]=e2x;E[o+14]=e2y;E[o+15]=e2z;
+      for(let k=0;k<3;k++)hasEl[E[o+k]]=1;ne++;}
+    // loads to nodes
+    // (and each node's strength: the area-weighted mean effective strength of the markers it takes loads from)
+    const Fn=new Float64Array(3*nN),cH=this.cHint,nS=new Float64Array(nN),nAr=new Float64Array(nN);let dropped=0,total=0;
+    const mNode=this._mNode&&this._mNode.length>=ns?this._mNode:(this._mNode=new Int32Array(ns+1024));mNode.fill(-1,0,ns); // each marker's nearest node of its plate
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const x=X[m],y=Y[m],z=Z[m];const t=G.T.locate(x,y,z,cH[m]>=0?cH[m]:-1);cH[m]=t;
+      const fx=F[3*m],fy=F[3*m+1],fz=F[3*m+2],fm=Math.sqrt(fx*fx+fy*fy+fz*fz),p=pl[m],tvG=G.T.tv,Sm=this.strength(m),Am=this.mA[m];total+=fm;
+      // shared among the triangle's nodes of the marker's plate by barycentric weight (a point load on one node would
+      // give a stress that grows without bound as the grid is refined), else the nearest such node
+      let ws=0;const wv=[0,0,0];for(let k=0;k<3;k++){const g=tvG[3*t+k];if(np[g]!==p||!hasEl[g])continue;wv[k]=Math.max(1e-12,G.T.orientP(tvG[3*t+(k+1)%3],tvG[3*t+(k+2)%3],x,y,z));ws+=wv[k];}
+      const gN=this.nodeOf(G,t,x,y,z,p,hasEl);mNode[m]=gN;
+      if(ws>0){for(let k=0;k<3;k++){if(!wv[k])continue;const g=tvG[3*t+k],f=wv[k]/ws;Fn[3*g]+=f*fx;Fn[3*g+1]+=f*fy;Fn[3*g+2]+=f*fz;nS[g]+=f*Am*Sm;nAr[g]+=f*Am;}continue;}
+      const g=gN;if(g<0){dropped+=fm;continue;}Fn[3*g]+=fx;Fn[3*g+1]+=fy;Fn[3*g+2]+=fz;nS[g]+=Am*Sm;nAr[g]+=Am;}
+    // Stiffness in proportion to effective strength [rule]: weak (young, thick-crusted, damaged) lithosphere is also
+    // compliant, so an isolated weak patch is shielded by the stronger plate around it, while a weak band that crosses
+    // the plate must still carry the plate's load. The contrast is limited to 1:50 (for the solver). Per element, the
+    // mean of its nodes' strengths, relative to continental crust's; a node with no markers takes 1.
+    const kE=new Float64Array(ne);
+    for(let e=0;e<ne;e++){const o=16*e;let k=0;for(let j=0;j<3;j++){const g=E[o+j];k+=nAr[g]>0?nS[g]/nAr[g]:PH.sCont*PH.strScale;}k/=3*PH.sCont*PH.strScale;kE[e]=Math.min(5,Math.max(0.1,k));
+      const A=E[o+3];for(let j=0;j<3;j++)diag[E[o+j]]+=kE[e]*A*D11*(E[o+4+j]**2+E[o+7+j]**2);}
+    // tangent projection, then per plate remove the rigid-rotation part (M w = net torque, M = sum (I - r r^T))
+    const nPl=this.plates.length,acc=new Float64Array(15*nPl);
+    for(let g=0;g<nN;g++){if(!hasEl[g])continue;const x=GX[g],y=GY[g],z=GZ[g],o=3*g;let d=Fn[o]*x+Fn[o+1]*y+Fn[o+2]*z;Fn[o]-=d*x;Fn[o+1]-=d*y;Fn[o+2]-=d*z;
+      const q=15*np[g],f0=Fn[o],f1=Fn[o+1],f2=Fn[o+2];acc[q]+=y*f2-z*f1;acc[q+1]+=z*f0-x*f2;acc[q+2]+=x*f1-y*f0;
+      acc[q+3]+=1-x*x;acc[q+4]+=1-y*y;acc[q+5]+=1-z*z;acc[q+6]-=x*y;acc[q+7]-=x*z;acc[q+8]-=y*z;}
+    const wc=new Float64Array(3*nPl);
+    for(let p=0;p<nPl;p++){const q=15*p;if(acc[q+3]+acc[q+4]+acc[q+5]===0)continue;
+      const M=[acc[q+3],acc[q+6],acc[q+7],acc[q+6],acc[q+4],acc[q+8],acc[q+7],acc[q+8],acc[q+5]],w=cholSolve(M,[acc[q],acc[q+1],acc[q+2]],3);wc[3*p]=w[0];wc[3*p+1]=w[1];wc[3*p+2]=w[2];}
+    for(let g=0;g<nN;g++){if(!hasEl[g])continue;const x=GX[g],y=GY[g],z=GZ[g],o=3*g,p=3*np[g],a=wc[p],b=wc[p+1],c=wc[p+2];Fn[o]-=b*z-c*y;Fn[o+1]-=c*x-a*z;Fn[o+2]-=a*y-b*x;}
+    // conjugate gradients
+    const kap=1e-5,Au=(u,y)=>{y.fill(0);
+      for(let e=0;e<ne;e++){const o=16*e,A=E[o+3];let ex=0,ey=0,gxy=0;
+        for(let k=0;k<3;k++){const g=3*E[o+k],ux=u[g]*E[o+10]+u[g+1]*E[o+11]+u[g+2]*E[o+12],uy=u[g]*E[o+13]+u[g+1]*E[o+14]+u[g+2]*E[o+15];
+          ex+=E[o+4+k]*ux;ey+=E[o+7+k]*uy;gxy+=E[o+7+k]*ux+E[o+4+k]*uy;}
+        const ke=kE[e],sx=ke*(D11*ex+D12*ey),sy=ke*(D12*ex+D11*ey),sxy=ke*D33*gxy;
+        for(let k=0;k<3;k++){const g=3*E[o+k],fx=A*(E[o+4+k]*sx+E[o+7+k]*sxy),fy=A*(E[o+7+k]*sy+E[o+4+k]*sxy);
+          y[g]+=fx*E[o+10]+fy*E[o+13];y[g+1]+=fx*E[o+11]+fy*E[o+14];y[g+2]+=fx*E[o+12]+fy*E[o+15];}}
+      for(let g=0;g<nN;g++){const o=3*g;if(!hasEl[g]){y[o]=y[o+1]=y[o+2]=0;continue;}y[o]+=kap*diag[g]*u[o];y[o+1]+=kap*diag[g]*u[o+1];y[o+2]+=kap*diag[g]*u[o+2];
+        const x=GX[g],yy=GY[g],z=GZ[g],d=y[o]*x+y[o+1]*yy+y[o+2]*z;y[o]-=d*x;y[o+1]-=d*yy;y[o+2]-=d*z;}};
+    // warm start: last solve's displacements where a node's plate is unchanged (loads change slowly)
+    const n3=3*nN,u=new Float64Array(n3),r=Fn.slice(),zv=new Float64Array(n3),pv=new Float64Array(n3),Ap=new Float64Array(n3);
+    if(this._sU&&this._sU.length===n3){const pp=this._sP;for(let g=0;g<nN;g++)if(hasEl[g]&&pp[g]===np[g]){u[3*g]=this._sU[3*g];u[3*g+1]=this._sU[3*g+1];u[3*g+2]=this._sU[3*g+2];}
+      Au(u,Ap);for(let i=0;i<n3;i++)r[i]-=Ap[i];}
+    const prec=(a,o)=>{for(let g=0;g<nN;g++){const q=hasEl[g]?1/(diag[g]*(1+kap)):0;o[3*g]=a[3*g]*q;o[3*g+1]=a[3*g+1]*q;o[3*g+2]=a[3*g+2]*q;}};
+    let bn=0,r0=0;for(let i=0;i<n3;i++){bn+=Fn[i]*Fn[i];r0+=r[i]*r[i];}bn=Math.sqrt(bn);prec(r,zv);pv.set(zv);let rz=0;for(let i=0;i<n3;i++)rz+=r[i]*zv[i];let it=0,res=bn>0?Math.sqrt(r0)/bn:0;
+    for(;it<PH.stressIters&&res>PH.stressTol;it++){Au(pv,Ap);let pAp=0;for(let i=0;i<n3;i++)pAp+=pv[i]*Ap[i];const al=rz/pAp;let rr=0;
+      for(let i=0;i<n3;i++){u[i]+=al*pv[i];r[i]-=al*Ap[i];rr+=r[i]*r[i];}res=Math.sqrt(rr)/bn;prec(r,zv);let rz2=0;for(let i=0;i<n3;i++)rz2+=r[i]*zv[i];const be=rz2/rz;rz=rz2;for(let i=0;i<n3;i++)pv[i]=zv[i]+be*pv[i];}
+    this._sU=u;this._sP=np.slice();
+    // stress per element (N/m) as a 3D tensor, area-averaged to nodes
+    const Sn=new Float64Array(6*nN),wn=new Float64Array(nN);
+    for(let e=0;e<ne;e++){const o=16*e,A=E[o+3];let ex=0,ey=0,gxy=0;
+      for(let k=0;k<3;k++){const g=3*E[o+k],ux=u[g]*E[o+10]+u[g+1]*E[o+11]+u[g+2]*E[o+12],uy=u[g]*E[o+13]+u[g+1]*E[o+14]+u[g+2]*E[o+15];ex+=E[o+4+k]*ux;ey+=E[o+7+k]*uy;gxy+=E[o+7+k]*ux+E[o+4+k]*uy;}
+      const ke=kE[e],sx=ke*(D11*ex+D12*ey),sy=ke*(D12*ex+D11*ey),sxy=ke*D33*gxy,a1=[E[o+10],E[o+11],E[o+12]],a2=[E[o+13],E[o+14],E[o+15]];
+      const S6=[sx*a1[0]*a1[0]+sy*a2[0]*a2[0]+2*sxy*a1[0]*a2[0],sx*a1[1]*a1[1]+sy*a2[1]*a2[1]+2*sxy*a1[1]*a2[1],sx*a1[2]*a1[2]+sy*a2[2]*a2[2]+2*sxy*a1[2]*a2[2],
+        sx*a1[0]*a1[1]+sy*a2[0]*a2[1]+sxy*(a1[0]*a2[1]+a2[0]*a1[1]),sx*a1[0]*a1[2]+sy*a2[0]*a2[2]+sxy*(a1[0]*a2[2]+a2[0]*a1[2]),sx*a1[1]*a1[2]+sy*a2[1]*a2[2]+sxy*(a1[1]*a2[2]+a2[1]*a1[2])];
+      for(let k=0;k<3;k++){const g=E[o+k];wn[g]+=A;for(let c=0;c<6;c++)Sn[6*g+c]+=A*S6[c];}}
+    for(let g=0;g<nN;g++)if(wn[g]>0)for(let c=0;c<6;c++)Sn[6*g+c]/=wn[g];
+    // nodes whose every grid triangle belongs to their plate: the stress there is resolved; within a grid spacing of a
+    // plate's edge it is not (few elements carry the edge's loads), so markers there take the nearest such node's
+    const tc=G.triCount||(G.triCount=(()=>{const c=new Int32Array(nN);for(let q=0;q<tr.length;q++)c[tr[q]]++;return c;})()),ec=new Int32Array(nN);
+    for(let e=0;e<ne;e++){const o=16*e;ec[E[o]]++;ec[E[o+1]]++;ec[E[o+2]]++;}const inner=new Uint8Array(nN);for(let g=0;g<nN;g++)inner[g]=ec[g]>0&&ec[g]===tc[g]?1:0;
+    // to markers: barycentric weights within their grid triangle, over nodes of their own plate
+    const sig=this.mSig,GT=G.T,rsv=this._sRes&&this._sRes.length>=ns?this._sRes:(this._sRes=new Uint8Array(ns+1024));rsv.fill(0,0,ns);
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const t=cH[m],x=X[m],y=Y[m],z=Z[m],p=pl[m],o=6*m;sig.fill(0,o,o+6);if(t<0)continue;
+      let wsum=0;for(let k=0;k<3;k++){const g=GT.tv[3*t+k];if(np[g]!==p||!inner[g])continue;const b2=GT.tv[3*t+(k+1)%3],c2=GT.tv[3*t+(k+2)%3];
+        const w=Math.max(0,GT.orientP(b2,c2,x,y,z));wsum+=w;for(let c=0;c<6;c++)sig[o+c]+=w*Sn[6*g+c];}
+      if(wsum>0){for(let c=0;c<6;c++)sig[o+c]/=wsum;rsv[m]=1;}
+      else{let g=this.nodeOf(G,t,x,y,z,p,inner);if(g<0){let bd=Infinity;for(const a of GT.tv.subarray(3*t,3*t+3))for(const b of G.ring[a])for(const c of G.ring[b]){if(np[c]!==p||!inner[c])continue;
+            const d=(G.X[c]-x)**2+(G.Y[c]-y)**2+(G.Z[c]-z)**2;if(d<bd){bd=d;g=c;}}}
+        if(g>=0)for(let c=0;c<6;c++)sig[o+c]=Sn[6*g+c];}
+      // onto the marker's tangent plane (node tensors lie in their own triangles' planes): S <- P S P, P = I - r r^T
+      {const a=sig[o],b=sig[o+1],c=sig[o+2],d=sig[o+3],e=sig[o+4],f=sig[o+5],Sx=a*x+d*y+e*z,Sy=d*x+b*y+f*z,Sz=e*x+f*y+c*z,q=x*Sx+y*Sy+z*Sz;
+        sig[o]=a-2*x*Sx+q*x*x;sig[o+1]=b-2*y*Sy+q*y*y;sig[o+2]=c-2*z*Sz+q*z*z;sig[o+3]=d-x*Sy-y*Sx+q*x*y;sig[o+4]=e-x*Sz-z*Sx+q*x*z;sig[o+5]=f-y*Sz-z*Sy+q*y*z;}}
+    this._sg={G,np:np.slice(),inner,Sn,hasEl};
+    this.stressInfo={iters:it,residual:res,elements:ne,dropped:total>0?dropped/total:0};}
+  // the nearest node of plate p (with elements) among grid triangle t's corners, or their rings
+  nodeOf(G,t,x,y,z,p,ok){const np=this.nodePlate,tv=G.T.tv;let best=-1,bd=Infinity;
+    const look=g=>{if(np[g]!==p||!ok[g])return;const d=(G.X[g]-x)**2+(G.Y[g]-y)**2+(G.Z[g]-z)**2;if(d<bd){bd=d;best=g;}};
+    for(let k=0;k<3;k++)look(tv[3*t+k]);if(best>=0)return best;
+    for(let k=0;k<3;k++)for(const g of G.ring[tv[3*t+k]])look(g);return best;}
+  // Damage (§7.1) and cracks (§7.3), after each stress solve; dt is the time since the last one. Damage grows where
+  // the stress's second invariant exceeds the strength in shear and compression (shearMul times the tensile strength)
+  // and heals everywhere with tauHeal. Cracks start where tension exceeds the tensile strength.
+  failureStep(dt){const ns=this.nSlots,kind=this.mKind,sig=this.mSig,X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,pl=this.mPlate,pr=[0,0,0,0,0];
+    const best=new Map(); // plate -> [ratio, marker]
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;let D=this.mD[m];
+      principal(sig,6*m,X[m],Y[m],Z[m],pr);const S=this.strength(m),r=pr[0]/S,s2=Math.sqrt(pr[0]*pr[0]-pr[0]*pr[1]+pr[1]*pr[1])/(PH.shearMul*S);this.mSR[m]=r;
+      D+=dt*Math.max(0,s2-1)*(1-D)/PH.tauDamage-dt*D/PH.tauHeal;this.mD[m]=D<0?0:D>1?1:D;
+    }
+    if(!this.forces||!PH.crackOn||!this._sg)return;
+    // Cracks live on the stress grid, where the stress is resolved: a node's strength is the area-weighted mean
+    // (after this step's damage) of the markers it stands for; seeds are nodes whose every grid triangle belongs to
+    // their plate, where the greatest tension exceeds that strength
+    const sg=this._sg,G=sg.G,nN=G.n,nS=new Float64Array(nN),nA=new Float64Array(nN),mNode=this._mNode;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const g=mNode[m];if(g<0||sg.np[g]!==pl[m])continue;nS[g]+=this.mA[m]*this.strength(m);nA[g]+=this.mA[m];}
+    for(let g=0;g<nN;g++){if(nA[g]>0)nS[g]/=nA[g];}sg.nS=nS;sg.nA=nA;
+    for(let g=0;g<nN;g++){if(!sg.inner[g]||!(nA[g]>0))continue;principal(sg.Sn,6*g,G.X[g],G.Y[g],G.Z[g],pr);const r=pr[0]/nS[g];
+      if(r>1){const e=best.get(sg.np[g]);if(!e||r>e[0])best.set(sg.np[g],[r,g]);}}
+    const seeds=[...best.values()].sort((a,b)=>b[0]-a[0]||a[1]-b[1]);let made=0;
+    for(const [r,g] of seeds){if(made>=2)break;if(this.crack(g,r))made++;}}
+  // a marker beside a boundary (an interface marker or another plate's marker among its neighbours)
+  onEdge(m){const off=this.off,adj=this.adj,p=this.mPlate[m];for(let e=off[m];e<off[m+1];e++){const v=adj[e];if(this.mKind[v]!==INTERIOR||this.mPlate[v]!==p)return true;}return false;}
+  // A crack from seed node g0 (tension above strength), on the stress grid: Dijkstra's shortest paths over the
+  // plate's nodes, edge cost = length x max(5% of strength, strength - tension across the edge); the cheapest path to
+  // the plate's edge (nodes not surrounded by their plate) on each side of the seed, along the direction of least
+  // tension (the crack's strike), joined where the two branches meet. Accepted if its mean overstress (tension across
+  // it minus strength) is positive and it cuts the plate in two parts each at least minCrackCells in area. Each marker
+  // follows its node; markers whose node lies on the crack stay with the larger part and take damage dCrack, those
+  // whose node is next to it dCrackSide: a band about one grid spacing wide, whatever the marker resolution, which
+  // stays a weakness after the crack heals into a suture.
+  crack(g0,ratio){const sg=this._sg,G=sg.G,nN=G.n,np=sg.np,P=np[g0],S=sg.Sn,nS=sg.nS,nA=sg.nA,X=G.X,Y=G.Y,Z=G.Z,pr=[0,0,0,0,0];
+    if(!this.plates[P].alive)return false;
+    const own=g=>np[g]===P&&sg.hasEl[g]&&nA[g]>0,edge=g=>!sg.inner[g];
+    const snn=(a,b)=>{const mx=X[a]+X[b],my=Y[a]+Y[b],mz=Z[a]+Z[b],dx=X[b]-X[a],dy=Y[b]-Y[a],dz=Z[b]-Z[a];let nx=my*dz-mz*dy,ny=mz*dx-mx*dz,nz=mx*dy-my*dx;const l=Math.hypot(nx,ny,nz)||1;nx/=l;ny/=l;nz/=l;
+      let s=0;for(const v of [a,b]){const o=6*v;s+=nx*(S[o]*nx+S[o+3]*ny+S[o+4]*nz)+ny*(S[o+3]*nx+S[o+1]*ny+S[o+5]*nz)+nz*(S[o+4]*nx+S[o+5]*ny+S[o+2]*nz);}return s/2;};
+    const dist=new Float64Array(nN).fill(Infinity),prev=new Int32Array(nN).fill(-1),H=new MinHeap();dist[g0]=0;H.push(0,g0);
+    while(H.size){const a=H.pop();if(edge(a)&&a!==g0)continue; // a path ends at the plate's edge
+      for(const b of G.ring[a]){if(!own(b))continue;const len=Math.sqrt((X[a]-X[b])**2+(Y[a]-Y[b])**2+(Z[a]-Z[b])**2)*R_KM,Se=(nS[a]+nS[b])/2;
+        const d=dist[a]+len*Math.max(0.05*Se,Se-snn(a,b))/1e12;if(d<dist[b]){dist[b]=d;prev[b]=a;H.push(d,b);}}}
+    principal(S,6*g0,X[g0],Y[g0],Z[g0],pr);const tx=pr[2],ty=pr[3],tz=pr[4];let b1=-1,b2=-1;
+    for(let g=0;g<nN;g++){if(!own(g)||!edge(g)||!(dist[g]<Infinity))continue;const sd=(X[g]-X[g0])*tx+(Y[g]-Y[g0])*ty+(Z[g]-Z[g0])*tz;
+      if(sd>0){if(b1<0||dist[g]<dist[b1])b1=g;}else if(b2<0||dist[g]<dist[b2])b2=g;}
+    if(b1<0||b2<0)return false;
+    const up=[],onUp=new Uint8Array(nN);for(let v=b1;v>=0;v=prev[v]){up.push(v);onUp[v]=1;}
+    const down=[];let f=b2;while(f>=0&&!onUp[f]){down.push(f);f=prev[f];}if(f<0)return false;
+    const path=[],inPath=new Uint8Array(nN);for(const v of up){path.push(v);inPath[v]=1;if(v===f)break;}for(let i=down.length-1;i>=0;i--){path.push(down[i]);inPath[down[i]]=1;}
+    if(path.length<3)return false;
+    let over=0,L=0;for(let i=1;i<path.length;i++){const a=path[i-1],b=path[i],len=Math.sqrt((X[a]-X[b])**2+(Y[a]-Y[b])**2+(Z[a]-Z[b])**2);over+=len*(snn(a,b)-(nS[a]+nS[b])/2);L+=len;}
+    if(!(L>0)||over/L<=0)return false;
+    // the plate's nodes split by the path
+    const comp=new Int32Array(nN).fill(-1),areas=[];let nc=0;
+    for(let g=0;g<nN;g++){if(!own(g)||inPath[g]||comp[g]>=0)continue;let A=0;const st=[g];comp[g]=nc;
+      while(st.length){const a=st.pop();A+=nA[a];for(const b of G.ring[a])if(own(b)&&!inPath[b]&&comp[b]<0){comp[b]=nc;st.push(b);}}areas.push(A);nc++;}
+    const minA=PH.minCrackCells*PH.weldCellKm2,order=areas.map((a,i)=>i).sort((a,b)=>areas[b]-areas[a]);
+    if(nc<2||areas[order[1]]<minA)return false;
+    const ns=this.nSlots,kind=this.mKind,pl=this.mPlate,mNode=this._mNode,take=order[1];
+    // inheritance (Stage 5 check): damage along the path before it cracks, against the plate's mean
+    {let dp=0,ap=0,dpl=0,apl=0;for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||pl[m]!==P)continue;const g=mNode[m],A=this.mA[m];dpl+=A*this.mD[m];apl+=A;if(g>=0&&inPath[g]){dp+=A*this.mD[m];ap+=A;}}
+      (this.crackLog||(this.crackLog=[])).push([this.t,ap>0?dp/ap:0,apl>0?dpl/apl:0]);if(this.crackLog.length>500)this.crackLog.shift();}
+    const near=new Uint8Array(nN);for(const g of path)for(const b of G.ring[g])if(!inPath[b])near[b]=1;
+    const Q=this.addPlate(this.plates[P].W);Q.Q.set(this.plates[P].Q);Q.parent=P;let contA=0,contB=0,moved=0;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||pl[m]!==P)continue;const g=mNode[m];
+      if(g>=0&&inPath[g])this.mD[m]=Math.max(this.mD[m],PH.dCrack);else if(g>=0&&near[g])this.mD[m]=Math.max(this.mD[m],PH.dCrackSide);
+      if(g>=0&&comp[g]===take){pl[m]=Q.id;moved++;if(this.mK[m])contB+=this.mA[m];}else if(this.mK[m])contA+=this.mA[m];}
+    if(!moved){Q.alive=false;return false;}
+    const c=norm3([X[g0],Y[g0],Z[g0]]),big=3*PH.weldCellKm2;
+    this.log("rift",`${contA>big&&contB>big?"Continental rift":"Rift"}: plate ${P} cracks under tension (${Math.round(L*R_KM)} km, ${ratio.toFixed(1)} times its strength where it began); plate ${Q.id} breaks away`,c);
+    this.mStats.cracks=(this.mStats.cracks||0)+1;this.maintainInterfaces();this.buildAdjacency();this.updateStats(true);
+    // the grid's plate labels follow the split, so a second crack this step sees the new plates
+    for(let g=0;g<nN;g++)if(np[g]===P&&comp[g]===take)np[g]=Q.id;return true;}
+  // Plates below what the grid resolves [rule]: a plate smaller than minPlateCells cells of the n = 96 grid (about
+  // 90,000 km2), or than as many markers on a coarser grid, joins the neighbour it shares the longest boundary with. A plate of a marker or two has no meaningful
+  // rotation: its drag barely resists spin about its own centre, and that spin shows up as speed at its boundaries.
+  absorbSlivers(){if(!this.fstat||!this.fstat.contact)return;const minA=PH.minPlateCells*Math.max(PH.weldCellKm2,this.cellA),area=new Float64Array(this.plates.length);
+    for(let m=0;m<this.nSlots;m++)if(this.mKind[m]===INTERIOR)area[this.mPlate[m]]+=this.mA[m];
+    for(const P of this.plates){if(!P.alive||area[P.id]<=0||area[P.id]>=minA)continue;let best=-1,bl=0;
+      for(const [k,e] of this.fstat.contact){const a=Math.floor(k/4096),b=k%4096;if(a!==P.id&&b!==P.id)continue;const q=a===P.id?b:a;if(this.plates[q].alive&&e[0]>bl){bl=e[0];best=q;}}
+      if(best<0)continue;this._absorb=true;P.area=0;this.merge(this.plates[best],P);this._absorb=false;return;}} // one a step
+  // ---------- stress, strength and cracks (Stage 5, L0_MESH_SPEC.md §7) ----------
+  // Effective tensile strength of a marker's lithosphere, depth-integrated (N/m). Intrinsic: ocean strengthens with the
+  // square root of age (its cold layer thickens); continental lithosphere is weaker where its crust is thick (a hot,
+  // weak lower crust), and twice as strong in cratons (old continental cores, by the column's base unit). Times a
+  // lognormal factor from a smooth random field carried with the material, times 1 - (1 - residual) D: damage,
+  // the memory of past failure, down to a residual strength (faults and shear zones keep their friction).
+  strength(m){let S;
+    if(this.mK[m]){S=PH.sCont*Math.min(1.5,Math.max(0.5,C.CONT_BASE/this.mT[m]));if(this.pool.R[this.mCol[m]*SIM.U]===ROCK.CRATON)S*=2;}
+    else S=PH.sOcean*Math.sqrt(Math.min(150,Math.max(1,this.t-this.mB[m]))/100);
+    let xi=this.mXi[m];if(xi!==xi)xi=this.mXi[m]=this.heterogeneity(m);
+    return PH.strScale*S*Math.exp(PH.strNoise*xi)*(1-(1-PH.residual)*this.mD[m]);}
+  // Heterogeneity the model does not resolve, as a smooth random field with features about 500 km across (value
+  // noise at frequency 12, scaled to unit standard deviation), so it has a physical length scale rather than one
+  // draw per marker (which made the weakest point in a plate weaker at finer resolution). Evaluated where the marker
+  // sits in its plate's own frame the first time it is needed, then kept: it travels with the material.
+  heterogeneity(m){const Q=this.plates[this.mPlate[m]].Q,x=this.tri.X[m],y=this.tri.Y[m],z=this.tri.Z[m];
+    const bx=Q[0]*x+Q[3]*y+Q[6]*z,by=Q[1]*x+Q[4]*y+Q[7]*z,bz=Q[2]*x+Q[5]*y+Q[8]*z;return (this.noise(bx+11.3,by,bz,12,3)-0.499)/0.121;}
+  // The stress solve. Loads (from solveVelocities) go to the stress grid's nodes; each node belongs to the plate of
+  // the nearest marker, and a grid triangle belongs to a plate when its three nodes do, so each plate is a sheet of
+  // its own. A marker's load goes to the nearest node of its own plate around it. Each plate's loads are made exactly
+  // self-equilibrated (moving a load to a node shifts its torque slightly) by removing the rigid-rotation part.
+  // Linear elastic sheet, plane stress, linear triangles, Poisson's ratio 0.25; solved by conjugate gradients with a
+  // Jacobi preconditioner (a tiny spring to ground removes the rotations). Stress per triangle, averaged to nodes,
+  // interpolated to markers within their grid triangle (nodes of their own plate only).
+  stressStep(){const G=stressGrid(PH.stressNodes),T=this.tri,X=T.X,Y=T.Y,Z=T.Z,kind=this.mKind,pl=this.mPlate,ns=this.nSlots,F=this._F,nN=G.n,GX=G.X,GY=G.Y,GZ=G.Z,R=R_KM*1e3;
+    const np=this.nodePlate&&this.nodePlate.length===nN?this.nodePlate:(this.nodePlate=new Int16Array(nN));
+    const nh=this._nHint&&this._nHint.length===nN?this._nHint:(this._nHint=new Int32Array(nN).fill(-1));
+    for(let g=0;g<nN;g++){const t=T.locate(GX[g],GY[g],GZ[g],nh[g]>=0&&T.tAlive[nh[g]]?nh[g]:-1);nh[g]=t;let best=-1,bd=Infinity;
+      for(let k=0;k<3;k++){const v=T.tv[3*t+k];if(kind[v]!==INTERIOR)continue;const d=(X[v]-GX[g])**2+(Y[v]-GY[g])**2+(Z[v]-GZ[g])**2;if(d<bd){bd=d;best=v;}}
+      if(best<0){const v=T.tv[3*t];best=this.nearestOf(GX[g],GY[g],GZ[g],this.iN[v]?this.iPlate[3*v]:0,v);}
+      np[g]=best>=0&&this.plates[pl[best]].alive?pl[best]:-1;}
+    // elements: geometry in each triangle's own plane (metres)
+    const tr=G.tris,nt=tr.length/3,el=[];const nu=0.25,D11=1/(1-nu*nu),D12=nu*D11,D33=(1-nu)/2*D11;
+    const hasEl=new Uint8Array(nN),diag=new Float64Array(nN);
+    const E=new Float64Array(16*nt);let ne=0; // per element: a,b,c nodes (3), area, bx(3), by(3), e1(3), e2(3)
+    for(let q=0;q<nt;q++){const a=tr[3*q],b=tr[3*q+1],c=tr[3*q+2],p=np[a];if(p<0||np[b]!==p||np[c]!==p)continue;
+      const ux=(GX[b]-GX[a])*R,uy=(GY[b]-GY[a])*R,uz=(GZ[b]-GZ[a])*R,vx=(GX[c]-GX[a])*R,vy=(GY[c]-GY[a])*R,vz=(GZ[c]-GZ[a])*R;
+      let nx=uy*vz-uz*vy,ny=uz*vx-ux*vz,nz=ux*vy-uy*vx;const n2=Math.sqrt(nx*nx+ny*ny+nz*nz);nx/=n2;ny/=n2;nz/=n2;
+      const lu=Math.sqrt(ux*ux+uy*uy+uz*uz),e1x=ux/lu,e1y=uy/lu,e1z=uz/lu,e2x=ny*e1z-nz*e1y,e2y=nz*e1x-nx*e1z,e2z=nx*e1y-ny*e1x;
+      const xb=lu,xc=vx*e1x+vy*e1y+vz*e1z,yc=vx*e2x+vy*e2y+vz*e2z,A=0.5*xb*yc;if(!(A>0))continue;
+      // shape-function gradients for nodes at (0,0), (xb,0), (xc,yc)
+      const o=16*ne;E[o]=a;E[o+1]=b;E[o+2]=c;E[o+3]=A;
+      E[o+4]=(0-yc)/(2*A);E[o+5]=(yc-0)/(2*A);E[o+6]=0;E[o+7]=(xc-xb)/(2*A);E[o+8]=(0-xc)/(2*A);E[o+9]=xb/(2*A);
+      E[o+10]=e1x;E[o+11]=e1y;E[o+12]=e1z;E[o+13]=e2x;E[o+14]=e2y;E[o+15]=e2z;
+      for(let k=0;k<3;k++)hasEl[E[o+k]]=1;ne++;}
+    // loads to nodes
+    // (and each node's strength: the area-weighted mean effective strength of the markers it takes loads from)
+    const Fn=new Float64Array(3*nN),cH=this.cHint,nS=new Float64Array(nN),nAr=new Float64Array(nN);let dropped=0,total=0;
+    const mNode=this._mNode&&this._mNode.length>=ns?this._mNode:(this._mNode=new Int32Array(ns+1024));mNode.fill(-1,0,ns); // each marker's nearest node of its plate
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const x=X[m],y=Y[m],z=Z[m];const t=G.T.locate(x,y,z,cH[m]>=0?cH[m]:-1);cH[m]=t;
+      const fx=F[3*m],fy=F[3*m+1],fz=F[3*m+2],fm=Math.sqrt(fx*fx+fy*fy+fz*fz),p=pl[m],tvG=G.T.tv,Sm=this.strength(m),Am=this.mA[m];total+=fm;
+      // shared among the triangle's nodes of the marker's plate by barycentric weight (a point load on one node would
+      // give a stress that grows without bound as the grid is refined), else the nearest such node
+      let ws=0;const wv=[0,0,0];for(let k=0;k<3;k++){const g=tvG[3*t+k];if(np[g]!==p||!hasEl[g])continue;wv[k]=Math.max(1e-12,G.T.orientP(tvG[3*t+(k+1)%3],tvG[3*t+(k+2)%3],x,y,z));ws+=wv[k];}
+      const gN=this.nodeOf(G,t,x,y,z,p,hasEl);mNode[m]=gN;
+      if(ws>0){for(let k=0;k<3;k++){if(!wv[k])continue;const g=tvG[3*t+k],f=wv[k]/ws;Fn[3*g]+=f*fx;Fn[3*g+1]+=f*fy;Fn[3*g+2]+=f*fz;nS[g]+=f*Am*Sm;nAr[g]+=f*Am;}continue;}
+      const g=gN;if(g<0){dropped+=fm;continue;}Fn[3*g]+=fx;Fn[3*g+1]+=fy;Fn[3*g+2]+=fz;nS[g]+=Am*Sm;nAr[g]+=Am;}
+    // Stiffness in proportion to effective strength [rule]: weak (young, thick-crusted, damaged) lithosphere is also
+    // compliant, so an isolated weak patch is shielded by the stronger plate around it, while a weak band that crosses
+    // the plate must still carry the plate's load. The contrast is limited to 1:50 (for the solver). Per element, the
+    // mean of its nodes' strengths, relative to continental crust's; a node with no markers takes 1.
+    const kE=new Float64Array(ne);
+    for(let e=0;e<ne;e++){const o=16*e;let k=0;for(let j=0;j<3;j++){const g=E[o+j];k+=nAr[g]>0?nS[g]/nAr[g]:PH.sCont*PH.strScale;}k/=3*PH.sCont*PH.strScale;kE[e]=Math.min(5,Math.max(0.1,k));
+      const A=E[o+3];for(let j=0;j<3;j++)diag[E[o+j]]+=kE[e]*A*D11*(E[o+4+j]**2+E[o+7+j]**2);}
+    // tangent projection, then per plate remove the rigid-rotation part (M w = net torque, M = sum (I - r r^T))
+    const nPl=this.plates.length,acc=new Float64Array(15*nPl);
+    for(let g=0;g<nN;g++){if(!hasEl[g])continue;const x=GX[g],y=GY[g],z=GZ[g],o=3*g;let d=Fn[o]*x+Fn[o+1]*y+Fn[o+2]*z;Fn[o]-=d*x;Fn[o+1]-=d*y;Fn[o+2]-=d*z;
+      const q=15*np[g],f0=Fn[o],f1=Fn[o+1],f2=Fn[o+2];acc[q]+=y*f2-z*f1;acc[q+1]+=z*f0-x*f2;acc[q+2]+=x*f1-y*f0;
+      acc[q+3]+=1-x*x;acc[q+4]+=1-y*y;acc[q+5]+=1-z*z;acc[q+6]-=x*y;acc[q+7]-=x*z;acc[q+8]-=y*z;}
+    const wc=new Float64Array(3*nPl);
+    for(let p=0;p<nPl;p++){const q=15*p;if(acc[q+3]+acc[q+4]+acc[q+5]===0)continue;
+      const M=[acc[q+3],acc[q+6],acc[q+7],acc[q+6],acc[q+4],acc[q+8],acc[q+7],acc[q+8],acc[q+5]],w=cholSolve(M,[acc[q],acc[q+1],acc[q+2]],3);wc[3*p]=w[0];wc[3*p+1]=w[1];wc[3*p+2]=w[2];}
+    for(let g=0;g<nN;g++){if(!hasEl[g])continue;const x=GX[g],y=GY[g],z=GZ[g],o=3*g,p=3*np[g],a=wc[p],b=wc[p+1],c=wc[p+2];Fn[o]-=b*z-c*y;Fn[o+1]-=c*x-a*z;Fn[o+2]-=a*y-b*x;}
+    // conjugate gradients
+    const kap=1e-5,Au=(u,y)=>{y.fill(0);
+      for(let e=0;e<ne;e++){const o=16*e,A=E[o+3];let ex=0,ey=0,gxy=0;
+        for(let k=0;k<3;k++){const g=3*E[o+k],ux=u[g]*E[o+10]+u[g+1]*E[o+11]+u[g+2]*E[o+12],uy=u[g]*E[o+13]+u[g+1]*E[o+14]+u[g+2]*E[o+15];
+          ex+=E[o+4+k]*ux;ey+=E[o+7+k]*uy;gxy+=E[o+7+k]*ux+E[o+4+k]*uy;}
+        const ke=kE[e],sx=ke*(D11*ex+D12*ey),sy=ke*(D12*ex+D11*ey),sxy=ke*D33*gxy;
+        for(let k=0;k<3;k++){const g=3*E[o+k],fx=A*(E[o+4+k]*sx+E[o+7+k]*sxy),fy=A*(E[o+7+k]*sy+E[o+4+k]*sxy);
+          y[g]+=fx*E[o+10]+fy*E[o+13];y[g+1]+=fx*E[o+11]+fy*E[o+14];y[g+2]+=fx*E[o+12]+fy*E[o+15];}}
+      for(let g=0;g<nN;g++){const o=3*g;if(!hasEl[g]){y[o]=y[o+1]=y[o+2]=0;continue;}y[o]+=kap*diag[g]*u[o];y[o+1]+=kap*diag[g]*u[o+1];y[o+2]+=kap*diag[g]*u[o+2];
+        const x=GX[g],yy=GY[g],z=GZ[g],d=y[o]*x+y[o+1]*yy+y[o+2]*z;y[o]-=d*x;y[o+1]-=d*yy;y[o+2]-=d*z;}};
+    // warm start: last solve's displacements where a node's plate is unchanged (loads change slowly)
+    const n3=3*nN,u=new Float64Array(n3),r=Fn.slice(),zv=new Float64Array(n3),pv=new Float64Array(n3),Ap=new Float64Array(n3);
+    if(this._sU&&this._sU.length===n3){const pp=this._sP;for(let g=0;g<nN;g++)if(hasEl[g]&&pp[g]===np[g]){u[3*g]=this._sU[3*g];u[3*g+1]=this._sU[3*g+1];u[3*g+2]=this._sU[3*g+2];}
+      Au(u,Ap);for(let i=0;i<n3;i++)r[i]-=Ap[i];}
+    const prec=(a,o)=>{for(let g=0;g<nN;g++){const q=hasEl[g]?1/(diag[g]*(1+kap)):0;o[3*g]=a[3*g]*q;o[3*g+1]=a[3*g+1]*q;o[3*g+2]=a[3*g+2]*q;}};
+    let bn=0,r0=0;for(let i=0;i<n3;i++){bn+=Fn[i]*Fn[i];r0+=r[i]*r[i];}bn=Math.sqrt(bn);prec(r,zv);pv.set(zv);let rz=0;for(let i=0;i<n3;i++)rz+=r[i]*zv[i];let it=0,res=bn>0?Math.sqrt(r0)/bn:0;
+    for(;it<PH.stressIters&&res>PH.stressTol;it++){Au(pv,Ap);let pAp=0;for(let i=0;i<n3;i++)pAp+=pv[i]*Ap[i];const al=rz/pAp;let rr=0;
+      for(let i=0;i<n3;i++){u[i]+=al*pv[i];r[i]-=al*Ap[i];rr+=r[i]*r[i];}res=Math.sqrt(rr)/bn;prec(r,zv);let rz2=0;for(let i=0;i<n3;i++)rz2+=r[i]*zv[i];const be=rz2/rz;rz=rz2;for(let i=0;i<n3;i++)pv[i]=zv[i]+be*pv[i];}
+    this._sU=u;this._sP=np.slice();
+    // stress per element (N/m) as a 3D tensor, area-averaged to nodes
+    const Sn=new Float64Array(6*nN),wn=new Float64Array(nN);
+    for(let e=0;e<ne;e++){const o=16*e,A=E[o+3];let ex=0,ey=0,gxy=0;
+      for(let k=0;k<3;k++){const g=3*E[o+k],ux=u[g]*E[o+10]+u[g+1]*E[o+11]+u[g+2]*E[o+12],uy=u[g]*E[o+13]+u[g+1]*E[o+14]+u[g+2]*E[o+15];ex+=E[o+4+k]*ux;ey+=E[o+7+k]*uy;gxy+=E[o+7+k]*ux+E[o+4+k]*uy;}
+      const ke=kE[e],sx=ke*(D11*ex+D12*ey),sy=ke*(D12*ex+D11*ey),sxy=ke*D33*gxy,a1=[E[o+10],E[o+11],E[o+12]],a2=[E[o+13],E[o+14],E[o+15]];
+      const S6=[sx*a1[0]*a1[0]+sy*a2[0]*a2[0]+2*sxy*a1[0]*a2[0],sx*a1[1]*a1[1]+sy*a2[1]*a2[1]+2*sxy*a1[1]*a2[1],sx*a1[2]*a1[2]+sy*a2[2]*a2[2]+2*sxy*a1[2]*a2[2],
+        sx*a1[0]*a1[1]+sy*a2[0]*a2[1]+sxy*(a1[0]*a2[1]+a2[0]*a1[1]),sx*a1[0]*a1[2]+sy*a2[0]*a2[2]+sxy*(a1[0]*a2[2]+a2[0]*a1[2]),sx*a1[1]*a1[2]+sy*a2[1]*a2[2]+sxy*(a1[1]*a2[2]+a2[1]*a1[2])];
+      for(let k=0;k<3;k++){const g=E[o+k];wn[g]+=A;for(let c=0;c<6;c++)Sn[6*g+c]+=A*S6[c];}}
+    for(let g=0;g<nN;g++)if(wn[g]>0)for(let c=0;c<6;c++)Sn[6*g+c]/=wn[g];
+    // nodes whose every grid triangle belongs to their plate: the stress there is resolved; within a grid spacing of a
+    // plate's edge it is not (few elements carry the edge's loads), so markers there take the nearest such node's
+    const tc=G.triCount||(G.triCount=(()=>{const c=new Int32Array(nN);for(let q=0;q<tr.length;q++)c[tr[q]]++;return c;})()),ec=new Int32Array(nN);
+    for(let e=0;e<ne;e++){const o=16*e;ec[E[o]]++;ec[E[o+1]]++;ec[E[o+2]]++;}const inner=new Uint8Array(nN);for(let g=0;g<nN;g++)inner[g]=ec[g]>0&&ec[g]===tc[g]?1:0;
+    // to markers: barycentric weights within their grid triangle, over nodes of their own plate
+    const sig=this.mSig,GT=G.T,rsv=this._sRes&&this._sRes.length>=ns?this._sRes:(this._sRes=new Uint8Array(ns+1024));rsv.fill(0,0,ns);
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const t=cH[m],x=X[m],y=Y[m],z=Z[m],p=pl[m],o=6*m;sig.fill(0,o,o+6);if(t<0)continue;
+      let wsum=0;for(let k=0;k<3;k++){const g=GT.tv[3*t+k];if(np[g]!==p||!inner[g])continue;const b2=GT.tv[3*t+(k+1)%3],c2=GT.tv[3*t+(k+2)%3];
+        const w=Math.max(0,GT.orientP(b2,c2,x,y,z));wsum+=w;for(let c=0;c<6;c++)sig[o+c]+=w*Sn[6*g+c];}
+      if(wsum>0){for(let c=0;c<6;c++)sig[o+c]/=wsum;rsv[m]=1;}
+      else{let g=this.nodeOf(G,t,x,y,z,p,inner);if(g<0){let bd=Infinity;for(const a of GT.tv.subarray(3*t,3*t+3))for(const b of G.ring[a])for(const c of G.ring[b]){if(np[c]!==p||!inner[c])continue;
+            const d=(G.X[c]-x)**2+(G.Y[c]-y)**2+(G.Z[c]-z)**2;if(d<bd){bd=d;g=c;}}}
+        if(g>=0)for(let c=0;c<6;c++)sig[o+c]=Sn[6*g+c];}
+      // onto the marker's tangent plane (node tensors lie in their own triangles' planes): S <- P S P, P = I - r r^T
+      {const a=sig[o],b=sig[o+1],c=sig[o+2],d=sig[o+3],e=sig[o+4],f=sig[o+5],Sx=a*x+d*y+e*z,Sy=d*x+b*y+f*z,Sz=e*x+f*y+c*z,q=x*Sx+y*Sy+z*Sz;
+        sig[o]=a-2*x*Sx+q*x*x;sig[o+1]=b-2*y*Sy+q*y*y;sig[o+2]=c-2*z*Sz+q*z*z;sig[o+3]=d-x*Sy-y*Sx+q*x*y;sig[o+4]=e-x*Sz-z*Sx+q*x*z;sig[o+5]=f-y*Sz-z*Sy+q*y*z;}}
+    this._sg={G,np:np.slice(),inner,Sn,hasEl};
+    this.stressInfo={iters:it,residual:res,elements:ne,dropped:total>0?dropped/total:0};}
+  // the nearest node of plate p (with elements) among grid triangle t's corners, or their rings
+  nodeOf(G,t,x,y,z,p,ok){const np=this.nodePlate,tv=G.T.tv;let best=-1,bd=Infinity;
+    const look=g=>{if(np[g]!==p||!ok[g])return;const d=(G.X[g]-x)**2+(G.Y[g]-y)**2+(G.Z[g]-z)**2;if(d<bd){bd=d;best=g;}};
+    for(let k=0;k<3;k++)look(tv[3*t+k]);if(best>=0)return best;
+    for(let k=0;k<3;k++)for(const g of G.ring[tv[3*t+k]])look(g);return best;}
+  // Damage (§7.1) and cracks (§7.3), after each stress solve; dt is the time since the last one. Damage grows where
+  // the stress's second invariant exceeds the strength in shear and compression (shearMul times the tensile strength)
+  // and heals everywhere with tauHeal. Cracks start where tension exceeds the tensile strength.
+  failureStep(dt){const ns=this.nSlots,kind=this.mKind,sig=this.mSig,X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,pl=this.mPlate,pr=[0,0,0,0,0];
+    const best=new Map(); // plate -> [ratio, marker]
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;let D=this.mD[m];
+      principal(sig,6*m,X[m],Y[m],Z[m],pr);const S=this.strength(m),r=pr[0]/S,s2=Math.sqrt(pr[0]*pr[0]-pr[0]*pr[1]+pr[1]*pr[1])/(PH.shearMul*S);this.mSR[m]=r;
+      D+=dt*Math.max(0,s2-1)*(1-D)/PH.tauDamage-dt*D/PH.tauHeal;this.mD[m]=D<0?0:D>1?1:D;
+    }
+    if(!this.forces||!PH.crackOn||!this._sg)return;
+    // Cracks live on the stress grid, where the stress is resolved: a node's strength is the area-weighted mean
+    // (after this step's damage) of the markers it stands for; seeds are nodes whose every grid triangle belongs to
+    // their plate, where the greatest tension exceeds that strength
+    const sg=this._sg,G=sg.G,nN=G.n,nS=new Float64Array(nN),nA=new Float64Array(nN),mNode=this._mNode;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;const g=mNode[m];if(g<0||sg.np[g]!==pl[m])continue;nS[g]+=this.mA[m]*this.strength(m);nA[g]+=this.mA[m];}
+    for(let g=0;g<nN;g++){if(nA[g]>0)nS[g]/=nA[g];}sg.nS=nS;sg.nA=nA;
+    for(let g=0;g<nN;g++){if(!sg.inner[g]||!(nA[g]>0))continue;principal(sg.Sn,6*g,G.X[g],G.Y[g],G.Z[g],pr);const r=pr[0]/nS[g];
+      if(r>1){const e=best.get(sg.np[g]);if(!e||r>e[0])best.set(sg.np[g],[r,g]);}}
+    const seeds=[...best.values()].sort((a,b)=>b[0]-a[0]||a[1]-b[1]);let made=0;
+    for(const [r,g] of seeds){if(made>=2)break;if(this.crack(g,r))made++;}}
+  // a marker beside a boundary (an interface marker or another plate's marker among its neighbours)
+  onEdge(m){const off=this.off,adj=this.adj,p=this.mPlate[m];for(let e=off[m];e<off[m+1];e++){const v=adj[e];if(this.mKind[v]!==INTERIOR||this.mPlate[v]!==p)return true;}return false;}
+  // A crack from seed marker m (tension above strength): Dijkstra's shortest paths over the plate's markers, edge cost
+  // = length x max(5% of strength, strength - tension across the edge) x lognormal noise fixed per edge; the cheapest
+  // path to the plate's edge on each side of the seed (along the direction of least tension, the crack's strike),
+  // joined. Accepted if its mean overstress (tension across it minus strength) is positive and it cuts the plate in
+  // two parts each at least minPlateCells in area; then the smaller part becomes a new plate, and the path and its
+  // sides are damaged, so the crack stays a weakness after it heals into a suture.
+  crack(m0,ratio){const ns=this.nSlots,kind=this.mKind,pl=this.mPlate,P=pl[m0],off=this.off,adj=this.adj,X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,sig=this.mSig,pr=[0,0,0,0,0];
+    const dist=new Float64Array(ns).fill(Infinity),prev=new Int32Array(ns).fill(-1),Sm=new Float64Array(ns),bnd=new Uint8Array(ns),seed=this.mId[0]^0x3c6ef372;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||pl[m]!==P)continue;Sm[m]=this.strength(m);for(let e=off[m];e<off[m+1];e++){const v=adj[e];if(kind[v]!==INTERIOR||pl[v]!==P){bnd[m]=1;break;}}}
+    if(bnd[m0])return false;
+    const snn=(a,b)=>{const mx=X[a]+X[b],my=Y[a]+Y[b],mz=Z[a]+Z[b],dx=X[b]-X[a],dy=Y[b]-Y[a],dz=Z[b]-Z[a];let nx=my*dz-mz*dy,ny=mz*dx-mx*dz,nz=mx*dy-my*dx;const l=Math.hypot(nx,ny,nz)||1;nx/=l;ny/=l;nz/=l;
+      let s=0;for(const v of [a,b]){const o=6*v;s+=nx*(sig[o]*nx+sig[o+3]*ny+sig[o+4]*nz)+ny*(sig[o+3]*nx+sig[o+1]*ny+sig[o+5]*nz)+nz*(sig[o+4]*nx+sig[o+5]*ny+sig[o+2]*nz);}return s/2;};
+    const H=new MinHeap();dist[m0]=0;H.push(0,m0);
+    while(H.size){const a=H.pop();if(a<0)continue;for(let e=off[a];e<off[a+1];e++){const b=adj[e];if(kind[b]!==INTERIOR||pl[b]!==P)continue;
+        const len=Math.sqrt(this.dist2(a,b))*R_KM,Se=(Sm[a]+Sm[b])/2,[n1]=hash2(Math.min(this.mId[a],this.mId[b])*31+Math.max(this.mId[a],this.mId[b]),seed);
+        const c=len*Math.max(0.05*Se,Se-snn(a,b))/1e12*Math.exp(PH.strNoise*2*n1),d=dist[a]+c;if(d<dist[b]){dist[b]=d;prev[b]=a;H.push(d,b);}}}
+    principal(sig,6*m0,X[m0],Y[m0],Z[m0],pr);const tx=pr[2],ty=pr[3],tz=pr[4];let b1=-1,b2=-1;
+    for(let m=0;m<ns;m++){if(!bnd[m]||!(dist[m]<Infinity))continue;const s=(X[m]-X[m0])*tx+(Y[m]-Y[m0])*ty+(Z[m]-Z[m0])*tz;
+      if(s>0){if(b1<0||dist[m]<dist[b1])b1=m;}else if(b2<0||dist[m]<dist[b2])b2=m;}
+    if(b1<0||b2<0)return false;
+    // the path: b1 back to where the two branches meet (the seed, or a fork if they share their first steps; the shared
+    // stub is not part of the cut), then out to b2
+    const up=[],onUp=new Uint8Array(ns);for(let v=b1;v>=0;v=prev[v]){up.push(v);onUp[v]=1;}
+    const down=[];let f=b2;while(f>=0&&!onUp[f]){down.push(f);f=prev[f];}if(f<0)return false;
+    const path=[],inPath=new Uint8Array(ns);for(const v of up){path.push(v);inPath[v]=1;if(v===f)break;}for(let i=down.length-1;i>=0;i--){path.push(down[i]);inPath[down[i]]=1;}
+    if(path.length<3)return false;
+    let over=0,L=0;for(let i=1;i<path.length;i++){const a=path[i-1],b=path[i];const len=Math.sqrt(this.dist2(a,b));over+=len*(snn(a,b)-(Sm[a]+Sm[b])/2);L+=len;}
+    if(!(L>0)||over/L<=0)return false;
+    // the parts left when the path is removed
+    const comp=new Int32Array(ns).fill(-1),areas=[];let nc=0;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||pl[m]!==P||inPath[m]||comp[m]>=0)continue;let A=0;const st=[m];comp[m]=nc;
+      while(st.length){const a=st.pop();A+=this.mA[a];for(let e=off[a];e<off[a+1];e++){const b=adj[e];if(kind[b]===INTERIOR&&pl[b]===P&&!inPath[b]&&comp[b]<0){comp[b]=nc;st.push(b);}}}areas.push(A);nc++;}
+    const minA=PH.minCrackCells*PH.weldCellKm2,order=areas.map((a,i)=>i).sort((a,b)=>areas[b]-areas[a]);
+    if(nc<2||areas[order[1]]<minA)return false;
+    // inheritance (Stage 5 check): damage along the path before it cracks, against the plate's mean
+    {let dp=0,dpl=0,np2=0;for(const v of path)dp+=this.mD[v];for(let m=0;m<ns;m++)if(kind[m]===INTERIOR&&pl[m]===P){dpl+=this.mD[m];np2++;}
+      (this.crackLog||(this.crackLog=[])).push([this.t,dp/path.length,dpl/np2]);if(this.crackLog.length>500)this.crackLog.shift();}
+    const Q=this.addPlate(this.plates[P].W);Q.Q.set(this.plates[P].Q);Q.parent=P;const take=order[1];let contA=0,contB=0;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||pl[m]!==P)continue;if(comp[m]===take){pl[m]=Q.id;if(this.mK[m])contB+=this.mA[m];}else if(this.mK[m])contA+=this.mA[m];}
+    for(const v of path){this.mD[v]=Math.max(this.mD[v],PH.dCrack);for(let e=off[v];e<off[v+1];e++){const b=adj[e];if(kind[b]===INTERIOR)this.mD[b]=Math.max(this.mD[b],PH.dCrackSide);}}
+    const c=norm3([X[m0],Y[m0],Z[m0]]),big=3*this.cellA;
+    this.log("rift",`${contA>big&&contB>big?"Continental rift":"Rift"}: plate ${P} cracks under tension (${Math.round(L*R_KM)} km, ${ratio.toFixed(1)} times its strength where it began); plate ${Q.id} breaks away`,c);
+    this.mStats.cracks=(this.mStats.cracks||0)+1;this.maintainInterfaces();this.buildAdjacency();this.updateStats(true);return true;}
   // Subduction starting at an old passive margin [conjecture]: old oceanic lithosphere beside a continent on the same
   // plate is dense enough to founder. Per plate, at a rate proportional to its length of such margin, the ocean
   // connected to a chosen margin marker becomes a new plate, and the continent's edge gets a seed slab of that ocean
@@ -761,7 +1217,11 @@ class MeshWorld extends World{
   step(){const dt=this.dt,kind=this.mKind;
     {const b=Math.floor(this.t/C.SLAB_DT),q=((b%C.SLAB_BINS)+C.SLAB_BINS)%C.SLAB_BINS;if(this.slabT[q]!==b*C.SLAB_DT){this.slabT[q]=b*C.SLAB_DT;this.slab.fill(0,q*this.N,(q+1)*this.N);}this.slabQ=q;}
     for(let i=0;i<this.N;i++)this.trench[i]*=0.85;
-    this.classifyInterfaces();if(this.forces){if(this.mantle)this.mantleStep();this.slabUpkeep();this.solveVelocities();}this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
+    this.classifyInterfaces();
+    if(this.forces){if(this.mantle)this.mantleStep();this.slabUpkeep();
+      const due=PH.crackOn&&this.t-(this.tStress??-1e9)>=PH.stressEvery-1e-9;this._loadsDue=due;this.solveVelocities();
+      if(due&&this._loadsReady){this._loadsReady=false;this.stressStep();this.failureStep(this.tStress===undefined?0:this.t-this.tStress);this.tStress=this.t;}}
+    this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
     this.surfaceProcesses();this.recordFaults();
     if(this.forces&&this.initOn)this.initiation(); // before t advances: the seed slab is fed at this step's time
     if(this.forces)this.absorbSlivers();
@@ -866,7 +1326,7 @@ class MeshWorld extends World{
         best=kind[v]===INTERIOR?v:this.viewMarker(px,py,pz,v);}
       vc[i]=v;vid[i]=mid[v];prev=v;
       this.owner[i]=this.mPlate[best];this.bodyIdx[i]=best;this.wT[i]=this.mT[best];this.wB[i]=this.mB[best];this.wS[i]=this.mS[best];this.wK[i]=this.mK[best];
-      this.wCol[i]=this.mCol[best];this.elev[i]=this.mE[best];}
+      this.wCol[i]=this.mCol[best];this.elev[i]=this.mE[best];if(this.wD){this.wD[i]=this.mD[best];this.wSR[i]=this.mSR[best];}}
     this.viewStale=false;this.surface();}
   ensureView(){if(this.viewStale)this.computeView();}
   // the island event reads the markers (the view may be built elsewhere): the marker the hotspot's cell shows
@@ -906,6 +1366,10 @@ class MeshWorld extends World{
   merge(a,b){const purge=()=>{for(const k of [...this.pairs.keys()]){const x=Math.floor(k/4096),y=k%4096;if(x===a.id||y===a.id||x===b.id||y===b.id)this.pairs.delete(k);}};
     if(!a.alive||!b.alive){purge();return;}
     const [Wn,L]=a.area>=b.area?[a,b]:[b,a];
+    // a suture is born weak (§7.2): the markers beside the boundary that vanishes take damage (not for absorbed slivers)
+    if(!this._absorb&&this.off)for(let m=0;m<this.nSlots;m++){if(this.mKind[m]!==IFACE)continue;let sa=false,sb=false;
+      for(let q=0;q<this.iN[m];q++){const p=this.iPlate[3*m+q];if(p===a.id)sa=true;if(p===b.id)sb=true;}if(!sa||!sb)continue;
+      for(let e=this.off[m];e<this.off[m+1];e++){const v=this.adj[e];if(this.mKind[v]===INTERIOR&&(this.mPlate[v]===a.id||this.mPlate[v]===b.id))this.mD[v]=Math.max(this.mD[v],PH.dSuture);}}
     for(let m=0;m<this.nSlots;m++)if(this.mKind[m]===INTERIOR&&this.mPlate[m]===L.id)this.mPlate[m]=Wn.id;
     const tot=Wn.area+L.area;for(let k=0;k<3;k++)Wn.W[k]=(Wn.W[k]*Wn.area+L.W[k]*L.area)/tot;Wn.area=tot;Wn.contArea+=L.contArea;
     if(this._absorb)this.log("absorbed",`Plate ${L.id}, too small for the grid to resolve, joins plate ${Wn.id}`,Wn.c);
@@ -938,7 +1402,7 @@ class MeshWorld extends World{
 function workerMain(){
   let w=null,running=false,until=0,handoff=null,markers=false,lastEv=0,ms=0,helper=null,busy=false,snap=null,evBuf=[];
   const ch=new MessageChannel();ch.port1.onmessage=()=>tick();const later=()=>ch.port2.postMessage(0);
-  const VIEW=["owner","wK","wT","wB","wS","wR","wRA","elev","bodyIdx"];
+  const VIEW=["owner","wK","wT","wB","wS","wR","wRA","elev","bodyIdx","wD","wSR"];
   const summary=()=>({t:w.t,steps:w.steps,landFrac:w.landFrac,contFrac:w.contFrac,oceanAge:w.oceanAge,meanUnits:w.meanUnits,netRot:w.netRot,rmsSpeed:w.rmsSpeed,
     msPerStep:ms,mc:w.mc?Array.from(w.mc):null,plates:w.plates.map(P=>({id:P.id,alive:P.alive,hue:P.hue,W:P.W.slice(),c:P.c.slice(),area:P.area,contArea:P.contArea,Q:Array.from(P.Q),parent:P.parent,mergedInto:P.mergedInto})),
     nEvents:w.nEvents,trench:w.trench.slice()});
@@ -951,7 +1415,7 @@ function workerMain(){
   // with a helper: a copy of what the view needs goes out; the summary waits for it
   function sendSnap(){const n=w.nSlots,pool=w.pool,M=markerCopy();
     const m={steps:w.steps,n:w.n,N:w.N,X:M.X,Y:M.Y,Z:M.Z,kind:M.K,I:M.I,mId:w.mId.slice(0,n),plate:w.mPlate.slice(0,n),T:w.mT.slice(0,n),B:w.mB.slice(0,n),S:w.mS.slice(0,n),
-      K:w.mK.slice(0,n),E:w.mE.slice(0,n),col:w.mCol.slice(0,n),off:w.off.slice(0,n+1),adj:w.adj.slice(0,w.off[n]),cnt:pool.cnt.slice(),pT:pool.T.slice(),pR:pool.R.slice(),pB:pool.B.slice(),markers};
+      K:w.mK.slice(0,n),E:w.mE.slice(0,n),Dm:w.mD.slice(0,n),SR:w.mSR.slice(0,n),col:w.mCol.slice(0,n),off:w.off.slice(0,n+1),adj:w.adj.slice(0,w.off[n]),cnt:pool.cnt.slice(),pT:pool.T.slice(),pR:pool.R.slice(),pB:pool.B.slice(),markers};
     snap={steps:w.steps,summary:summary()};busy=true;helper.postMessage(m,buffers(m));}
   function onView(v){busy=false;const s=snap,last=!running&&w.steps===s.steps;
     const out={type:last?"stopped":"state",running:!last,...s.summary,events:takeEvents(),view:v.view},tr=buffers(out.view);tr.push(out.trench.buffer);
@@ -984,12 +1448,12 @@ function viewHelperMain(){
   const o=Object.create(MESH.MeshWorld.prototype);
   self.onmessage=e=>{const m=e.data;
     if(!o.cube||o.N!==m.N){o.cube=SIM.getCube(m.n);o.N=m.N;o._vcache=null;}
-    Object.assign(o,{tri:{X:m.X,Y:m.Y,Z:m.Z},mKind:m.kind,mId:m.mId,off:m.off,adj:m.adj,mPlate:m.plate,mT:m.T,mB:m.B,mS:m.S,mK:m.K,mCol:m.col,mE:m.E,
+    Object.assign(o,{tri:{X:m.X,Y:m.Y,Z:m.Z},mKind:m.kind,mId:m.mId,off:m.off,adj:m.adj,mPlate:m.plate,mT:m.T,mB:m.B,mS:m.S,mK:m.K,mCol:m.col,mE:m.E,mD:m.Dm,mSR:m.SR,
       pool:{cnt:m.cnt,T:m.pT,R:m.pR,B:m.pB}});
     const N=m.N;Object.assign(o,{owner:new Int16Array(N),bodyIdx:new Int32Array(N),wT:new Float32Array(N),wB:new Float32Array(N),wS:new Float32Array(N),wK:new Uint8Array(N),
-      wCol:new Int32Array(N),elev:new Float32Array(N),wR:new Uint8Array(N),wRA:new Float32Array(N)});
+      wCol:new Int32Array(N),elev:new Float32Array(N),wR:new Uint8Array(N),wRA:new Float32Array(N),wD:new Float32Array(N),wSR:new Float32Array(N)});
     o.computeView();
-    const view={owner:o.owner,wK:o.wK,wT:o.wT,wB:o.wB,wS:o.wS,wR:o.wR,wRA:o.wRA,elev:o.elev,bodyIdx:o.bodyIdx},tr=[];for(const k in view)tr.push(view[k].buffer);
+    const view={owner:o.owner,wK:o.wK,wT:o.wT,wB:o.wB,wS:o.wS,wR:o.wR,wRA:o.wRA,elev:o.elev,bodyIdx:o.bodyIdx,wD:o.wD,wSR:o.wSR},tr=[];for(const k in view)tr.push(view[k].buffer);
     const out={steps:m.steps,view};if(m.markers){out.markers={X:m.X,Y:m.Y,Z:m.Z,K:m.kind,I:m.I};for(const k of ["X","Y","Z","kind","I"])tr.push(m[k].buffer);}
     self.postMessage(out,tr);};
 }

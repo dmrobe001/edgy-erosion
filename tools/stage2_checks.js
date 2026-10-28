@@ -53,7 +53,11 @@ for (const seed of seeds) {
   console.log(`  rms speed  mean ${mean.toFixed(2)} cm/yr, range ${Math.min(...rms).toFixed(2)}-${Math.max(...rms).toFixed(2)}; every 10 Myr: ${series.filter((_, i) => i % 5 === 0).map(s => `${s[0]}:${s[1].toFixed(1)}`).join(" ")}`);
   console.log(`  plates larger than 1% of the sphere: ${(nBig / rms.length).toFixed(1)} on average (Earth: about 10)`);
   const per = x => ((x || 0) * 1000 / (T - skip)).toFixed(0);
-  console.log(`  events per Gyr: subduction starts ${per(evN.initiation)}, welds ${per(evN.suture)}, timed rifts ${per(evN.rift)}, plates subducted away ${per(evN.lost)}`);
+  console.log(`  events per Gyr: subduction starts ${per(evN.initiation)}, welds ${per(evN.suture)}, rifts ${per(evN.rift)}, plates subducted away ${per(evN.lost)}`);
+  if (w.mD) { let a = 0, d = 0, hi = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m] === 1) { a += w.mA[m]; d += w.mA[m] * w.mD[m]; if (w.mD[m] > 0.5) hi += w.mA[m]; }
+    if (w.crackLog && w.crackLog.length) { const L = w.crackLog.filter(c => c[0] >= skip); const a = L.reduce((x, c) => x + c[1], 0) / (L.length || 1), b = L.reduce((x, c) => x + c[2], 0) / (L.length || 1);
+      console.log(`  inheritance: damage along crack paths before they cracked ${a.toFixed(2)}, against their plates' mean ${b.toFixed(2)} (${L.length} cracks)`); }
+    console.log(`  damage at the end: mean ${(d / a).toFixed(2)}, share of the surface above 0.5 ${(100 * hi / a).toFixed(0)}%; cracks ${w.mStats.cracks || 0}${w.stressInfo ? `; last stress solve ${w.stressInfo.iters} iterations` : ""}`); }
   console.log(`  net rotation  median ${med(net).toFixed(3)} deg/Myr, max ${Math.max(...net).toFixed(3)}`);
   console.log(`  Forsyth-Uyeda  pooled rho ${rho.toFixed(2)} (${xs.length} plate samples); per-sample median ${med(perSample).toFixed(2)} (${perSample.length} samples)`);
   console.log(`  tail  steps with a plate >1% faster than 10 cm/yr: ${(100 * fast10 / rms.length).toFixed(1)}%, 15: ${(100 * fast15 / rms.length).toFixed(1)}%; any plate: ${(100 * any10 / rms.length).toFixed(1)}%, ${(100 * any15 / rms.length).toFixed(1)}%; longest spell >10 (large plates) ${longest.toFixed(0)} Myr`);

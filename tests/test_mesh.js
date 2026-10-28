@@ -85,6 +85,25 @@ const contV = w => { let v = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m
     while (wi.t < 80) { const v0 = contV(wi), l0 = { ...wi.ledger }; wi.step(); let d = 0; for (const k in wi.ledger) if (k.startsWith("cont")) d += wi.ledger[k] - (l0[k] || 0);
       worst = Math.max(worst, Math.abs(contV(wi) - v0 - d) / v0); if (wi.steps % 10 === 0) { const a = wi.audit(); if (!a.mesh.ok || Math.abs(a.closure) > 0.02) bad++; } }
     ok(worst < 1e-8 && bad === 0 && (wi.mStats.initiations || 0) > 0, `subduction starting at old margins (option): ${wi.mStats.initiations || 0} starts in 80 Myr; ledger worst ${worst.toExponential(1)}; mesh and area budget held`); }
+  // stress recovery (§7): converged, tangent to the sphere, zero without loads; damage within [0, 1]
+  { const ws = new MESH.MeshWorld({ ...opts, seed: "stress" }); while (ws.t < 30) ws.step(); ws._loadsDue = true; ws.solveVelocities(); ws.stressStep(); // checked as solved (markers move after)
+    let tan = 0, mag = 0, dOk = true;
+    for (let m = 0; m < ws.nSlots; m++) { if (ws.mKind[m] !== 1) continue; const S = ws.mSig, o = 6 * m, x = ws.tri.X[m], y = ws.tri.Y[m], z = ws.tri.Z[m];
+      const v = [S[o] * x + S[o + 3] * y + S[o + 4] * z, S[o + 3] * x + S[o + 1] * y + S[o + 5] * z, S[o + 4] * x + S[o + 5] * y + S[o + 2] * z];
+      tan = Math.max(tan, Math.hypot(...v)); mag = Math.max(mag, Math.abs(S[o]) + Math.abs(S[o + 1]) + Math.abs(S[o + 2])); if (!(ws.mD[m] >= 0 && ws.mD[m] <= 1)) dOk = false; }
+    const si = ws.stressInfo || {};
+    ok(si.residual <= 1.001 * MESH.PH.stressTol && tan < 1e-6 * mag && dOk, `stress: solved to ${(si.residual || 0).toExponential(1)} in ${si.iters} iterations; normal component ${(tan / mag).toExponential(1)} of the largest; damage within [0, 1]`);
+    const w0 = new MESH.MeshWorld({ ...opts, n: 16, seed: "still", mantle: false });
+    for (let m = 0; m < w0.nSlots; m++) if (w0.mKind[m] === 1) { w0.mK[m] = 0; w0.mT[m] = 7; w0.mB[m] = -50; w0.sA[m] = 0; }
+    for (const P of w0.plates) P.W.fill(0); w0._loadsDue = true; w0.solveVelocities(); w0.stressStep(); let mx = 0; for (let q = 0; q < 6 * w0.nSlots; q++) mx = Math.max(mx, Math.abs(w0.mSig[q]));
+    ok(mx < 1, `uniform ocean, no slabs, no mantle: no stress (largest ${mx.toExponential(1)} N/m)`); }
+  // cracks keep the ledger, the mesh and the area budget (weak plates, so they crack within the run)
+  { const keep = MESH.PH.strScale; MESH.PH.strScale = 1; const wc = new MESH.MeshWorld({ ...opts, seed: "cracks" }); let worst = 0, bad = 0;
+    const contV = w => { let v = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m] === 1 && w.mK[m]) v += w.mA[m] * w.mT[m]; return v; };
+    while (wc.t < 80) { const v0 = contV(wc), l0 = { ...wc.ledger }; wc.step(); let d = 0; for (const k in wc.ledger) if (k.startsWith("cont")) d += wc.ledger[k] - (l0[k] || 0);
+      worst = Math.max(worst, Math.abs(contV(wc) - v0 - d) / v0); if (wc.steps % 10 === 0) { const a = wc.audit(); if (!a.mesh.ok || Math.abs(a.closure) > 0.02) bad++; } }
+    MESH.PH.strScale = keep;
+    ok(worst < 1e-8 && bad === 0 && (wc.mStats.cracks || 0) > 0, `cracks: ${wc.mStats.cracks || 0} in 80 Myr on weak plates; ledger worst ${worst.toExponential(1)}; mesh and area budget held`); }
   const w2 = new MESH.MeshWorld({ ...opts, seed: "balance" }); w2.checkSolve = true; let worst = 0;
   while (w2.t < 60) { w2.step(); worst = Math.max(worst, w2.solveResidual); }
   ok(worst < 1e-6, `torque balance (I7): |K omega - b| / |b| below 1e-6 at every step to 60 Myr (worst ${worst.toExponential(1)})`);

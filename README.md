@@ -67,7 +67,7 @@ node tests/test_budget.js --t=2400 # full-length crust budget run
 node tests/bench.js --t=300        # ms per step at each resolution
 node tests/test_mesh.js --n=64 --t=300       # the marker core's invariants (section 3.14)
 node tools/compare_cores.js --n=96 --t=800   # the marker core against the lattice core, three seeds (about 15 minutes; --kin=walk for Stage 1's random walk)
-node tools/stage2_checks.js --n=96 --t=600   # plate speeds from forces against Earth: RMS, Forsyth-Uyeda, collisions, net rotation, tail, plate count (section 3.15; a few minutes a seed)
+node tools/stage2_checks.js --n=96 --t=600   # plates from forces against Earth: speed, Forsyth-Uyeda, collisions, net rotation, tail, plate count, rifts, damage, inheritance (sections 3.15-3.16; about ten minutes a seed)
 ```
 
 ### 2.1 Session exports
@@ -339,6 +339,36 @@ On the marker core's default option, plate velocities come from a balance of for
 - **Before these changes** (Stage 2 with Stage 1's weld counter and no mantle), the world welded down to about 6 plates, nearly stopped for long spells, and missed every speed check.
 
 **Cost:** about twice the random walk per step at n = 96 (about 310 against 150 ms headless): faster plates need twice the substeps, and the force balance takes about 55 ms.
+
+### 3.16 Cracks from stress, and strength with memory (Stage 5, first part, of `L0_MESH_SPEC.md`)
+
+On the marker core driven by forces, plates no longer split on a timer: they crack where the tension inside them exceeds their strength. Details in `L0_MESH_SPEC.md` §11.4.
+
+- **Stress inside rigid plates.** Every 5 Myr, each plate is treated as a thin elastic sheet loaded by the forces of the balance (drag, GPE, slab pull and resistance, suction, coupling), which have zero net torque per plate, exactly the condition for them to balance. The sheet is solved on a fixed grid of 8,000 nodes, about 250 km apart, and the stress (depth-integrated, N/m) is interpolated back to the markers. Stiffness follows strength, so weak patches shed load onto the plate around them, while a weak band across the plate must carry the load. The median stress comes out about 5×10¹² N/m, Earth's intraplate order.
+- **Strength:**
+  - **Intrinsic:** old ocean is stronger than young (√age); thick continental crust is weaker than thin; cratons are twice as strong.
+  - **Heterogeneity:** a smooth random field about 500 km across, carried with the material.
+  - **Damage**, the memory of past failure, down to a residual quarter of the strength. Crack paths and their sides, sutures, and the starting continents' old orogenic belts start damaged; damage also grows where stress exceeds strength (in shear and compression, three times the tensile strength) and heals over about 300 Myr.
+  - **Scale:** one overall scale is fitted to Earth's rift rate.
+- **Cracks.** They are traced on the stress grid, where the stress is resolved. Where tension exceeds strength at a node away from the plate's edges, a path runs to the edge on both sides along the cheapest route through strength minus tension. It is accepted if tension exceeds strength on average along it and it leaves both parts at least about 0.55 million km². The plate splits there, and the path becomes a band of damage about 250 km wide.
+- **The page:**
+  - **Stress** shows tension divided by strength: white none, orange half, red at failure, blue where every direction is in compression.
+  - **Damage** shows weakness left by past failure.
+  - Rifts are logged with their length and how far the tension exceeded the strength where they began.
+
+**Measured** (`tools/stage2_checks.js --n=96`, three seeds, 100–450 Myr):
+- **Rift rate** 60–74 per Gyr (fitted, upper edge of Earth's guessed 15–60).
+- **Rifts reopen old scars.** The ground a crack runs through was 5–8 times more damaged before it cracked than its plate on average. That inheritance (the Wilson cycle) was not put in as a rule; it follows from damage lowering strength.
+- **Damage stays in narrow zones:** 3–4% of the surface above half.
+- **Plates:** 9–12 larger than 1% of the sphere.
+- **Speed:** RMS 3.8–4.4 cm/yr.
+- **Still weak:** the speed–trench correlation is 0.37–0.43.
+- **Cost:** about 550–800 ms a step at n = 96.
+
+**Caveats [conjecture]:**
+- **The fitted strengths are six times literature values,** which more likely means the force model passes too much slab pull through the plates than that rocks are that strong.
+- **Some resolution dependence remains** (n = 48 rifts less often).
+- **Stress above strength is not capped** (elastic, not plastic).
 
 ---
 
@@ -756,7 +786,7 @@ Also:
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
 - **The marker core (section 3.14)** removes resampling from the material but is 3.5–4 times slower, settles at less continental crust (the lattice core's continents lean on resampled arc crust), and shows older seafloor. The view still samples moving markers, so the grid flickers.
-- **Forces (section 3.15):** the speed–trench correlation is marginal and collisions slow convergence less often than on Earth. Plates still split by Stage 1's timer, and new trenches start only where it happens to split one; subduction starting at passive margins, as built, makes too many small, fast plates. Plumes and dynamic topography from the mantle are not built. Next, per `L0_MESH_SPEC.md`: deformation (Stage 3), or damage and cracking (Stage 5), which should replace the timer and the weld rule.
+- **Forces (section 3.15):** the speed–trench correlation is marginal and collisions slow convergence less often than on Earth. Plates crack from stress now (section 3.16), but new trenches start only where cracks happen to close; subduction starting at passive margins, as built, makes too many small, fast plates. Welding is still a rule. Plumes and dynamic topography from the mantle are not built. Next, per `L0_MESH_SPEC.md`: coupling damage and emergent welding (§7.2), or deformation (Stage 3), which would also replace the coarse elastic stress solve.
 - **L1:** see section 5.7.
 
 ---

@@ -43,6 +43,16 @@ function computeColors(){
     let r,gg,b;
     if(view==="elev"){if(!K[i]&&tr[i]>0.05)e-=2.2*Math.min(1,tr[i]);let k=Math.round((e+8)/16*1023);k=k<0?0:k>1023?1023:k;r=LUT_E[k*3];gg=LUT_E[k*3+1];b=LUT_E[k*3+2];}
     else if(view==="rock"){const c=ROCK_RGB[R[i]]||ROCK_RGB[1];const age=t-RA[i];const f=1-0.32*Math.min(1,age/1500);r=c[0]*f;gg=c[1]*f;b=c[2]*f;s=1+(s-1)*0.6;}
+    else if(view==="stress"||view==="damage"){s=1+(s-1)*0.4;
+      if(!w.wD){r=gg=b=170;}
+      else if(view==="damage"){const d=Math.min(1,Math.max(0,w.wD[i])),base=K[i]?[214,204,184]:[188,202,216];r=base[0]+(112-base[0])*d;gg=base[1]+(28-base[1])*d;b=base[2]+(120-base[2])*d;}
+      else{const x=w.wSR[i];
+        if(x<0){const y=Math.min(1,-x);r=236+(60-236)*y;gg=232+(110-232)*y;b=224+(200-224)*y;}
+        else if(x<0.5){const y=x/0.5;r=236+(240-236)*y;gg=232+(150-232)*y;b=224+(50-224)*y;}
+        else if(x<1){const y=(x-0.5)/0.5;r=240+(205-240)*y;gg=150+(35-150)*y;b=50+(35-50)*y;}
+        else{const y=Math.min(1,(x-1)/2);r=205+(110-205)*y;gg=35*(1-y);b=35+(20-35)*y;}}
+      // plate edges stay visible
+      for(let k=0;k<4;k++){if(O[nb[4*i+k]]!==O[i]){r*=0.55;gg*=0.55;b*=0.55;break;}}}
     else{const p=O[i],c=pc[p][K[i]?0:1];r=c[0];gg=c[1];b=c[2];s=1+(s-1)*0.4;
       for(let k=0;k<4;k++){const j=nb[4*i+k],q=O[j];if(q===p)continue;
         const P=pl[p],Q=pl[q],dx=Q.W[0]-P.W[0],dy=Q.W[1]-P.W[1],dz=Q.W[2]-P.W[2],x=pos[3*i],y=pos[3*i+1],z=pos[3*i+2];
@@ -313,6 +323,8 @@ function updateLegend(){
   const L=$("legend");
   if(view==="elev")L.innerHTML=`<span class="num">−8 km</span><span class="bar" style="background:${gradCss(ELEV_STOPS,-8,8)}"></span><span class="num">+8 km</span>`;
   else if(view==="rock"||view==="l1")L.innerHTML=ROCKS.slice(1).map(r=>`<span><i class="swatch" style="background:${r.c}"></i>${r.name}</span>`).join("");
+  else if(view==="stress")L.innerHTML=world.wD?`<span><i class="swatch" style="background:rgb(60,110,200)"></i>Compression</span><span class="num">tension ÷ strength: 0</span><span class="bar" style="background:linear-gradient(90deg,rgb(236,232,224),rgb(240,150,50),rgb(205,35,35),rgb(110,0,20))"></span><span class="num">1 fails</span>`:`<span>Stress needs the marker core driven by forces</span>`;
+  else if(view==="damage")L.innerHTML=world.wD?`<span class="num">damage 0</span><span class="bar" style="background:linear-gradient(90deg,rgb(200,203,200),rgb(112,28,120))"></span><span class="num">1 (residual strength)</span>`:`<span>Damage needs the marker core driven by forces</span>`;
   else L.innerHTML=`<span><i class="swatch" style="background:var(--conv)"></i>Convergent</span><span><i class="swatch" style="background:var(--div)"></i>Divergent</span><span><i class="swatch" style="background:var(--trans)"></i>Transform</span>`;
 }
 function frame(now){

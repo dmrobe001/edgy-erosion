@@ -263,6 +263,34 @@ The world welds down to a few large plates and starts no new trenches. The faili
 - Speed–trench correlation 0.38–0.51: marginal.
 - Collisions slow 2–4× in about 30% of cases once dominant.
 
+## L0 marker core, Stage 5 (first part): cracks from stress, strength with memory
+
+**What:** the timed splits replaced by cracks where tension exceeds strength (L0_MESH_SPEC.md §11.4). Stress is recovered from the rigid plates' loads on a coarse elastic sheet. Strength varies with ocean age, crust thickness and cratons, carries a smooth random field, and keeps damage from past failures. Cracks run along the cheapest path through strength minus tension. One coefficient was fitted: an overall strength scale, to the rift rate.
+
+**The loads check the force bookkeeping.** Every force of the balance was assembled as a vector on an interior marker. Each plate's loads summed to 0.05–0.3% of their total magnitude in net torque: the torque balance and the force-by-force assembly agree.
+
+**Cracking ran away, and the causes came in layers.** Each was found by instrumenting crack attempts (seed position, damage, strength, ratio, why rejected):
+- **Damage fed on itself** under uniform stiffness. A weakened region kept the same stress, so it weakened further, until half the surface was damaged. Stiffness now follows strength: isolated weak patches shed load, while weak bands across a plate still carry it.
+- **Point loads at plate edges.** Seeds sat one marker from a boundary at 100–2,000 times their strength. A boundary force on a node few elements share gives a stress that grows without bound as the grid is refined. Loads are now spread by barycentric weight, and stress is read only at nodes the plate surrounds; within a grid spacing of an edge, markers take the nearest such node's.
+- **The wrong strength for damage.** Damage grew wherever the stress's second invariant exceeded the *tensile* strength, which near trenches meant everywhere under compression. Compression and shear are now compared with three times the tensile strength. Fully damaged rock keeps a quarter of its strength, instead of 2%.
+- **Resolution dependence, three times over:**
+  - Per-marker strength noise made the weakest point in a plate weaker with more markers; it is now a smooth field about 500 km across.
+  - Each plate offered only its best seed, often a marker on its edge, which was rejected and blocked interior seeds. The edge ring is narrower at finer resolution.
+  - Rejecting forked paths (both branches sharing their first steps) happened more on coarse meshes. Forks are now accepted without the stub.
+
+  When these did not suffice, cracks were moved onto the stress grid itself: seeds, paths, acceptance and the damage band all at 250 km, whatever the marker resolution. With cracks switched off, node stress and strength now have the same distributions at n = 48 and 96.
+- **Calibration.** The rift rate fell smoothly with strength once the above were fixed. At n = 96, six times the literature strengths gives 60–74 rifts per Gyr; five gives 29–91.
+
+**Measured** (n = 96, three seeds, 100–450 Myr):
+- Crack paths ran through ground 5–8 times more damaged than their plates' average. Old scars are reused, which was not put in as a rule.
+- Damage stays on 3–4% of the surface.
+- 9–12 plates; RMS 3.8–4.4 cm/yr; the Forsyth–Uyeda correlation 0.37–0.43.
+
+**Open:**
+- The fitted strengths, six times the literature's, more likely mean too much slab pull is transmitted through the plates.
+- n = 48 still rifts less often with the same constants; the small-plate threshold, set in markers below n = 96, is one identified source.
+- The stress solve takes about 1 s every 5 Myr: a GPU or multigrid candidate.
+
 ## Things that turned out not to matter, or were left alone
 
 - **The first L1 fault-trace algorithm** (strict kind matching) mostly needed looser grouping, not a different tracer.

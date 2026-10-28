@@ -539,6 +539,80 @@ Each should raise the plate count, and with it speed and ρ, if the reading is r
 
 **What remains [conjecture].** The plates are still split by Stage 1's timer, and welded by a rule. New subduction starts only where the timer happens to split a plate. The next real gains should come from Stage 5: cracks that follow damage instead of the timer, and initiation where forces exceed strength, rather than either rule here.
 
+### 11.4 Stage 5, first part: stress, heterogeneous strength with memory, and cracks
+
+Plates crack where the stress inside them exceeds their strength; the timed splits are gone. Built in `MeshWorld.stressStep`, `failureStep` and `crack` (`src/mesh.js`); constants in `PH`.
+
+**Stress recovery [derived form].**
+- **The plate as a sheet.** Rigid plates have no strain, but they carry stress. Each plate is treated as a thin elastic sheet loaded by every force of the balance, with the solved velocities: basal and mantle drag per marker, GPE per triangle, and slab pull, resistance, suction and coupling at its boundary. This is the standard way intraplate stress is modelled (Richardson 1992; Coblentz and others).
+- **The loads are in equilibrium by construction.** On a sphere the only rigid motions of a shell are rotations, so zero net torque, which the balance gives each plate, is exactly the condition for its tangential loads to balance. Assembled force by force, each plate's loads sum to 0.05–0.3% of their total magnitude in net torque. That residue comes from moving boundary forces onto frontier markers and from the coupling's Picard tolerance; it is removed exactly before the solve.
+- **On a fixed grid.** The solve uses a grid of 8,000 Fibonacci nodes (about 250 km apart), triangulated once. Each node takes the plate of its nearest marker; a grid triangle belongs to a plate when its three nodes do.
+  - **Loads:** a marker's load is shared among its plate's nodes around it by barycentric weight.
+  - **Element:** plane-stress linear triangles, Poisson's ratio 0.25.
+  - **Solver:** conjugate gradients with a Jacobi preconditioner, to 10⁻³; a spring to ground of 10⁻⁵ removes the rotations.
+- **Stiffness tracks strength [rule].** Element stiffness is in proportion to effective strength, limited to 1:50. An isolated weak patch is shielded by the stronger plate around it; a weak band crossing the plate still carries the plate's load. With uniform stiffness, the stress resultants (N/m) would not depend on the elastic constants at all.
+- **Interpolation:** stress goes back to markers from the nodes of their own plate, projected onto each marker's tangent plane. Within a grid spacing of a plate's edge, a marker takes the nearest fully surrounded node's stress: the edge is not resolved.
+- **Measured** (no damage, n = 48, 60 Myr): σ_II median 5×10¹² N/m, 90th percentile 2×10¹³, 99th 4×10¹³. Earth's intraplate stress is 10¹²–10¹³ N/m (10–100 MPa over about 100 km), so the median is Earth's and the tail sits where slab pull is transmitted.
+
+**Strength, heterogeneous, with memory.**
+
+| Part | Rule | Kind |
+|---|---|---|
+| Ocean | 1.5×10¹³ N/m at 100 Myr, rising with √age (capped at 150 Myr) | measured order |
+| Continent | 6×10¹² N/m at 33 km of crust, in proportion to 33/T within 0.5–1.5 (thick crust is weaker); twice in cratons (columns whose base unit is cratonic basement) | measured order |
+| Heterogeneity | Lognormal, σ = 0.3, from a smooth random field with features about 500 km across, evaluated in the plate's own frame when a marker is first used, then kept: it travels with the material | conjecture |
+| Damage D | Effective strength S·(1 − 0.75 D): fully damaged rock keeps a quarter (faults keep their friction) | conjecture |
+| Damage growth | dD/dt = max(0, σ_II/(3 S_eff) − 1)(1 − D)/τ_d − D/τ_heal, τ_d = 10 Myr, τ_heal = 300 Myr. Compression and shear are compared with three times the tensile strength | measured order for the factor; conjecture for the times |
+| Past failures | A crack's path takes D = 1 and its sides 0.7; a suture 0.8 beside the vanished boundary; the starting continents' old orogenic belts start at 0.5 | rule |
+| Scale | All strengths times 6, fitted at n = 96 to a rift rate of 15–60 per Gyr | calibrated |
+
+**Cracks (§7.3, on the stress grid).**
+- **Seeds:** nodes whose every grid triangle belongs to their plate, where the greatest tension exceeds the node's strength (the area-weighted mean over the markers it stands for).
+- **Paths:** Dijkstra over the plate's nodes, edge cost = length × max(5% of strength, strength − tension across the edge). The cheapest path to the plate's edge is taken on each side of the seed, along the direction of least tension, and the two are joined where they meet; a forked crack drops the shared stub.
+- **Acceptance:** the mean overstress along the path must be positive, and each part must be at least 60 cells of the n = 96 grid (about 0.55 million km²).
+- **Split:** each marker follows its node; the damage band is one grid spacing wide.
+- **Limit:** at most two cracks per stress solve. The stress is solved every 5 Myr.
+
+**Where the build departs from §7, and why:**
+
+| Spec | Built | Why |
+|---|---|---|
+| σ from the sheet (Stage 3) | Recovered from the rigid plates' loads on a coarse elastic sheet | Gives stress without deformation; the sheet of Stage 3 will replace it |
+| Paths along marker edges, noise per edge | Paths on the stress grid; heterogeneity as a smooth field | Marker-level paths and per-marker noise made cracks depend on resolution: the weakest point and the cheapest route both improve with more markers |
+| Damage from σ_II against the strength | Against three times the tensile strength, with residual strength | Against tensile strength, compression near trenches damaged everything; with no residual strength, fully damaged ground cracked under any stress |
+| Seeds at markers | Seeds at resolved nodes, off plate edges | Elastic stress under concentrated boundary loads is unbounded on refinement; within a grid spacing of an edge it is not resolved |
+
+**How it got here** (details in DEVLOG):
+- **Cracking ran away at first:** 85–300 rifts per Gyr, half the surface damaged, every check failing. The causes were, in turn:
+  - damage feeding on itself under uniform stiffness;
+  - compression compared with tensile strength;
+  - zero residual strength;
+  - point-load stress at plate edges;
+  - seeds on edge markers blocking interior ones;
+  - forked paths rejected;
+  - marker-scale paths and noise.
+- **Each fix was physical or about resolution, not a retuning.** Afterwards, damage covers 3–6% of the surface and rift rate responds smoothly to strength.
+
+**Record.** n = 96, strength scale 6, three seeds, 100–450 Myr:
+
+| Check | Result |
+|---|---|
+| Rift rate 15–60 per Gyr (fitted) | 74, 60, 63: the upper edge. At scale 5: 29–91 |
+| Rifts start on old weaknesses more often than random (§11 Stage 5 check) | Damage along crack paths before they cracked 0.38–0.53, against 0.06–0.07 for their plates as a whole: **5–8 times** |
+| Damage localized | Mean 0.03–0.04; 3–4% of the surface above 0.5 |
+| Plates larger than 1% | 8.8–11.8 (Earth about 13) |
+| RMS speed | 3.8–4.4 cm/yr |
+| Forsyth–Uyeda ρ | 0.37–0.43 (per-sample medians 0.38–0.47): still below 0.5 |
+| Collision slowdown | Median 1.2–1.6× once dominant; 2–4× in 12–25% |
+| Net rotation | Medians 0.06–0.08°/Myr |
+| Cost | About 550–800 ms a step at n = 96 (the stress solve, about 1 s every 5 Myr, and its loads and strength passes) |
+
+**Open [conjecture unless stated]:**
+1. **The fitted strengths are 6 times the literature's.** Old ocean comes out at 9×10¹³ N/m, continental crust at 3.6×10¹³ (7×10¹³ in cratons). I read this as the stresses being too high rather than the rocks being too strong: in this force model most of the slab pull net of resistance is carried through the plate, while estimates for Earth put most of a slab's weight into sinking the slab itself (Conrad & Lithgow-Bertelloni 2002; Schellart 2004).
+2. **Some resolution dependence remains.** With the same constants, n = 48 rifts less often. One source is identified: the small-plate absorption threshold is set in markers below n = 96 (0.37 million km² at n = 48, 0.09 at n = 96), so more small plates survive at n = 96, each with edges to crack.
+3. **Elasticity is not yielding.** Stress above strength is not capped and does not redistribute except through damage-softened stiffness at the next solve. A secant-plastic iteration (as for the coupling's friction limit) would cap it, at several solves per step.
+4. **Cost.** The solve takes 400–1,300 iterations of about 1 ms each. Multigrid or the GPU would make it cheap enough to run every step and finer.
+
 Statistics reported at every stage, against Earth:
 
 | Statistic | Earth |

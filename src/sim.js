@@ -421,7 +421,7 @@ class World{
     if(mergeKey>=0)this.merge(plates[Math.floor(mergeKey/4096)],plates[mergeKey%4096]);
     const alive=plates.filter(p=>p.alive);
     const rate=(alive.length<this.targetPlates?2.5:1)/C.SPLIT_TAU;
-    if(alive.length<this.targetPlates+3&&r()<rate*dt){
+    if(this.timedSplits!==false&&alive.length<this.targetPlates+3&&r()<rate*dt){
       const cands=alive.filter(p=>p.area>N*0.04);
       if(cands.length){let tot=0;for(const p of cands)tot+=Math.pow(p.area,1.5);
         let pick=r()*tot,P=cands[0];for(const p of cands){pick-=Math.pow(p.area,1.5);if(pick<=0){P=p;break;}}this.split(P);}
