@@ -1,5 +1,6 @@
 // ===== SIM-START =====
-const SIM = (() => {
+// A function, so its source can be handed to a Web Worker (the marker core runs in one; see mesh.js)
+function SIMmodule(){
 const R_KM=6371, U=8, FS=15;
 const ROCK={NONE:0,OCEAN:1,HOTSPOT:2,ARC:3,CRATON:4,OROGEN:5,SHELF:6,CLASTIC:7};
 const ROCK_NAMES=["none","ocean-ridge basalt","hotspot or flood basalt","arc volcanics","cratonic basement","collisional metamorphics","marine shelf sediments","clastic sediments"];
@@ -486,6 +487,8 @@ class World{
     for(const o of [f*FS+1,f*FS+8]){if(isNaN(D[o]))continue;const X=D[o+2],S=D[o+3];
       out.push({kind:FK_NAMES[kindOf(X,S)],t0:D[o],t1:D[o+1],across:X,along:S,sense:S<0?"right-lateral":"left-lateral",active:this.t-D[o+1]<3});}
     return out;}
+  // what the inspector shows for a cell: its rock column (bottom first) and fault episodes
+  columnInfo(i){return{units:this.pool.units(this.wCol[i]),eps:this.faultEpisodes(i)};}
   faultCellInfo(i){const f=this.pool.flt[this.wCol[i]];if(f<0)return null;const D=this.fpool.D,o=f*FS+8,op=f*FS+1;if(isNaN(D[o]))return null;
     let tot=Math.hypot(D[o+2],D[o+3]);if(!isNaN(D[op]))tot+=Math.hypot(D[op+2],D[op+3]);
     return{kind:kindOf(D[o+2],D[o+3]),slip:tot,active:this.t-D[o+1]<3};}
@@ -629,5 +632,6 @@ class World{
 }
 return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3,makeLookup,elevOf,hashStr,
   ColumnPool,FaultPool,kindOf,gauss,randUnit,norm3,cross,latlon,loc,mulberry32}; // the last row is shared with the marker core (mesh.js)
-})();
+}
+const SIM=SIMmodule();
 // ===== SIM-END =====

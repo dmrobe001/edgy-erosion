@@ -201,6 +201,8 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
 - **Peaks stay at 6.7 km**, which is the 75 km thickness cap; the lattice core's peaks of up to 7.9 km mean crust above its own cap, presumably from resampling as well.
 - **Cost** is 100–126 ms a step against 29–34 ms: not within the factor of two the spec asked for.
 
+**In a Web Worker.** The marker core now runs in a worker, with the page holding a mirror of the view and asking for the rest. Measured in Chromium at n = 96 over 25 s of running: frames 17 ms apart (350 ms when the page stepped the core itself), the same simulated rate (7.6 against 7.3 Myr/s), so the gain is a page that keeps responding, not speed. A real speed-up would need the step itself split across workers. Shared memory needs a cross-origin-isolated page, which the artifact's frame probably is not (not checked); without it, the mesh would be copied between workers every step, and my estimate (not measured) is that the copying would eat most of the gain. Two slips on the way: the run loop asked a finished worker to run again before checking whether the target was reached, so the page waited for an answer that never came; and in the Node test, a real `MessageChannel` kept the process alive after the test had passed.
+
 ---
 
 ## Things that turned out not to matter, or were left alone

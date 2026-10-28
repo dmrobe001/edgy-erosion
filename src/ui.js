@@ -120,7 +120,7 @@ function buildGeo(){ // per pixel: four cells and bilinear weights on the cube g
   geoDirty=false;
 }
 function ensureL1(){const now=performance.now();
-  if(!l1||(l1.steps!==world.steps&&(!running||now-l1Time>2500))){l1=handoff&&handoff.l1&&handoff.l1.steps===world.steps?handoff.l1:world.buildL1();l1Time=now;}}
+  if(!l1||(l1.steps!==world.steps&&(!running||now-l1Time>2500))){const f=handoff&&handoff.l1&&handoff.l1.steps===world.steps?handoff.l1:world.buildL1();if(f){l1=f;l1Time=now;}}}
 function paintL1(){
   const d=imgData.data,n=pixW*pixH,{Es,domain,sOff,sId,sTh,keys,rockOf}=l1,K=world.wK;
   const cs=[0,0,0,0],ws=[0,0,0,0],ptr=[0,0,0,0],lo=[0,0,0,0];
@@ -177,14 +177,15 @@ function render(){
       const a=project(c),b=project(e);if(!a||!b)continue;if(proj==="flat"&&a[2]!==b[2])continue;drawArrow(ctx,a[0],a[1],b[0],b[1],dpr);}
   }
   drawTraces(ctx,dpr);
-  if(world.core==="mesh"&&$("meshDots").checked)drawMarkers(ctx,dpr);
+  if(world.core==="mesh"){const on=$("meshDots").checked;if(world.inWorker)world.showMarkers(on);if(on)drawMarkers(ctx,dpr);}
 }
 // the marker core's markers: interior ones as faint dots, interface ones coloured by the kind of boundary they sit on
-function drawMarkers(ctx,dpr){const w=world,T=w.tri,v=[0,0,0],cols=[getVar("--trans"),getVar("--div"),getVar("--conv"),"#ffffff"],r=Math.max(1,0.9*dpr);
+function drawMarkers(ctx,dpr){const w=world,M=w.inWorker?w.markers:{X:w.tri.X,Y:w.tri.Y,Z:w.tri.Z,K:w.mKind,I:w.iKind},n=w.inWorker?(M?M.K.length:0):w.nSlots;if(!M)return;
+  const v=[0,0,0],cols=[getVar("--trans"),getVar("--div"),getVar("--conv"),"#ffffff"],r=Math.max(1,0.9*dpr);
   ctx.fillStyle="rgba(255,255,255,.35)";
-  for(let m=0;m<w.nSlots;m++){if(w.mKind[m]!==1)continue;v[0]=T.X[m];v[1]=T.Y[m];v[2]=T.Z[m];const p=project(v);if(p)ctx.fillRect(p[0]-r/2,p[1]-r/2,r,r);}
-  for(let m=0;m<w.nSlots;m++){if(w.mKind[m]!==2)continue;v[0]=T.X[m];v[1]=T.Y[m];v[2]=T.Z[m];const p=project(v);if(!p)continue;
-    ctx.fillStyle=cols[w.iKind[m]]||"#fff";ctx.fillRect(p[0]-r,p[1]-r,2*r,2*r);}}
+  for(let m=0;m<n;m++){if(M.K[m]!==1)continue;v[0]=M.X[m];v[1]=M.Y[m];v[2]=M.Z[m];const p=project(v);if(p)ctx.fillRect(p[0]-r/2,p[1]-r/2,r,r);}
+  for(let m=0;m<n;m++){if(M.K[m]!==2)continue;v[0]=M.X[m];v[1]=M.Y[m];v[2]=M.Z[m];const p=project(v);if(!p)continue;
+    ctx.fillStyle=cols[M.I[m]]||"#fff";ctx.fillRect(p[0]-r,p[1]-r,2*r,2*r);}}
 function drawTraces(ctx,dpr){
   if(!handoff||!$("traces").checked)return;
   const cols=[null,getVar("--conv"),getVar("--div"),getVar("--trans")];
@@ -209,13 +210,73 @@ function drawArrow(ctx,x0,y0,x1,y1,dpr){
   ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(x0,y0,2.2*dpr,0,7);ctx.fill();
 }
 
+// ---------- the marker core in a Web Worker ----------
+// The page holds a mirror of the world: the fixed-grid view, plates, statistics and events, refreshed by the worker
+// after each step (newest state wins). Everything heavier is asked of the worker and answered later: the inspector's
+// column, the handoff, its export, the L1 preview fields. If the worker cannot start, the page steps a MeshWorld itself.
+class WorkerWorld{
+  constructor(opts){
+    this.core="mesh";this.inWorker=true;this.opts=opts;this.n=opts.n;this.cube=SIM.getCube(opts.n);this.N=this.cube.N;this.contTarget=opts.contTarget;
+    this.cellKm=Math.PI/2/opts.n*SIM.R_KM;this.dt=0;this.t=0;this.steps=0;this.events=[];this.nEvents=0;this.plates=[];this.hotspots=[];
+    this.landFrac=0;this.contFrac=0;this.oceanAge=0;this.meanUnits=0;this.netRot=0;this.rmsSpeed=0;this.msPerStep=0;
+    const N=this.N;Object.assign(this,{owner:new Int16Array(N),wK:new Uint8Array(N),wT:new Float32Array(N),wB:new Float32Array(N),wS:new Float32Array(N),
+      wR:new Uint8Array(N),wRA:new Float32Array(N),elev:new Float32Array(N),trench:new Float32Array(N),bodyIdx:new Int32Array(N)});
+    this.ready=false;this.running=false;this.runUntil=-1;this.fresh=false;this.markers=null;this.wantMarkers=false;this.waiters={};this.colCache=null;this.l1Cache=null;
+    const src=`${SIMmodule}\nconst SIM=SIMmodule();\n${MESHmodule}\nconst MESH=MESHmodule(SIM);\n(${MESH.workerMain})();`;
+    this.worker=new Worker(URL.createObjectURL(new Blob([src],{type:"text/javascript"})));
+    this.worker.onmessage=e=>this.receive(e.data);
+    this.worker.onerror=e=>{if(e.preventDefault)e.preventDefault();this.fail(e.message||"worker error");};
+    this.worker.postMessage({type:"init",opts});}
+  fail(msg){this.failed=msg;if(this.onfail)this.onfail(msg);}
+  receive(m){
+    if(m.type==="ready"){Object.assign(this,{hotspots:m.hotspots,dt:m.dt,cellKm:m.cellKm,contTarget:m.contTarget});this.ready=true;return;}
+    if(m.type==="state"||m.type==="stopped"){
+      for(const k in m.view)this[k]=m.view[k];if(m.markers)this.markers=m.markers;
+      for(const k of ["t","steps","landFrac","contFrac","oceanAge","meanUnits","netRot","rmsSpeed","msPerStep","plates","nEvents"])this[k]=m[k];
+      if(m.events.length){this.events.push(...m.events);if(this.events.length>400)this.events.splice(0,this.events.length-400);}
+      if(m.type==="stopped")this.running=false;this.fresh=true;this.stateAt=performance.now();if(this.onstate)this.onstate();return;}
+    if(m.type==="error"){this.fail(m.message);return;}
+    const w=this.waiters[m.type];if(w){delete this.waiters[m.type];w(m);}}
+  ask(type,extra){return new Promise(res=>{this.waiters[type]=res;this.worker.postMessage({type,...extra});});}
+  run(until){if(this.t>=until-1e-9||this.running&&this.runUntil===until)return;this.running=true;this.runUntil=until;this.worker.postMessage({type:"run",until});}
+  pause(){if(this.running)this.worker.postMessage({type:"pause"});}
+  stepOnce(){this.running=true;this.runUntil=-1;this.worker.postMessage({type:"step"});}
+  showMarkers(on){if(on===this.wantMarkers)return;this.wantMarkers=on;if(!on)this.markers=null;this.worker.postMessage({type:"markers",on});}
+  velocityAt(i){return SIM.World.prototype.velocityAt.call(this,i);}
+  // the inspector's column: from the cache if it is for this cell at this step; otherwise asked for, and null until it comes
+  columnInfo(i){const c=this.colCache;if(c&&c.i===i&&c.steps===this.steps)return c;
+    if(!this.colAsked||this.colAsked.i!==i||this.colAsked.steps!==this.steps){this.colAsked={i,steps:this.steps};
+      this.ask("column",{i}).then(m=>{this.colCache=m;if(this.oncolumn)this.oncolumn();});}
+    return null;}
+  extract(){return this.ask("extract").then(m=>m.handoff);}
+  exportJson(){return this.ask("export").then(m=>m.json);}
+  // L1 preview fields: the last ones the worker sent, refreshed when the world has moved
+  buildL1(){const c=this.l1Cache;if((!c||c.steps!==this.steps)&&!this.l1Asked){this.l1Asked=true;
+      this.ask("buildL1").then(m=>{this.l1Asked=false;this.l1Cache=m.l1;if(this.onl1)this.onl1();});}
+    return c||null;}
+  snapshot(){return null;}
+  terminate(){this.worker.terminate();}
+}
+
 // ---------- ui ----------
 const EMPTY_LOG='<li class="empty" style="border:0">No events yet.</li>';
 function build(){
   const wo={n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100};
-  world=$("core").value==="mesh"?new MESH.MeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
+  if(world&&world.terminate)world.terminate();
+  world=$("core").value==="mesh"?makeMeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
   actions=[];l0LastInspect=l1LastInspect=null;l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;selMask=null;goode=null;runStart=runTarget=0;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();logAction({a:"build",settings:{seed:world.opts.seed,resolution:world.n,initialPlates:world.opts.nPlates,start:world.opts.mode,continentalTarget:world.contTarget}});
 }
+// the marker core runs in a worker where the browser allows it, otherwise here
+function makeMeshWorld(wo){
+  let w=null;try{if(typeof Worker!=="undefined"&&!noMeshWorker)w=new WorkerWorld(wo);}catch(e){w=null;}
+  if(!w)return new MESH.MeshWorld(wo);
+  w.onstate=()=>{if(!w.ready)return;if(!w.shown){w.shown=true;lightW=prepLight(w.cube);}};
+  w.oncolumn=()=>{if(world===w&&selCell>=0)showColumn();};
+  w.onl1=()=>{if(world===w&&view==="l1"){l1=null;colorsDirty=true;render();}};
+  w.onfail=msg=>{if(world!==w)return;noMeshWorker=true;w.terminate();running=false;$("play").textContent="Run";
+    $("log").insertAdjacentHTML("afterbegin",`<li class="note">The marker core could not run in a worker (${String(msg).slice(0,120)}); it now runs on the page.</li>`);build();};
+  return w;}
+let noMeshWorker=false;
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
   const t=world.t;$("clock").innerHTML=t>=1000?fmtT(t)+"<small>billion years</small>":fmtT(t)+"<small>million years</small>";
@@ -237,6 +298,13 @@ function updateLegend(){
 }
 function frame(now){
   let need=false;
+  if(world.inWorker){
+    if(running){if(!world.running&&world.t>=runTarget-1e-9)stopRun();else world.run(runTarget);}
+    if(world.fresh){world.fresh=false;msEma=world.msPerStep;const fdt=(now-lastFrame)/1000;
+      if(world.lastT!==undefined&&world.lastWall!==undefined){const dw=(world.stateAt-world.lastWall)/1000;if(dw>0){const rate=(world.t-world.lastT)/dw;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}}
+      world.lastT=world.t;world.lastWall=world.stateAt;
+      colorsDirty=true;need=true;if(handoff&&handoff.steps!==world.steps)staleHandoff();updateUi();if(selCell>=0)showColumn();}
+    if(need)render();lastFrame=now;requestAnimationFrame(frame);return;}
   if(running){const n=+$("speed").value,t0=performance.now();let k=0;for(;k<n&&world.t<runTarget-1e-9;k++){world.step();snapTick();}
     if(k){const ms=(performance.now()-t0)/k;msEma=msEma?msEma*0.9+ms*0.1:ms;
       const fdt=(now-lastFrame)/1000;if(fdt>0&&fdt<1){const rate=k*world.dt/fdt;rateEma=rateEma?rateEma*0.9+rate*0.1:rate;}
@@ -246,11 +314,11 @@ function frame(now){
   if(need)render();lastFrame=now;requestAnimationFrame(frame);
 }
 // Run advances L0 by the Gyr slider from where it starts, then stops; Run again continues for that long
-function stopRun(){running=false;logAction({a:"stop"});$("play").textContent="Run";render();l1SelectionMoved();}
+function stopRun(){running=false;if(world.inWorker)world.pause();logAction({a:"stop"});$("play").textContent="Run";render();l1SelectionMoved();}
 $("play").onclick=()=>{if(l1Busy())return;if(running){stopRun();return;}
   if(world.t>=runTarget-1e-9){runStart=world.t;runTarget=runStart+1000*+$("gyr").value;}logAction({a:"run",untilMyr:runTarget});running=true;$("play").textContent="Pause";};
 $("gyr").oninput=e=>{$("gyrVal").textContent=e.target.value;if(runTarget>runStart)runTarget=runStart+1000*+e.target.value;};
-$("stepBtn").onclick=()=>{if(l1Busy())return;if(running)stopRun();l1WorldMoved();const t0=performance.now();world.step();snapTick();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();l1SelectionMoved();logAction({a:"step"});};
+$("stepBtn").onclick=()=>{if(l1Busy())return;if(running)stopRun();l1WorldMoved();if(world.inWorker){world.stepOnce();logAction({a:"step"});return;}const t0=performance.now();world.step();snapTick();msEma=performance.now()-t0;colorsDirty=true;if(handoff)staleHandoff();render();updateUi();if(selCell>=0)showColumn();l1SelectionMoved();logAction({a:"step"});};
 $("speed").oninput=e=>$("speedVal").textContent=e.target.value;
 $("nPlates").oninput=e=>$("nPlatesVal").textContent=e.target.value;
 $("contT").oninput=e=>$("contTVal").textContent=e.target.value+"%";
@@ -304,13 +372,14 @@ function showColumn(){
   const body=$("colBody"),panel=$("colpanel");
   if(selCell<0||!world){panel.hidden=true;return;}
   const w=world,i=selCell,P=w.plates[w.owner[i]],e=w.elev[i],v=w.velocityAt(i);
-  const units=w.pool.units(w.wCol[i]).reverse();
+  const info=w.columnInfo(i);if(!info){body.innerHTML=`<div class="colhead"><b>${cellLoc(i)}</b><span>Reading the column…</span></div>`;panel.hidden=false;return;}
+  const units=info.units.slice().reverse();
   const crust=w.wK[i]?"Continental crust":`Oceanic crust, ${fmtAgo(w.t-w.wB[i])} old`;
   let html=`<div class="colhead"><b>${cellLoc(i)}</b><span>${crust}, ${w.wT[i].toFixed(0)} km thick</span><span>${e>=0?"Elevation":"Depth"} ${Math.abs(e).toFixed(1)} km</span><span>Plate ${P.id}, moving ${v.speed.toFixed(1)} cm/yr toward the ${COMPASS[Math.round(v.bearing/45)%8]}</span></div><div class="strat">`;
   for(const u of units){const h=Math.round(8+46*Math.log10(1+u.th)/Math.log10(76));const R=ROCKS[u.rock]||ROCKS[1];
     html+=`<div class="unit"><div class="blk" style="height:${h}px;background:${R.c}"></div><div class="lbl">${R.name}<br><span class="num">${u.th<0.1?u.th.toFixed(2):u.th.toFixed(1)} km, formed ${fmtAgo(w.t-u.born)} ago</span></div></div>`;}
   html+=`</div>`;
-  const eps=w.faultEpisodes(i);
+  const eps=info.eps.slice();
   if(eps.length){html+=`<ul class="eps">`;
     for(const ep of eps.reverse()){const k=ep.kind==="strike-slip"?`Strike-slip (${ep.sense})`:ep.kind[0].toUpperCase()+ep.kind.slice(1);
       html+=`<li><b>${k}</b>, ${ep.active?"active now":`from ${fmtAgo(w.t-ep.t0)} to ${fmtAgo(w.t-ep.t1)} ago`}: <span class="num">${fmtKm(ep.across)} km ${ep.across>=0?"of convergence":"of extension"}, ${fmtKm(ep.along)} km sideways</span></li>`;}
@@ -331,9 +400,11 @@ function renderSummary(){
   if(downloadsP)downloadsP.then(d=>{$("download").hidden=!d;if(!d)$("dlNote").textContent="File downloads aren’t available in this view.";});
 }
 $("extract").onclick=()=>{if(running){running=false;$("play").textContent="Run";}
-  handoff=world.extractFaults();handoff.l1=world.buildL1();logAction({a:"extract"});l1=handoff.l1;l1Time=performance.now();renderSummary();render();};
+  if(world.inWorker){world.pause();const w=world;$("summary").innerHTML='<div class="muted">Extracting in the worker…</div>';
+    w.extract().then(h=>{if(world!==w)return;handoff=h;handoff.steps=w.steps;logAction({a:"extract"});l1=handoff.l1;l1Time=performance.now();renderSummary();render();});return;}
+  handoff=world.extractFaults();handoff.l1=world.buildL1();handoff.steps=world.steps;logAction({a:"extract"});l1=handoff.l1;l1Time=performance.now();renderSummary();render();};
 $("download").onclick=async()=>{const d=await downloadsP;if(!d||!handoff)return;
-  const data=JSON.stringify(world.exportHandoff(handoff));
+  const data=world.inWorker?await world.exportJson():JSON.stringify(world.exportHandoff(handoff));if(!data)return;
   const name=`l0-handoff-${($("seed").value||"genesis").replace(/[^a-z0-9-]/gi,"_")}-${Math.round(handoff.t)}myr.json`;
   try{await d.save({filename:name,data});$("dlNote").textContent="Saved.";}
   catch(err){$("dlNote").textContent=err&&err.code==="declined"?"Download cancelled.":"The download didn’t go through.";}};
@@ -343,7 +414,8 @@ window.addEventListener("resize",()=>{pixIdx=null;render();l1Pix=null;if(l1St&&(
 // L0 keeps its whole state every 10 Myr (the last four), so a landmass picked at the present can be replayed
 let snaps=[],l1St=null,l1View="terrain",l1Zoom=1,l1Pan=[0,0],l1Pix=null,l1PW=0,l1PH=0,l1Img=null,l1Geo=null,l1Ms=0,l1Mask=null;
 const SNAP_EVERY=10,SNAP_KEEP=4;
-function snapTick(){if(!world)return;const last=snaps[snaps.length-1];
+function snapTick(){if(!world||world.core==="mesh")return; // L1 refinement replays the lattice core only
+ const last=snaps[snaps.length-1];
   if(!last||world.t-last.t>=SNAP_EVERY-1e-9){snaps.push({t:world.t,steps:world.steps,snap:world.snapshot()});while(snaps.length>SNAP_KEEP)snaps.shift();}}
 const l1Busy=()=>!!(l1St&&/^(replay|forward|run|basins)$/.test(l1St.phase));
 const THICK_DIV=[[-15,"#2c5aa0"],[-5,"#9db8de"],[0,"#f2f0ea"],[5,"#e6a07a"],[15,"#b8322a"],[30,"#5e0f12"]];

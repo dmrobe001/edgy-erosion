@@ -3,7 +3,8 @@
 // pass the full check (orientation, adjacency, Euler's formula, Delaunay) and its triangles must cover 4 pi.
 // Part 2, the world: every step, the continental volume ledger closes, the mesh is valid, no edge joins two plates'
 // interior markers, ids are unique; at the end, determinism (two runs, and snapshot -> restore -> replay) and the
-// area budget. Options: --n=32 (grid), --t=150 (Myr), --seed=genesis.
+// area budget. Part 3, the worker protocol (MESH.workerMain against a fake worker scope).
+// Options: --n=32 (grid), --t=150 (Myr), --seed=genesis.
 const crypto = require("crypto");
 const { loadSim, loadMesh, arg } = require("./lib");
 const SIM = loadSim(), MESH = loadMesh(SIM);
@@ -60,4 +61,26 @@ const contV = w => { let v = 0; for (let m = 0; m < w.nSlots; m++) if (w.mKind[m
   const w3 = new MESH.MeshWorld(opts); w3.restore(snap); while (w3.t < Tend) w3.step();
   ok(hash(w3) === end, `restore at step ${snapHashAt} and replay ends in the same state`);
 }
-console.log(fails ? `\n${fails} check(s) failed` : "\nall mesh checks passed"); process.exitCode = fails ? 1 : 0;
+// ---------- part 3: the worker protocol ----------
+// MESH.workerMain runs against a fake worker scope: init, run to 20 Myr, one more step, ask
+// for a column and the handoff; the views it posts must match a MeshWorld stepped directly.
+(async () => {
+  const posted = [], fake = { postMessage: m => posted.push(m), onmessage: null };
+  const main = new Function("self", "MESH", "MessageChannel", "performance", "(" + MESH.workerMain + ")(); return self;");
+  // a stand-in for MessageChannel on setImmediate (Node's real one would keep the process alive after the test)
+  class Chan { constructor() { this.port1 = {}; this.port2 = { postMessage: () => setImmediate(() => this.port1.onmessage && this.port1.onmessage()) }; } }
+  const self = main(fake, MESH, Chan, performance), send = m => self.onmessage({ data: m });
+  const until = (type, test = () => true) => new Promise(res => { const poll = () => { const m = posted.find(x => x.type === type && test(x)); if (m) res(m); else setTimeout(poll, 5); }; poll(); });
+  const o = { ...opts, seed: "worker" };
+  send({ type: "init", opts: o }); await until("ready");
+  send({ type: "run", until: 20 }); const st = await until("stopped", m => m.t >= 20 - 1e-9);
+  send({ type: "step" }); const st2 = await until("stopped", m => m.steps === st.steps + 1);
+  send({ type: "column", i: 123 }); const col = await until("column");
+  send({ type: "extract" }); const ex = await until("extract");
+  const w = new MESH.MeshWorld(o); while (w.steps < st2.steps) w.step();
+  let same = true; for (const k of ["owner", "elev", "wK", "wT"]) for (let i = 0; i < w.N; i++) if (st2.view[k][i] !== w[k][i]) { same = false; break; }
+  ok(same && st2.t === w.t, `worker protocol: the view after ${st2.steps} steps (run to 20 Myr, then one step) matches a direct run`);
+  ok(col.units.length > 0 && Array.isArray(col.eps), `worker answers a column request (${col.units.length} units) and a handoff request (${ex.handoff.faults.length} faults)`);
+  console.log(fails ? `\n${fails} check(s) failed` : "\nall mesh checks passed"); process.exitCode = fails ? 1 : 0;
+})();
+

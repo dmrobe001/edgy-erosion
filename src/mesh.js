@@ -2,7 +2,7 @@
 // The marker core for L0 (L0_MESH_SPEC.md, Stage 1): markers carry the crust; a Delaunay triangulation of their
 // positions on the sphere is kept up to date as they move; plates are the connected sets of markers between interface
 // markers. Stage 1 keeps the lattice core's kinematics and surface rules, so the two can be compared on one seed.
-const MESH = (() => {
+function MESHmodule(SIM){
 
 // ---------- Delaunay triangulation on the unit sphere ----------
 // Vertices are indices into X, Y, Z (owned here, grown together with the caller's marker arrays). Triangles are
@@ -540,6 +540,37 @@ class MeshWorld extends World{
     return{markers:nv,closure:(A-sphere)/sphere,interiorArea:A/sphere,ifaceArea:ifaceA/sphere,dupIds,crossEdges:cross/2,mesh:chk};}
 }
 
-return {SphereTri,MeshWorld};
-})();
+// The worker side of the marker core. The page builds a Web Worker from SIMmodule's and MESHmodule's sources plus this
+// function's, and talks to it by messages: it owns a MeshWorld, steps it (yielding between steps so a pause or a
+// question gets through), and after each step posts the fixed-grid view (fresh copies, transferred, not shared) with
+// the plates, statistics and new events; on request it posts the inspector's column, the handoff, or the export.
+function workerMain(){
+  let w=null,running=false,until=0,handoff=null,markers=false,lastEv=0,ms=0;
+  const ch=new MessageChannel();ch.port1.onmessage=()=>tick();const later=()=>ch.port2.postMessage(0);
+  const VIEW=["owner","wK","wT","wB","wS","wR","wRA","elev","trench","bodyIdx"];
+  function state(type){const out={type,t:w.t,steps:w.steps,landFrac:w.landFrac,contFrac:w.contFrac,oceanAge:w.oceanAge,meanUnits:w.meanUnits,netRot:w.netRot,rmsSpeed:w.rmsSpeed,
+      msPerStep:ms,running,plates:w.plates.map(P=>({id:P.id,alive:P.alive,hue:P.hue,W:P.W.slice(),c:P.c.slice(),area:P.area,contArea:P.contArea,Q:Array.from(P.Q),parent:P.parent,mergedInto:P.mergedInto})),
+      events:w.events.filter(e=>e.n>lastEv),nEvents:w.nEvents,view:{}},tr=[];
+    lastEv=w.nEvents;for(const k of VIEW){const a=w[k].slice();out.view[k]=a;tr.push(a.buffer);}
+    if(markers){const n=w.nSlots,M={X:w.tri.X.slice(0,n),Y:w.tri.Y.slice(0,n),Z:w.tri.Z.slice(0,n),K:w.mKind.slice(0,n),I:w.iKind.slice(0,n)};out.markers=M;for(const k in M)tr.push(M[k].buffer);}
+    self.postMessage(out,tr);}
+  function tick(){if(!running)return;const t0=performance.now();w.step();ms=performance.now()-t0;if(w.t>=until-1e-9)running=false;state(running?"state":"stopped");if(running)later();}
+  self.onmessage=e=>{const m=e.data;try{
+    if(m.type==="init"){w=new MESH.MeshWorld(m.opts);lastEv=0;handoff=null;running=false;
+      self.postMessage({type:"ready",hotspots:w.hotspots.map(h=>({v:h.v,i:h.i})),dt:w.dt,cellKm:w.cellKm,contTarget:w.contTarget});state("stopped");}
+    else if(m.type==="run"){until=m.until;if(!running&&w.t<until-1e-9){running=true;later();}}
+    else if(m.type==="pause"){if(running){running=false;state("stopped");}}
+    else if(m.type==="step"){running=false;const t0=performance.now();w.step();ms=performance.now()-t0;state("stopped");}
+    else if(m.type==="markers"){markers=!!m.on;state(running?"state":"stopped");}
+    else if(m.type==="column")self.postMessage({type:"column",i:m.i,steps:w.steps,...w.columnInfo(m.i)});
+    else if(m.type==="extract"){handoff=w.extractFaults();handoff.l1=w.buildL1();self.postMessage({type:"extract",steps:w.steps,handoff});}
+    else if(m.type==="buildL1")self.postMessage({type:"buildL1",steps:w.steps,l1:w.buildL1()});
+    else if(m.type==="export")self.postMessage({type:"export",json:handoff?JSON.stringify(w.exportHandoff(handoff)):null});
+    else if(m.type==="hash")self.postMessage({type:"hash",steps:w.steps,t:w.t,audit:w.audit()});
+  }catch(err){self.postMessage({type:"error",message:String(err&&err.stack||err)});}};
+}
+
+return {SphereTri,MeshWorld,workerMain};
+}
+const MESH=MESHmodule(SIM);
 // ===== MESH-END =====
