@@ -303,7 +303,7 @@ An alternative L0 core in `src/mesh.js`, chosen with **Core** before **Rebuild w
 - Resampling flicker is gone from the material: displayed rock changes on 0.55% of continental markers a step, the lattice core's surface-process share.
 - Continental crust settles about 4 points lower (0.35–0.36 against 0.39–0.40) and seafloor is older (236–268 Myr against 124–206 at 800 Myr). The lattice core counts about 3.5 times as many oceanic contacts as the marker core consumes, and each deposits arc crust; seafloor turnover is the same on both, so the lattice's extra arc crust comes from resampling.
 - Land fraction, plate count, rifts and sutures stay in the lattice core's ranges, which vary more between seeds than between cores.
-- It costs 100–126 ms a step at n = 96 against 29–34 ms.
+- It cost 100–126 ms a step at n = 96 against 29–34 ms for the comparison; caching what rigid plate interiors cannot change has since brought it to about 103 ms headless. In Chromium, in its worker with the view helper, it simulates 9.6 Myr a second against the lattice core's 18.3.
 
 ---
 

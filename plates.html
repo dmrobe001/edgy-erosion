@@ -286,7 +286,7 @@ button:disabled{opacity:.5;cursor:default}
   </section>
 </main>
 <script>
-const BUILD_ID="e6e82d7e50ce";
+const BUILD_ID="96793a325461";
 // ===== SIM-START =====
 // A function, so its source can be handed to a Web Worker (the marker core runs in one; see mesh.js)
 function SIMmodule(){
@@ -941,14 +941,17 @@ const IC_EPS=1e-18,ON_EPS=1e-13;
 class SphereTri{
   constructor(vcap,tcap){this.X=new Float64Array(vcap);this.Y=new Float64Array(vcap);this.Z=new Float64Array(vcap);this.vt=new Int32Array(vcap).fill(-1);
     this.tv=new Int32Array(3*tcap);this.tn=new Int32Array(3*tcap);this.tAlive=new Uint8Array(tcap);this.freeT=[];this.nT=0;this.tcap=tcap;this.vcap=vcap;
-    this.stamp=new Int32Array(tcap);this.stampN=0;this.walkSeed=1;this.stack=[];}
+    this.stamp=new Int32Array(tcap);this.stampN=0;this.walkSeed=1;this.stack=[];
+    // a cache per triangle, filled by its user: [area, and three numbers per edge]; cleared whenever the triangle is rewritten
+    this.tCache=new Float64Array(4*tcap);this.tOk=new Uint8Array(tcap);}
   growV(n){if(n<=this.vcap)return;const c=Math.max(n,Math.ceil(this.vcap*1.5));
     for(const k of ["X","Y","Z"]){const a=new Float64Array(c);a.set(this[k]);this[k]=a;}const vt=new Int32Array(c).fill(-1);vt.set(this.vt);this.vt=vt;this.vcap=c;}
   growT(){const c=Math.ceil(this.tcap*1.5)+16,tv=new Int32Array(3*c),tn=new Int32Array(3*c),al=new Uint8Array(c),st=new Int32Array(c);
-    tv.set(this.tv);tn.set(this.tn);al.set(this.tAlive);st.set(this.stamp);Object.assign(this,{tv,tn,tAlive:al,stamp:st,tcap:c});}
+    tv.set(this.tv);tn.set(this.tn);al.set(this.tAlive);st.set(this.stamp);const tc=new Float64Array(4*c),ok=new Uint8Array(c);tc.set(this.tCache);ok.set(this.tOk);
+    Object.assign(this,{tv,tn,tAlive:al,stamp:st,tCache:tc,tOk:ok,tcap:c});}
   newT(){if(this.freeT.length)return this.freeT.pop();if(this.nT>=this.tcap)this.growT();return this.nT++;}
   freeTri(t){this.tAlive[t]=0;this.freeT.push(t);}
-  setT(t,a,b,c,na,nb,nc){const o=3*t,tv=this.tv,tn=this.tn;tv[o]=a;tv[o+1]=b;tv[o+2]=c;tn[o]=na;tn[o+1]=nb;tn[o+2]=nc;this.tAlive[t]=1;
+  setT(t,a,b,c,na,nb,nc){const o=3*t,tv=this.tv,tn=this.tn;tv[o]=a;tv[o+1]=b;tv[o+2]=c;tn[o]=na;tn[o+1]=nb;tn[o+2]=nc;this.tAlive[t]=1;this.tOk[t]=0;
     this.vt[a]=t;this.vt[b]=t;this.vt[c]=t;}
   orient(a,b,c){const X=this.X,Y=this.Y,Z=this.Z;
     return X[a]*(Y[b]*Z[c]-Z[b]*Y[c])-Y[a]*(X[b]*Z[c]-Z[b]*X[c])+Z[a]*(X[b]*Y[c]-Y[b]*X[c]);}
@@ -1117,11 +1120,18 @@ class MeshWorld extends World{
     if(!this.adj||this.adj.length<ne){this.adj=new Int32Array(ne+4096);this.cw=new Float32Array(ne+4096);}
     if(!this._fill||this._fill.length<ns)this._fill=new Int32Array(ns+1024);
     const adj=this.adj,cw=this.cw,fill=this._fill;fill.set(off.subarray(0,ns));
-    for(let t=0;t<T.nT;t++){if(!T.tAlive[t])continue;const o=3*t;
-      for(let k=0;k<3;k++){const a=tv[o+k],b=tv[o+(k+1)%3],c=tv[o+(k+2)%3];
-        // half the cotangent of the angle at c, opposite the directed edge a -> b
-        const ax=X[a]-X[c],ay=Y[a]-Y[c],az=Z[a]-Z[c],bx=X[b]-X[c],by=Y[b]-Y[c],bz=Z[b]-Z[c],d=ax*bx+ay*by+az*bz;
-        const cx=ay*bz-az*by,cy=az*bx-ax*bz,cz=ax*by-ay*bx;adj[fill[a]]=b;cw[fill[a]++]=0.5*d/(Math.sqrt(cx*cx+cy*cy+cz*cz)||1e-30);}}
+    // Each triangle's area and the half-cotangents of its angles are cached on the triangulation: a triangle whose
+    // three markers ride one rigid plate keeps its shape, so only rewritten triangles and those straddling plates or
+    // touching an interface marker (invalidated after each motion) are recomputed.
+    const tc=T.tCache,tok=T.tOk;
+    for(let t=0;t<T.nT;t++){if(!T.tAlive[t])continue;const o=3*t,q=4*t;
+      if(!tok[t]){tc[q]=T.area(t);
+        for(let k=0;k<3;k++){const a=tv[o+k],b=tv[o+(k+1)%3],c=tv[o+(k+2)%3];
+          // half the cotangent of the angle at c, opposite the directed edge a -> b
+          const ax=X[a]-X[c],ay=Y[a]-Y[c],az=Z[a]-Z[c],bx=X[b]-X[c],by=Y[b]-Y[c],bz=Z[b]-Z[c],d=ax*bx+ay*by+az*bz;
+          const cx=ay*bz-az*by,cy=az*bx-ax*bz,cz=ax*by-ay*bx;tc[q+1+k]=0.5*d/(Math.sqrt(cx*cx+cy*cy+cz*cz)||1e-30);}
+        tok[t]=1;}
+      const a=tv[o],b=tv[o+1],c=tv[o+2];adj[fill[a]]=b;cw[fill[a]++]=tc[q+1];adj[fill[b]]=c;cw[fill[b]++]=tc[q+2];adj[fill[c]]=a;cw[fill[c]++]=tc[q+3];}
     this.off=off;
     // material neighbours
     const st=this.stamp,mo=this.mo&&this.mo.length>=ns+1?this.mo:new Int32Array(ns+1+1024);let ma=this.ma&&this.ma.length>=2*ne?this.ma:new Int32Array(2*ne+4096),mw=this.mw&&this.mw.length>=ma.length?this.mw:new Float32Array(ma.length);
@@ -1163,9 +1173,11 @@ class MeshWorld extends World{
       this.iN[m]=ps.length;for(let s2=0;s2<ps.length;s2++){const q=3*m+s2,o=old.find(e=>e[0]===ps[s2]);this.iPlate[q]=ps[s2];
         this.iSX[q]=o?o[1]:T.X[m];this.iSY[q]=o?o[2]:T.Y[m];this.iSZ[q]=o?o[3]:T.Z[m];}}
     // insert at edges joining two plates' interior markers (insertion can expose new ones nearby, hence the passes)
-    for(let pass=0;pass<4;pass++){const tv=T.tv,todo=[];
-      for(let t=0;t<T.nT;t++){if(!T.tAlive[t])continue;const o=3*t;for(let k=0;k<3;k++){const a=tv[o+(k+1)%3],b=tv[o+(k+2)%3];
-        if(a<b&&kind[a]===INTERIOR&&kind[b]===INTERIOR&&pl[a]!==pl[b])todo.push(a,b);}}
+    for(let pass=0;pass<4;pass++){const tv=T.tv,todo=[],ta=T.tAlive,nT=T.nT;
+      const edge=(a,b)=>{if(a<b&&kind[a]===INTERIOR&&kind[b]===INTERIOR&&pl[a]!==pl[b])todo.push(a,b);};
+      for(let t=0;t<nT;t++){if(!ta[t])continue;const o=3*t,a=tv[o],b=tv[o+1],c=tv[o+2],pa=pl[a];
+        if(kind[a]===INTERIOR&&kind[b]===INTERIOR&&kind[c]===INTERIOR&&pl[b]===pa&&pl[c]===pa)continue; // inside one plate: most triangles
+        edge(b,c);edge(c,a);edge(a,b);}
       if(!todo.length)break;
       for(let q=0;q<todo.length;q+=2){const a=todo[q],b=todo[q+1];if(!kind[a]||!kind[b])continue;
         const m=this.newMarker(IFACE);this.setPos(m,T.X[a]+T.X[b],T.Y[a]+T.Y[b],T.Z[a]+T.Z[b]);
@@ -1188,7 +1200,7 @@ class MeshWorld extends World{
     // and the segment takes its markers' majority verdict (neighbours that disagreed would ride different plates
     // and run into each other).
     const ns=this.nSlots,seg=new Int32Array(ns).fill(-1),find=a=>{while(seg[a]!==a){seg[a]=seg[seg[a]];a=seg[a];}return a;};
-    for(let m=0;m<ns;m++)if(kind[m]===IFACE&&this.iKind[m]===CONVERGENT)seg[m]=m;
+    const conv=this._conv=[];for(let m=0;m<ns;m++)if(kind[m]===IFACE&&this.iKind[m]===CONVERGENT){seg[m]=m;conv.push(m);} // the list the substeps scan
     for(let m=0;m<ns;m++){if(seg[m]<0)continue;for(let e=o[m];e<o[m+1];e++){const v=adj[e];if(seg[v]<0||this.iPlate[3*v]!==this.iPlate[3*m]||this.iPlate[3*v+1]!==this.iPlate[3*m+1])continue;
       const a=find(m),b=find(v);if(a!==b)seg[Math.max(a,b)]=Math.min(a,b);}}
     const vote=new Map();for(let m=0;m<ns;m++){if(seg[m]<0)continue;const r=find(m);vote.set(r,(vote.get(r)||0)+(this.iWin[m]===0?1:-1));}
@@ -1208,13 +1220,16 @@ class MeshWorld extends World{
   // winner's side at a convergent boundary and midway elsewhere. The step is cut into substeps so that boundary
   // markers move at most a quarter spacing relative to each other; a substep that turns a triangle over is
   // halved. Flips keep the triangulation Delaunay; loser markers reaching a convergent interface are consumed.
-  placeAt(f){const T=this.tri,X=T.X,Y=T.Y,Z=T.Z,R=this._R=this.plates.map(P=>P.alive?rotM(P.W,f*Math.hypot(P.W[0],P.W[1],P.W[2])*this.dt):null);
-    const kind=this.mKind,pl=this.mPlate,X0=this.X0,Y0=this.Y0,Z0=this.Z0;
-    for(let m=0;m<this.nSlots;m++){const k=kind[m];if(!k)continue;
-      if(k===INTERIOR){const M=R[pl[m]],x=X0[m],y=Y0[m],z=Z0[m];X[m]=M[0]*x+M[1]*y+M[2]*z;Y[m]=M[3]*x+M[4]*y+M[5]*z;Z[m]=M[6]*x+M[7]*y+M[8]*z;continue;}
-      const n=this.iN[m];let sx=0,sy=0,sz=0;const w=this.iKind[m]===CONVERGENT?this.iWin[m]:-1;
-      for(let s=0;s<n;s++){const M=R[this.iPlate[3*m+s]];if(!M)continue;const q=3*m+s,x=this._S0[3*q],y=this._S0[3*q+1],z=this._S0[3*q+2];
-        const nx=M[0]*x+M[1]*y+M[2]*z,ny=M[3]*x+M[4]*y+M[5]*z,nz=M[6]*x+M[7]*y+M[8]*z;this.iSX[q]=nx;this.iSY[q]=ny;this.iSZ[q]=nz;
+  placeAt(f){const T=this.tri,X=T.X,Y=T.Y,Z=T.Z,np=this.plates.length;
+    // every plate's rotation for fraction f of the step, flat (9 numbers a plate)
+    const R=this._Rf&&this._Rf.length>=9*np?this._Rf:(this._Rf=new Float64Array(9*np+90));
+    for(let p=0;p<np;p++){const P=this.plates[p];if(!P.alive)continue;R.set(rotM(P.W,f*Math.hypot(P.W[0],P.W[1],P.W[2])*this.dt),9*p);}
+    const kind=this.mKind,pl=this.mPlate,X0=this.X0,Y0=this.Y0,Z0=this.Z0,S0=this._S0,iP=this.iPlate,iN=this.iN,ns=this.nSlots;
+    for(let m=0;m<ns;m++){const k=kind[m];if(!k)continue;
+      if(k===INTERIOR){const o=9*pl[m],x=X0[m],y=Y0[m],z=Z0[m];X[m]=R[o]*x+R[o+1]*y+R[o+2]*z;Y[m]=R[o+3]*x+R[o+4]*y+R[o+5]*z;Z[m]=R[o+6]*x+R[o+7]*y+R[o+8]*z;continue;}
+      const n=iN[m];let sx=0,sy=0,sz=0;const w=this.iKind[m]===CONVERGENT?this.iWin[m]:-1;
+      for(let s=0;s<n;s++){const p=iP[3*m+s];if(!this.plates[p].alive)continue;const o=9*p,q=3*m+s,x=S0[3*q],y=S0[3*q+1],z=S0[3*q+2];
+        const nx=R[o]*x+R[o+1]*y+R[o+2]*z,ny=R[o+3]*x+R[o+4]*y+R[o+5]*z,nz=R[o+6]*x+R[o+7]*y+R[o+8]*z;this.iSX[q]=nx;this.iSY[q]=ny;this.iSZ[q]=nz;
         if(w<0||w===s){sx+=nx;sy+=ny;sz+=nz;}}
       const l=Math.hypot(sx,sy,sz)||1;X[m]=sx/l;Y[m]=sy/l;Z[m]=sz/l;}}
   rebuildMesh(){const T=this.tri,vs=[];for(let m=0;m<this.nSlots;m++)if(this.mKind[m])vs.push(m);T.build(vs);T.broken=false;this.mStats.rebuilds++;
@@ -1243,6 +1258,7 @@ class MeshWorld extends World{
       this.mStats.substeps++;fDone=f;this.consumeAtTrenches();}
     this._S0=null;this._R=null;
     if(T.broken)this.rebuildMesh();
+    for(const t of this.mixedTris())T.tOk[t]=0; // their shapes changed
     // the plates' orientations (fault strikes are kept in plate frames)
     for(const P of plates){if(!P.alive)continue;const R=rotM(P.W,Math.hypot(P.W[0],P.W[1],P.W[2])*dt),Q=P.Q,M=new Float64Array(9);
       for(let r=0;r<3;r++)for(let k=0;k<3;k++)M[r*3+k]=R[r*3]*Q[k]+R[r*3+1]*Q[3+k]+R[r*3+2]*Q[6+k];
@@ -1269,7 +1285,7 @@ class MeshWorld extends World{
   // that comes within a third of a spacing of another plate's interior marker (triple junctions, stray overlaps)
   consumeAtTrenches(){const T=this.tri,kind=this.mKind,pl=this.mPlate,h=this.h0,lim=(0.3*h)**2,lim2=(0.3*h)**2,victims=[];
     const tris=[],vs=[];
-    for(let m=0;m<this.nSlots;m++){if(kind[m]!==IFACE||this.iKind[m]!==CONVERGENT)continue;const w=this.iWin[m],W=this.iPlate[3*m+w];
+    for(const m of this._conv){if(kind[m]!==IFACE||this.iKind[m]!==CONVERGENT)continue;const w=this.iWin[m],W=this.iPlate[3*m+w];
       T.ring(m,tris,vs);for(const v of vs)if(kind[v]===INTERIOR&&pl[v]!==W&&this.dist2(v,m)<lim)victims.push(v,W,m);}
     const tv=T.tv;
     for(const t of this.mixedTris()){for(let k=0;k<3;k++){const a=tv[3*t+(k+1)%3],b=tv[3*t+(k+2)%3];
@@ -1300,7 +1316,9 @@ class MeshWorld extends World{
       // nearest interior marker of each side's plate, two rings out
       const best=[-1,-1,-1],bd=[Infinity,Infinity,Infinity];T.ring(m,tris,vs);
       const look=v=>{if(kind[v]!==INTERIOR)return;for(let s=0;s<n;s++)if(pl[v]===this.iPlate[3*m+s]){const d=this.dist2(v,m);if(d<bd[s]){bd[s]=d;best[s]=v;}}};
-      for(const v of vs){look(v);T.ring(v,tris2,vs2);for(const q of vs2)look(q);}
+      for(const v of vs)look(v);
+      let far=false;for(let s=0;s<n;s++)if(best[s]<0||bd[s]>lim)far=true;
+      if(far)for(const v of vs){T.ring(v,tris2,vs2);for(const q of vs2)look(q);} // two rings out only when one ring did not settle it
       for(let s=0;s<n;s++){const f=best[s];if(f<0||bd[s]<=lim)continue;
         const d=Math.sqrt(bd[s]),k=Math.min(0.6*h,d/2)/d;born.push([this.iPlate[3*m+s],X[m]+(X[f]-X[m])*k,Y[m]+(Y[f]-Y[m])*k,Z[m]+(Z[f]-Z[m])*k,m]);}}
     for(const [p,x,y,z,near] of born){if(kind[near]!==IFACE)continue;
@@ -1313,7 +1331,7 @@ class MeshWorld extends World{
   // marker beside it. Continental markers keep their carried area (their volume is conserved, through the ledger).
   assignOceanAreas(){const T=this.tri,tv=T.tv,ns=this.nSlots,kind=this.mKind,off=this.off,adj=this.adj,R2=R_KM*R_KM;
     const dual=this._dual&&this._dual.length>=ns?this._dual:(this._dual=new Float64Array(ns+1024));dual.fill(0,0,ns);
-    for(let t=0;t<T.nT;t++){if(!T.tAlive[t])continue;const a=T.area(t)/3,o=3*t;dual[tv[o]]+=a;dual[tv[o+1]]+=a;dual[tv[o+2]]+=a;}
+    for(let t=0;t<T.nT;t++){if(!T.tAlive[t])continue;const a=T.tCache[4*t]/3,o=3*t;dual[tv[o]]+=a;dual[tv[o+1]]+=a;dual[tv[o+2]]+=a;} // areas cached by buildAdjacency
     for(let m=0;m<ns;m++){if(kind[m]!==IFACE)continue;let c=0;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR)c++;if(!c)continue;
       const sh=dual[m]/c;for(let e=off[m];e<off[m+1];e++)if(kind[adj[e]]===INTERIOR)dual[adj[e]]+=sh;}
     for(let m=0;m<ns;m++)if(kind[m]===INTERIOR&&!this.mK[m])this.mA[m]=dual[m]*R2;}
@@ -1327,10 +1345,13 @@ class MeshWorld extends World{
     this.computeMarkerElev();if(this.deferView)this.viewStale=true;else this.computeView();
     this.updateStats(this.steps%4===0);this.hotspotEvents();this.plateEvents();
     if(this.steps%32===0)this.gc();}
-  computeMarkerElev(){const t=this.t;for(let m=0;m<this.nSlots;m++)if(this.mKind[m]===INTERIOR)this.mE[m]=elevOf(this.mK[m],this.mT[m],this.mB[m],this.mS[m],t);}
+  // elevOf from the lattice core, inlined: isostasy for continents; for ocean, depth with the square root of age,
+  // plus thickness above normal crust and sediment
+  computeMarkerElev(){const t=this.t,ns=this.nSlots,kind=this.mKind,K=this.mK,T=this.mT,B=this.mB,S=this.mS,E=this.mE,ISO=C.ISO,CB=C.CONT_BASE,OT=C.OCEAN_T;
+    for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;
+      if(K[m]){E[m]=ISO*(T[m]-CB);continue;}const a=t-B[m],e=-2.6-0.33*Math.sqrt(a>0?a:0)+0.5*(T[m]-OT)+0.3*S[m];E[m]=e<-7?-7:e;}}
   // ---------- surface processes: the lattice core's rules, per marker ----------
   surfaceProcesses(){const dt=this.dt,t=this.t,pool=this.pool,ns=this.nSlots,kind=this.mKind,K=this.mK,T=this.mT,A=this.mA,S=this.mS,E=this.mE,pl=this.mPlate,mo=this.mo,ma=this.ma,mw=this.mw,r=this.rand;
-    const contV=()=>{let v=0;for(let m=0;m<ns;m++)if(kind[m]===INTERIOR&&K[m])v+=A[m]*T[m];return v;};
     // arcs and collisions gathered during motion
     const got=new Uint8Array(ns);
     for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR)continue;
@@ -1368,7 +1389,7 @@ class MeshWorld extends World{
       for(let m=0;m<ns;m++){if(kind[m]!==INTERIOR||!K[m]||E[m]>0.3||r()>pz)continue;let coast=false;for(let e=mo[m];e<mo[m+1];e++)if(!K[ma[e]])coast=true;
         if(coast){this.led("contToOcean",-T[m]*A[m]);K[m]=0;T[m]=C.OCEAN_T+1;this.mB[m]=t-60;S[m]=2;this.mCol[m]=pool.make(ROCK.OCEAN,t-60,T[m],pl[m]);}}}
     for(let m=0;m<ns;m++)if(kind[m]===INTERIOR)pool.reconcile(this.mCol[m],T[m]);
-    this._contV=contV();}
+  }
   nearestAny(px,py,pz){const T=this.tri,t=T.locate(px,py,pz,this._hintAny||-1);if(t<0)return -1;this._hintAny=t;let best=-1,bd=Infinity;
     for(let k=0;k<3;k++){const v=T.tv[3*t+k];if(this.mKind[v]!==INTERIOR)continue;const d=(T.X[v]-px)**2+(T.Y[v]-py)**2+(T.Z[v]-pz)**2;if(d<bd){bd=d;best=v;}}
     if(best<0){const v=T.tv[3*t];best=this.nearestOf(px,py,pz,this.iN[v]?this.iPlate[3*v]:0,v);}return best;}
@@ -1409,13 +1430,16 @@ class MeshWorld extends World{
     if(best<0)for(let e=off[v];e<off[v+1];e++){const r=adj[e];for(let f=off[r];f<off[r+1];f++){const q=adj[f];if(kind[q]!==INTERIOR)continue;const dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<bd){bd=dq;best=q;}}}
     return best;}
   markerForCell(i){const p=this.cube.pos;return this.viewMarker(p[3*i],p[3*i+1],p[3*i+2],-1);}
-  computeView(){const pos=this.cube.pos,N=this.N,kind=this.mKind;
+  computeView(){const pos=this.cube.pos,N=this.N,kind=this.mKind,X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,off=this.off,adj=this.adj;
     if(!this._vcache||this._vcache.length!==N){this._vcache=new Int32Array(N).fill(-1);this._vcid=new Uint32Array(N);}const vc=this._vcache,vid=this._vcid,mid=this.mId;let prev=-1;
-    for(let i=0;i<N;i++){let v=vc[i];
+    for(let i=0;i<N;i++){const px=pos[3*i],py=pos[3*i+1],pz=pos[3*i+2];let v=vc[i],best;
       // start from last step's vertex if it is still the same marker (slots are reused far away), else from the
-      // previous cell's answer (cells are visited in spatial order)
+      // previous cell's answer (cells are visited in spatial order); then viewMarker's rule, inlined for speed
       if(v<0||!kind[v]||mid[v]!==vid[i])v=prev>=0&&kind[prev]?prev:-1;
-      const best=this.viewMarker(pos[3*i],pos[3*i+1],pos[3*i+2],v);v=this._near;
+      if(v<0){best=this.viewMarker(px,py,pz,-1);v=this._near;}
+      else{let d=(X[v]-px)**2+(Y[v]-py)**2+(Z[v]-pz)**2;
+        for(let moved=true;moved;){moved=false;let nv=v;const e1=off[v+1];for(let e=off[v];e<e1;e++){const q=adj[e],dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<d){d=dq;nv=q;moved=true;}}v=nv;}
+        best=kind[v]===INTERIOR?v:this.viewMarker(px,py,pz,v);}
       vc[i]=v;vid[i]=mid[v];prev=v;
       this.owner[i]=this.mPlate[best];this.bodyIdx[i]=best;this.wT[i]=this.mT[best];this.wB[i]=this.mB[best];this.wS[i]=this.mS[best];this.wK[i]=this.mK[best];
       this.wCol[i]=this.mCol[best];this.elev[i]=this.mE[best];}
