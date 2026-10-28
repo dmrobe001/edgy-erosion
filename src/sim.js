@@ -627,6 +627,7 @@ class World{
     };
   }
 }
-return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3,makeLookup,elevOf,hashStr};
+return {World,C,ROCK,ROCK_NAMES,FK,FK_NAMES,R_KM,getCube,U,FS,makeNoise3,makeLookup,elevOf,hashStr,
+  ColumnPool,FaultPool,kindOf,gauss,randUnit,norm3,cross,latlon,loc,mulberry32}; // the last row is shared with the marker core (mesh.js)
 })();
 // ===== SIM-END =====

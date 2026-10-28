@@ -1,6 +1,6 @@
 # L0 on a marker mesh: specification
 
-Status: proposal, revision 2, not yet built. This document is written to be argued with before any code exists. It specifies a replacement for the L0 core in `src/sim.js`.
+Status: revision 2. Stage 1 is built (`src/mesh.js`; README §3.14; results and deviations in §11.1). Later stages are proposals, written to be argued with before code exists. This document specifies a replacement for the L0 core in `src/sim.js`.
 
 How claims are marked:
 
@@ -405,6 +405,34 @@ The lattice core stays selectable in the page until Stage 1 passes, so both can 
 | **5. Damage, cracking, emergent welding and polarity** | §4.6 hysteresis and break-off; §7. Split timer and merge counter removed | Rift rate 15–60 per Gyr without being set. Rifts start on old sutures more often than random paths through the same plate. Back-arc extension where slabs are old, compression where young (Uyeda & Kanamori). Time from continental contact to weld reported; India-like collisions still converging at 50 Myr are allowed |
 | **6. Crust budget without the thermostat** | Arc production against sediment subduction and subduction erosion | Continental fraction 30–45% for 1 Gyr. Earth's continental volume has been roughly steady, with addition and loss each about 3 km³/yr [measured: Scholl & von Huene 2009]. If it fails, the thermostat stays and is labelled a fudge |
 | **7. L1 on markers** | L1 seeds from L0's markers and reads the lineage graph | test_l1 passes in what it checks |
+
+### 11.1 Stage 1 as built
+
+**Where the build departs from this spec**, and why:
+
+| Spec | Built | Why |
+|---|---|---|
+| Every marker carries its area A (§3.1) | Only continental markers carry area. Oceanic markers take their area from the geometry each step: their share of the triangles around them, plus a share of the interface markers beside them | Carried oceanic area drifted: the opening at ridges was stored on interface markers, which come and go. Oceanic crust is made and destroyed by definition, so only continental volume needs a ledger (DEVLOG) |
+| Ridges emit a marker from each side once it has opened h₀ (§3.4) | A new oceanic marker is placed wherever a plate's nearest marker is more than 1.3 h₀ from an interface marker that is not at a convergent boundary | No state stored on short-lived interface markers |
+| Interface sides carry the frontier's material (§3.2) | Sides carry plates and positions only; frontier values are read from the nearest interior marker of each plate. Interface markers hold no material and no area | Enough for Stage 1's rules. Material on sides comes with the sheet (Stage 3), where velocity jumps across interfaces |
+| Polarity by segment-averaged buoyancy (§4.6, Stage 5) | Each connected stretch of convergent boundary takes the majority verdict of the lattice core's rule (continent, then thicker, then younger) | Neighbouring interface markers that disagreed ran into each other |
+| Refinement and coarsening (§8) | Not built | Rigid plates keep marker spacing; the marker count holds steady |
+
+**Exit checks** (`tests/test_mesh.js`, `tools/compare_cores.js`; three seeds, n = 96, 800 Myr):
+
+| Check | Result |
+|---|---|
+| I1 area | Continental carried area against the space it covers: within about 1–1.5% throughout; stable |
+| I2 continental volume ledger | Closes to about 10⁻⁹ every step |
+| I4 mesh, I5 identity | Valid at every check; no edge joins two plates' interior markers; ids unique |
+| I6 determinism | Two runs, and a snapshot restored and replayed, end in the same state |
+| Land fraction | 0.29–0.31 at 800 Myr (lattice 0.17–0.23); README range 22–34% |
+| Continental fraction | 0.35–0.36 (lattice 0.39–0.40, target 0.40): **below**. The lattice core counts about 3.5 times as many oceanic contacts as the marker core consumes, each depositing arc crust; seafloor turnover is the same on both. The lattice's continents lean on resampling |
+| Rifts, sutures | 16–28 and 15–30 per 800 Myr (lattice 22–35 and 20–34); the seeds vary more than the cores |
+| Plate count | 7–13 over the runs (lattice 7–13) |
+| Mean ocean-floor age | 236–268 Myr at 800 Myr (lattice 124–206): **older** than the README range of 70–220 |
+| Displayed-rock flicker | 0.55% of continental markers per step: resampling flicker gone from the material (the lattice's 5% is 90% resampling). The grid view still samples moving markers: 7–9% of cells per step |
+| Cost | 100–126 ms per step against 29–34: **about 3.5–4 times**, not within 2× |
 
 Statistics reported at every stage, against Earth:
 

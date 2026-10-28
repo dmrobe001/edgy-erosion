@@ -176,6 +176,31 @@ The world-space overlap layer, lookahead relevance, pieces and refined cube-sphe
 
   After the change, all but 16 of 4,889 land cells end under the sheet's crust (seed b, 300 km buffer). The 16 carry markers, but the sheet moved the coast a cell away from L0's.
 
+## L0 marker core, Stage 1 (`src/mesh.js`)
+
+**What:** the first stage of `L0_MESH_SPEC.md`. The crust lives on markers that move with their plates; a Delaunay triangulation of their positions on the sphere is kept up to date by edge flips; plates meet at interface markers, which have one side per plate. Kinematics and every surface rule are the lattice core's, so the two can be compared on one seed. The lattice core builds the start, and the marker core puts one marker in each of its cells.
+
+**The triangulation.** A library (Delaunator, through a stereographic projection) took about 50 ms for 50,000 points, most of the step budget, so the triangulation is kept in place instead: insertion, deletion (re-triangulating the hole with Delaunay ears) and Lawson flips. Markers inside a rigid plate never change their triangles; only triangles touching two plates or an interface marker can go non-Delaunay or turn over.
+- **Points on edges.** Interface markers go at the midpoints of edges between plates, so they sit on an edge. The walk that finds a point's triangle bounced between the two triangles sharing it (20 s to start a world at n = 32), and the split left a zero-area triangle. Fixed with an edge split (two triangles become four) and a tolerance in the walk.
+- **Turned-over triangles.** The step is cut into substeps of at most a quarter spacing of relative motion across any interface; a substep that turns a triangle over is undone and its culprit removed (two interface markers crowding each other, or a losing marker at a trench, which is consumed) or, failing that, halved. A full rebuild is the last resort and has not been needed in the runs since.
+- **Corruption at step 95 (n = 96).** A deletion left a folded hole: three of the five corners of the polygon around the deleted marker were reflex. The triangulation was already turned over at the "last good" positions, because an interface marker jumped when its kind changed: the sides of a former trench kept the offsets they had picked up riding their plates, and as a ridge the marker sits at their mean. Sides now restart at the marker whenever the kind changes (since then, at every step).
+- **A loop that rewrote its own bound.** The nearest-marker walk for the fixed-grid view changed `v` inside `for (e = off[v]; e < off[v+1]; e++)`, so it scanned unrelated stretches of the adjacency array: 95 million distance checks per call, 300–400 ms a step. Bounds are captured first now.
+
+**Polarity.** Neighbouring interface markers on one trench chose their winners separately (the lattice core's rule, applied marker by marker), disagreed, rode different plates and ran into each other. Each connected stretch of convergent boundary between one pair of plates now takes its markers' majority verdict.
+
+**Area.** Three tries.
+1. New oceanic markers at ridges carried the strip their side had opened (width times the length of boundary their interface marker stood for). The budget drifted from −4% to +3% over 400 Myr at n = 32.
+2. Measuring the opening across the boundary only, and the boundary length from the two nearest interface markers on the same boundary, made it worse: −37% after 400 Myr, with the gap between plates widening to a quarter of the sphere. The opening was stored on interface markers, which come and go all the time, and was lost with them. The first rule had balanced only by accident (two overestimates against the area continents lose in collisions).
+3. What works: oceanic crust is made and destroyed by definition, so its area is just the space it occupies (each oceanic marker's third of its triangles, plus a share of the interface markers beside it). Only continental markers carry area and volume, and those are conserved through a ledger. New oceanic markers are placed wherever a plate's nearest marker is more than 1.3 spacings from its boundary. The budget now stays within about 1% (it measures continental crust's carried area against the space it covers) and the marker count holds steady.
+
+**Volume ledger.** Every change to continental volume is booked by cause. Two bookkeeping slips showed up as untracked change and were fixed: new ridge area joining a nearby continental marker (new crust at a ridge is oceanic, so it now joins only oceanic markers), and a collision target that was missing booked twice. The ledger now closes to about 10⁻⁹ of the total every step.
+
+**What the comparison with the lattice core showed** (three seeds, n = 96, 800 Myr; `tools/compare_cores.js`):
+- **Resampling inflated subduction on the lattice.** In 200 Myr at n = 64, the lattice core logs 37,983 oceanic overlaps, each depositing arc crust; the marker core consumes 10,991 oceanic markers. Seafloor turnover is the same on both (5.1% and 5.2% of the ocean younger than 10 Myr; mean age 155 and 168 Myr), so the difference is in how many contacts are counted, not in how much seafloor goes down. The lattice core's continents lean on that extra arc crust: the marker core settles about 4 points lower in continental crust (0.35–0.36 against 0.39–0.40 at a 40% target), with older seafloor (236–268 Myr against 124–206 at 800 Myr).
+- **Displayed-rock flicker on the markers themselves is 0.55% a step**, the share of the lattice core's 5% that came from surface processes. What remains in the view is the grid sampling moving markers.
+- **Peaks stay at 6.7 km**, which is the 75 km thickness cap; the lattice core's peaks of up to 7.9 km mean crust above its own cap, presumably from resampling as well.
+- **Cost** is 100–126 ms a step against 29–34 ms: not within the factor of two the spec asked for.
+
 ---
 
 ## Things that turned out not to matter, or were left alone

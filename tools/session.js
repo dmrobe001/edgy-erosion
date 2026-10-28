@@ -15,7 +15,10 @@ const ROOT = path.join(__dirname, "..");
 
 function load(file) { return JSON.parse(fs.readFileSync(file, "utf8")); }
 function l0Hash(w) { let a = 0; for (let i = 0; i < w.N; i++) a = (a * 31 + Math.round(w.elev[i] * 1e4) + w.owner[i]) | 0; return a; }
-function newWorld(sess, SIM) { const s = sess.settings; return new SIM.World({ n: s.resolution, seed: s.seed, nPlates: s.initialPlates, mode: s.start, nnr: true, contTarget: s.continentalTarget }); }
+// a session saved on the marker core (settings.core "mesh") needs the marker module, loaded on demand
+function newWorld(sess, SIM) { const s = sess.settings, o = { n: s.resolution, seed: s.seed, nPlates: s.initialPlates, mode: s.start, nnr: true, contTarget: s.continentalTarget };
+  if (s.core === "mesh") { const MESH = SIM.MESH || require(path.join(ROOT, "tests", "lib.js")).loadMesh(SIM); return new MESH.MeshWorld(o); }
+  return new SIM.World(o); }
 
 function reproduce(sess, SIM, L1, log = () => {}, L2 = null) {
   const w = newWorld(sess, SIM), R = sess.reproduce, L = R.L1, out = { world: w, L1, L2 };
@@ -65,7 +68,7 @@ function unstash(file, SIM, L1, sess) {
 }
 // the commit whose sources hash to the session's build id (as build.sh computes it)
 // (src/l2.js joined the page later; a commit without it hashes the other four, as build.sh did then)
-function srcHash(get) { const h = crypto.createHash("sha1"); for (const f of ["src/head.html", "src/sim.js", "src/l1.js", "src/l2.js", "src/ui.js"]) { let d; try { d = get(f); } catch (_) { continue; } h.update(d); } return h.digest("hex").slice(0, 12); }
+function srcHash(get) { const h = crypto.createHash("sha1"); for (const f of ["src/head.html", "src/sim.js", "src/mesh.js", "src/l1.js", "src/l2.js", "src/ui.js"]) { let d; try { d = get(f); } catch (_) { continue; } h.update(d); } return h.digest("hex").slice(0, 12); }
 function findBuild(id) {
   if (srcHash(f => fs.readFileSync(path.join(ROOT, f))) === id) return "the working tree";
   let commits = [];

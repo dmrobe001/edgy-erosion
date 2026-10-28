@@ -177,7 +177,14 @@ function render(){
       const a=project(c),b=project(e);if(!a||!b)continue;if(proj==="flat"&&a[2]!==b[2])continue;drawArrow(ctx,a[0],a[1],b[0],b[1],dpr);}
   }
   drawTraces(ctx,dpr);
+  if(world.core==="mesh"&&$("meshDots").checked)drawMarkers(ctx,dpr);
 }
+// the marker core's markers: interior ones as faint dots, interface ones coloured by the kind of boundary they sit on
+function drawMarkers(ctx,dpr){const w=world,T=w.tri,v=[0,0,0],cols=[getVar("--trans"),getVar("--div"),getVar("--conv"),"#ffffff"],r=Math.max(1,0.9*dpr);
+  ctx.fillStyle="rgba(255,255,255,.35)";
+  for(let m=0;m<w.nSlots;m++){if(w.mKind[m]!==1)continue;v[0]=T.X[m];v[1]=T.Y[m];v[2]=T.Z[m];const p=project(v);if(p)ctx.fillRect(p[0]-r/2,p[1]-r/2,r,r);}
+  for(let m=0;m<w.nSlots;m++){if(w.mKind[m]!==2)continue;v[0]=T.X[m];v[1]=T.Y[m];v[2]=T.Z[m];const p=project(v);if(!p)continue;
+    ctx.fillStyle=cols[w.iKind[m]]||"#fff";ctx.fillRect(p[0]-r,p[1]-r,2*r,2*r);}}
 function drawTraces(ctx,dpr){
   if(!handoff||!$("traces").checked)return;
   const cols=[null,getVar("--conv"),getVar("--div"),getVar("--trans")];
@@ -205,7 +212,8 @@ function drawArrow(ctx,x0,y0,x1,y1,dpr){
 // ---------- ui ----------
 const EMPTY_LOG='<li class="empty" style="border:0">No events yet.</li>';
 function build(){
-  world=new SIM.World({n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100});
+  const wo={n:+$("grid").value,seed:$("seed").value||"genesis",nPlates:+$("nPlates").value,mode:$("mode").value,nnr:true,contTarget:+$("contT").value/100};
+  world=$("core").value==="mesh"?new MESH.MeshWorld(wo):new SIM.World(wo);$("meshLbl").hidden=world.core!=="mesh";
   actions=[];l0LastInspect=l1LastInspect=null;l1Reset();snaps=[];snapTick();lightW=prepLight(world.cube);colorsDirty=true;handoff=null;l1=null;geoDirty=true;selCell=-1;selMask=null;goode=null;runStart=runTarget=0;showColumn();renderSummary();camDirty=true;loggedCount=0;$("log").innerHTML=EMPTY_LOG;msEma=0;rateEma=0;render();updateUi();logAction({a:"build",settings:{seed:world.opts.seed,resolution:world.n,initialPlates:world.opts.nPlates,start:world.opts.mode,continentalTarget:world.contTarget}});
 }
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
@@ -252,7 +260,7 @@ $("randSeed").onclick=()=>{const w=["basalt","craton","ophiolite","gneiss","teth
   $("seed").value=w[Math.floor(Math.random()*w.length)]+"-"+Math.floor(Math.random()*1000);build();};
 $("seed").addEventListener("keydown",e=>{if(e.key==="Enter")build();});
 ["mode","grid"].forEach(id=>$(id).onchange=build);
-["marks","traces"].forEach(id=>$(id).onchange=()=>render());
+["marks","traces","meshDots"].forEach(id=>$(id).onchange=()=>render());
 document.querySelectorAll("#views button").forEach(b=>b.onclick=()=>{view=b.dataset.v;
   document.querySelectorAll("#views button").forEach(x=>x.setAttribute("aria-pressed",x===b?"true":"false"));colorsDirty=true;updateLegend();render();});
 document.querySelectorAll("#proj button").forEach(b=>b.onclick=()=>{proj=b.dataset.p;
@@ -377,7 +385,8 @@ function l0Elev(x,y,z){const w=world,out=[0,0,0],nb=w.cube.nb;w.cube.lookupFrac(
   const c=out[0],tx=out[1],ty=out[2],cB=nb[4*c+(tx>=0?0:1)],cC=nb[4*c+(ty>=0?2:3)],cD=nb[4*cB+(ty>=0?2:3)],ax=Math.abs(tx),ay=Math.abs(ty),E=w.elev;
   return(1-ax)*(1-ay)*E[c]+ax*(1-ay)*E[cB]+(1-ax)*ay*E[cC]+ax*ay*E[cD];}
 // status lines under the L1 button; the button refines the current selection when a saved state is old enough
-function l1Status(){const S=l1St,el=$("l1Info");if(!world||l1Busy())return;const win=+$("l1Win").value,entry=l1Entry(win);
+function l1Status(){const S=l1St,el=$("l1Info");if(!world||l1Busy())return;
+  if(world.core==="mesh"){$("l1Run").disabled=true;el.innerHTML='<div class="muted">L1 refinement reads the lattice core for now. The marker core will feed L1 directly at Stage 7 of L0_MESH_SPEC.md; rebuild with the lattice core to refine a landmass.</div>';return;}const win=+$("l1Win").value,entry=l1Entry(win);
   const pick=S&&S.pick;$("l1Run").disabled=!(pick&&entry&&selCell>=0);if(!pick)return;const a=pick.land*world.cellKm*world.cellKm;
   let html=`<div><b>Landmass</b>: ${(a/1e6).toFixed(1)} M km² of land (${pick.land.toLocaleString("en-US")} L0 cells), mostly on plate ${pick.ref}${pick.islands?`, with ${pick.islands} island${pick.islands>1?"s":""} within ${pick.bufferKm} km`:""}; with the buffer and enclosed seas, ${((pick.cells.length-pick.land)*world.cellKm*world.cellKm/1e6).toFixed(1)} M km² of sea and shelf.</div>`;
   if(S.phase==="picked")html+=`<div class="muted">${entry?`Showing L0 now; refining replays from ${fmtT(entry.t)} Myr.`:`No saved L0 state ${win} Myr back yet: run L0 longer or shorten the window.`}</div>`;
@@ -706,7 +715,7 @@ function sessionData(){const w=world,S=l1St,p=w.cube.pos,ll=i=>[+(Math.asin(p[3*
   const l1Extent=l1Geo&&S?{xKm:[l1Geo.cx-l1PW/2*l1Geo.s,l1Geo.cx+l1PW/2*l1Geo.s],yKm:[l1Geo.cy-l1PH/2*l1Geo.s,l1Geo.cy+l1PH/2*l1Geo.s],kmPerPx:l1Geo.s}:null;
   const sh=S&&S.sh,bs=S&&S.bs,ho=S&&S.ho;
   return{format:"edgy-erosion session",version:2,build:typeof BUILD_ID!=="undefined"?BUILD_ID:null,savedAt:new Date().toISOString(),
-    settings:{seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
+    settings:{core:w.core||"lattice",seed:w.opts.seed,resolution:w.n,initialPlates:w.opts.nPlates,start:w.opts.mode,continentalTarget:w.contTarget,netRotationRemoved:true,
       stepsPerFrame:+$("speed").value,runGyr:+$("gyr").value,l1:{bufferKm:l1Buf(),windowMyr:+$("l1Win").value,sheetKm:+$("l1H").value,argand:+$("l1Ar").value,couplingKm:+$("l1Ell").value},l2:{radiusKm:l2Rad()}},
     reproduce:{L0:{steps:w.steps,t:w.t},selectedCell:selCell,faultHandoffAtSteps:handoff?w.steps:null,
       L1:S&&S.entry?{phase:S.phase,cell:S.cell,bufferKm:S.pick.bufferKm,presentSteps:S.plan?S.plan.endSteps:S.rp?S.rp.endSteps:null,entrySteps:S.entry.steps,entryT:S.entry.t,windowMyr:S.win,sheet:S.o,stale:!!S.stale}:null,

@@ -47,12 +47,13 @@ Everything is deterministic given the seed and settings (seed text, resolution, 
 - **Refine selected landmass** (top of the L1 panel) replays the last 10–30 Myr of the selected landmass from a saved state of L0 (kept every 10 Myr while L0 runs, so run L0 for a while first). L0 replays the window twice (tracing the crust, then driving the sheet) and ends exactly where it started. The L1 map then shows terrain, thickening, finite strain, strain rate, surface rock, mantle pull, rainfall, drainage basins and the L2 tiles.
 - **Extract handoff** traces the fault network, builds formations and domains, and overlays fault traces; **Download JSON** saves that L0 handoff.
 - **Export session** saves a small JSON log from which the session reruns exactly (section 2.1). Downloads use the Claude artifact runtime's downloads capability; opened as a plain local file, they are unavailable.
+- **Core** (under the world settings, applied by **Rebuild world**): the lattice core, or the marker core (section 3.14, Stage 1 of `L0_MESH_SPEC.md`), which carries the crust on markers on a Delaunay mesh. On the marker core, **Markers** draws every marker, with interface markers coloured by the kind of boundary; L1 refinement still needs the lattice core.
 - Net rotation is always removed (section 3.8). The statistics the page no longer shows (plate count, continental fraction, mean seafloor age, units per column, net rotation, simulated rate) are in the session export.
 
 **Rebuild the page** from its parts after editing `src/`:
 
 ```sh
-./build.sh        # concatenates src/head.html + src/sim.js + src/l1.js + src/ui.js into plates.html
+./build.sh        # concatenates src/head.html + src/sim.js + src/mesh.js + src/l1.js + src/l2.js + src/ui.js into plates.html
 ```
 
 **Headless tests** (Node.js 18+, no dependencies):
@@ -62,6 +63,8 @@ node tests/run_all.js              # quick pass over everything (about two minut
 node tests/test_l1.js --n=96 --h=50 --win=20 --t0=1000 --land=3000   # L1 checks at the browser's defaults
 node tests/test_budget.js --t=2400 # full-length crust budget run
 node tests/bench.js --t=300        # ms per step at each resolution
+node tests/test_mesh.js --n=64 --t=300       # the marker core's invariants (section 3.14)
+node tools/compare_cores.js --n=96 --t=800   # the marker core against the lattice core, three seeds (about 15 minutes)
 ```
 
 ### 2.1 Session exports
@@ -91,11 +94,13 @@ plates.html            the built single-file page (what the artifact serves)
 build.sh               rebuilds plates.html from src/
 src/head.html          markup, styles, explanatory notes; ends with an opening <script> tag
 src/sim.js             the simulation core: a self-contained SIM module, usable in browser and Node
+src/mesh.js            the marker core (L0_MESH_SPEC.md Stage 1): spherical Delaunay triangulation, MeshWorld (MESH module)
 src/l1.js              L1: landmass pick, replay, thin viscous sheet with markers, flexure, crust budget, drainage pass, L2 handoff, basin selection (L1 module)
 src/l2.js              L2: the relief L2 starts from, as a function of position; basin outlines burnt in at 500 m; the L2 pass (L2 module)
 src/ui.js              rendering, controls, inspector, handoff panel, L1 and L2 panels
 tests/                 headless tests and benchmarks (see section 3.13)
 tools/session.js       reruns, checks and stashes a session exported from the page (section 2.1)
+tools/compare_cores.js the marker core against the lattice core on the same seeds (section 3.14)
 history/               simulation cores from earlier milestones, referenced by DEVLOG.md
 ONTOLOGY.md            what each structure in the code is (field, material, pattern, ...), and what that shows
 L0_MESH_SPEC.md        proposal: L0 rebuilt on Lagrangian markers with a torque balance, mantle flow, plumes and cracking
@@ -265,6 +270,7 @@ All are tuned for plausible appearance, not fitted to Earth data.
 | `test_pinholes.js` | single-cell ocean pinholes inside freshly absorbed plates versus elsewhere |
 | `test_volume_budget.js` | continental volume sources and sinks, via a patched copy of the sim |
 | `test_l1.js` | L1: stream-power steady state and the viscous sheet against exact solutions; on a real landmass, exact replay, L0 untouched by the sheet, crust budget closure, bounded thickness and peaks, determinism; in the drainage pass, every land cell drains and basins partition the land; prints Hack's law |
+| `test_mesh.js` | the marker core: spherical triangulation (build, delete, reinsert, points on edges, flips); per step, the continental volume ledger, mesh validity, no edge between two plates' interior markers, unique ids; area budget; determinism and snapshot replay |
 | `bench.js` | ms per step, extraction and export cost at each resolution |
 
 Representative numbers from development, in Node.js on a single core:
@@ -274,6 +280,28 @@ Representative numbers from development, in Node.js on a single core:
 - **Plate count and seafloor:** plates stay between 9 and 13; mean seafloor age wanders between about 70 and 220 Myr (Earth: about 60), so seafloor recycles somewhat slowly.
 - **Events:** roughly 20–30 rifts and 20–30 sutures per 800 Myr, plus hotspot islands.
 - **Rock flicker:** about 5% of continental cells change displayed rock per step, about 90% of it from resampling.
+
+### 3.14 The marker core (Stage 1 of `L0_MESH_SPEC.md`)
+
+An alternative L0 core in `src/mesh.js`, chosen with **Core** before **Rebuild world**. It keeps the lattice core's kinematics and surface rules, but the crust lives on markers instead of plate lattices, so nothing is resampled.
+
+- **Start.** The lattice core builds the starting world; one marker is put in each of its cells (jittered within the cell by a fixed hash), carrying the cell's crust, rock column and fault record. The plates' lattices are then dropped.
+- **Mesh.** A Delaunay triangulation of the markers on the sphere (on a sphere it is their convex hull), kept up to date by insertion, deletion and edge flips. Markers inside a rigid plate keep their triangles; only triangles touching two plates change.
+- **Interfaces.** Wherever an edge joins two plates' markers, an interface marker goes at its midpoint, with one side per plate (three at a triple junction). Each step it is classed as ridge, convergent or transform from the plates' relative velocity across the boundary. At a convergent boundary it rides the winning plate; each connected stretch of one plate pair's convergent boundary takes its markers' majority verdict on which plate wins (continent, then thicker, then younger: the lattice core's rule).
+- **Motion.** Plates rotate rigidly. The step is cut into substeps of at most a quarter spacing of relative motion across any interface; a substep that turns a triangle over is undone and the culprit removed, or halved.
+- **Subduction and collision.** A losing marker within 0.3 spacings of a convergent interface marker is consumed, with the lattice core's side effects: an arc on the winner 1–3 spacings inboard and a slab record for an oceanic marker; for a continental one, its whole volume moved onto the winner's markers (head-on: inland; glancing: at the boundary) and the plate pair's collision count raised.
+- **Ridges.** Where a plate's nearest marker is more than 1.3 spacings from an interface marker that is not convergent, a new oceanic marker of that plate is placed between them.
+- **Area and volume.** Oceanic markers take their area from the geometry each step (their share of the triangles around them and of the interface markers beside them). Continental markers carry area and volume; every change to continental volume is booked by cause, and the ledger closes to about 10⁻⁹ every step.
+- **Surface processes.** The lattice core's, per marker, over each marker's neighbours: its mesh neighbours, plus the markers of other plates around each interface marker beside it, so diffusion, erosion and sediment cross plate boundaries. Diffusion uses cotangent weights, which reduce to the lattice's on a square grid.
+- **The page** reads a fixed-grid view: each cell shows the nearest marker. **Markers** draws them. L1 refinement still reads the lattice core's plate lattices and asks for it.
+
+**Measured** (`tools/compare_cores.js`, three seeds, n = 96, 800 Myr, against the lattice core on the same seeds; details in `L0_MESH_SPEC.md` §11.1 and `DEVLOG.md`):
+
+- The invariants hold: volume ledger to about 10⁻⁹, mesh valid at every check, ids unique, runs deterministic and replayable from a snapshot (`tests/test_mesh.js`).
+- Resampling flicker is gone from the material: displayed rock changes on 0.55% of continental markers a step, the lattice core's surface-process share.
+- Continental crust settles about 4 points lower (0.35–0.36 against 0.39–0.40) and seafloor is older (236–268 Myr against 124–206 at 800 Myr). The lattice core counts about 3.5 times as many oceanic contacts as the marker core consumes, and each deposits arc crust; seafloor turnover is the same on both, so the lattice's extra arc crust comes from resampling.
+- Land fraction, plate count, rifts and sutures stay in the lattice core's ranges, which vary more between seeds than between cores.
+- It costs 100–126 ms a step at n = 96 against 29–34 ms.
 
 ---
 
@@ -690,6 +718,7 @@ Also:
 - **Formation identity is inferred** at handoff from rock type, origin plate and age. Recording an explicit depositional-episode ID when each unit forms would be cleaner.
 - **Small islands and peninsulas vanish** in the smoothed handoff (anything under about three cells). L1 should restore island chains from hotspot and arc records.
 - **Seafloor-age streaks** come from nearest-cell resampling as plates rotate.
+- **The marker core (section 3.14)** removes resampling from the material but is 3.5–4 times slower, settles at less continental crust (the lattice core's continents lean on resampled arc crust), and shows older seafloor. The view still samples moving markers, so the grid flickers. Next, per `L0_MESH_SPEC.md`: speed (warm starts, workers), then local forces and a torque balance (Stage 2).
 - **L1:** see section 5.7.
 
 ---

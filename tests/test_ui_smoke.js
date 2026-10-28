@@ -4,13 +4,13 @@
 const fs = require("fs"), path = require("path"), os = require("os"), SESSION = require("../tools/session.js"), { loadSim, loadL1, loadL2 } = require("./lib");
 const html = fs.readFileSync(path.join(__dirname, "..", "plates.html"), "utf8");
 const code = html.slice(html.indexOf("<script>") + 8, html.lastIndexOf("</script>"));
-const defaults = { grid: "64", seed: "genesis", nPlates: "10", mode: "scatter", speed: "3", contT: "50", l1Win: "10", l1H: "70", l1Ar: "3", l1Ell: "500" }, els = {};
+const defaults = { core: "lattice", grid: "64", seed: "genesis", nPlates: "10", mode: "scatter", speed: "3", contT: "50", l1Win: "10", l1H: "70", l1Ar: "3", l1Ell: "500" }, els = {};
 function el(id) { return els[id] || (els[id] = { id, value: defaults[id] || "", checked: true, hidden: false, textContent: "", innerHTML: "", style: {}, className: "", dataset: {},
   clientWidth: 400, clientHeight: 400, width: 0, height: 0, children: [], options: [], disabled: false,
   addEventListener() {}, setAttribute() {}, setPointerCapture() {}, insertAdjacentHTML(_, h) { this.innerHTML += h; }, remove() {}, prepend(c) { this.children.unshift(c); },
   get lastChild() { return { remove() {} }; }, getBoundingClientRect() { return { left: 0, top: 0, width: 400, height: 400 }; },
   getContext() { return { createImageData: (w, h) => ({ data: new Uint8ClampedArray(w * h * 4) }), putImageData() {}, clearRect() {}, beginPath() {}, arc() {}, stroke() {}, fill() {},
-    moveTo() {}, lineTo() {}, closePath() {}, setLineDash() {} }; } }); }
+    moveTo() {}, lineTo() {}, closePath() {}, setLineDash() {}, fillRect() {} }; } }); }
 global.document = { getElementById: el, querySelectorAll: () => [], createElement: () => ({}), documentElement: {}, body: { classList: { add() {}, remove() {} } } };
 global.setTimeout = f => { f(); return 0; }; global.clearTimeout = () => {};
 global.getComputedStyle = () => ({ getPropertyValue: () => "#d2452f" });
@@ -86,6 +86,20 @@ const run = new Function("SESSION", "fs", "os", "path", "loadSim", "loadL1", "lo
   for (let c = 0; c < a.lmin.length; c++) if (!(a.lmin[c] === b.lmin[c] || isNaN(a.lmin[c]) && isNaN(b.lmin[c]))) throw new Error("stashed sheet differs");
   if (SESSION.l0Hash(u.world) !== SESSION.l0Hash(world) || u.handoff.tiles.length !== l1St.ho.tiles.length) throw new Error("stash differs");
   console.log("PASS ui smoke session: log " + (fs.statSync(file).size / 1e3).toFixed(0) + " kB, " + sess.actions.length + " actions; rerun matches all " + r.checks.length + " checks; stash " + (fs.statSync(sf).size / 1e6).toFixed(0) + " MB restores the sheet exactly");
+  // the marker core: rebuild on it, run, draw every view with the markers overlay, inspect, extract the handoff, and
+  // check that L1 refinement says it needs the lattice core and that a session records the core
+  { document.getElementById("core").value = "mesh"; document.getElementById("reset").onclick();
+    if (world.core !== "mesh") throw new Error("the marker core was not built");
+    for (let k = 0; k < 30; k++) { world.step(); snapTick(); }
+    document.getElementById("meshDots").checked = true;
+    for (const p of ["globe", "flat"]) { proj = p; pixIdx = null; for (const v of ["elev", "rock", "plates"]) { view = v; colorsDirty = true; render(); } }
+    inspect({ clientX: 200, clientY: 120 }); document.getElementById("extract").onclick(); render();
+    const mj = JSON.stringify(world.exportHandoff(handoff)); l1Status();
+    if (!document.getElementById("l1Info").innerHTML.includes("lattice core")) throw new Error("L1 on the marker core is not explained");
+    if (sessionData().settings.core !== "mesh") throw new Error("the session does not record the core");
+    const a = world.audit(); if (!a.mesh.ok) throw new Error("marker mesh invalid in the page: " + a.mesh.errs.join(";"));
+    console.log("PASS ui smoke marker core: t=" + world.t.toFixed(0) + " Myr, " + a.markers + " markers, export " + (mj.length / 1e6).toFixed(1) + " MB");
+    document.getElementById("core").value = "lattice"; }
  })();
 `);
 run(SESSION, fs, os, path, loadSim, loadL1, loadL2).catch(e => { console.error(e); process.exitCode = 1; });
