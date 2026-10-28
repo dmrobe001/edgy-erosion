@@ -226,13 +226,13 @@ class WorkerWorld{
     this.worker=new Worker(URL.createObjectURL(new Blob([src],{type:"text/javascript"})));
     this.worker.onmessage=e=>this.receive(e.data);
     this.worker.onerror=e=>{if(e.preventDefault)e.preventDefault();this.fail(e.message||"worker error");};
-    this.worker.postMessage({type:"init",opts});}
+    this.worker.postMessage({type:"init",opts,helper:meshViewHelper});}
   fail(msg){this.failed=msg;if(this.onfail)this.onfail(msg);}
   receive(m){
-    if(m.type==="ready"){Object.assign(this,{hotspots:m.hotspots,dt:m.dt,cellKm:m.cellKm,contTarget:m.contTarget});this.ready=true;return;}
+    if(m.type==="ready"){Object.assign(this,{hotspots:m.hotspots,dt:m.dt,cellKm:m.cellKm,contTarget:m.contTarget,helper:m.helper});this.ready=true;return;}
     if(m.type==="state"||m.type==="stopped"){
       for(const k in m.view)this[k]=m.view[k];if(m.markers)this.markers=m.markers;
-      for(const k of ["t","steps","landFrac","contFrac","oceanAge","meanUnits","netRot","rmsSpeed","msPerStep","plates","nEvents"])this[k]=m[k];
+      for(const k of ["t","steps","landFrac","contFrac","oceanAge","meanUnits","netRot","rmsSpeed","msPerStep","plates","nEvents","trench"])this[k]=m[k];
       if(m.events.length){this.events.push(...m.events);if(this.events.length>400)this.events.splice(0,this.events.length-400);}
       if(m.type==="stopped")this.running=false;this.fresh=true;this.stateAt=performance.now();if(this.onstate)this.onstate();return;}
     if(m.type==="error"){this.fail(m.message);return;}
@@ -276,7 +276,7 @@ function makeMeshWorld(wo){
   w.onfail=msg=>{if(world!==w)return;noMeshWorker=true;w.terminate();running=false;$("play").textContent="Run";
     $("log").insertAdjacentHTML("afterbegin",`<li class="note">The marker core could not run in a worker (${String(msg).slice(0,120)}); it now runs on the page.</li>`);build();};
   return w;}
-let noMeshWorker=false;
+let noMeshWorker=false,meshViewHelper=true; // the second: build the view in a helper worker while the next step runs
 function fmtT(t){return t>=1000?(t/1000).toFixed(2):Math.round(t).toString();}
 function updateUi(){
   const t=world.t;$("clock").innerHTML=t>=1000?fmtT(t)+"<small>billion years</small>":fmtT(t)+"<small>million years</small>";

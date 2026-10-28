@@ -398,7 +398,7 @@ class MeshWorld extends World{
     this.classifyInterfaces();this.move();this.fillGaps();this.maintainInterfaces();if(this.tri.broken)this.rebuildMesh();this.buildAdjacency();this.assignOceanAreas();
     this.surfaceProcesses();this.recordFaults();
     this.t+=dt;this.steps++;
-    this.computeMarkerElev();this.computeView();
+    this.computeMarkerElev();if(this.deferView)this.viewStale=true;else this.computeView();
     this.updateStats(this.steps%4===0);this.hotspotEvents();this.plateEvents();
     if(this.steps%32===0)this.gc();}
   computeMarkerElev(){const t=this.t;for(let m=0;m<this.nSlots;m++)if(this.mKind[m]===INTERIOR)this.mE[m]=elevOf(this.mK[m],this.mT[m],this.mB[m],this.mS[m],t);}
@@ -470,24 +470,35 @@ class MeshWorld extends World{
   // ---------- the fixed-grid view the page reads ----------
   // Each fixed cell shows the nearest interior marker of the triangle holding its centre (or of its corners' rings):
   // plate, crust, rock column, elevation. A view only: nothing is written back.
-  computeView(){const T=this.tri,X=T.X,Y=T.Y,Z=T.Z,pos=this.cube.pos,N=this.N,kind=this.mKind,off=this.off,adj=this.adj;
-    // greedy descent on the Delaunay graph from last step's answer reaches the nearest vertex; the nearest interior
-    // marker is then that vertex or one of its neighbours
+  // The marker a fixed cell shows: greedy descent on the Delaunay graph from any start reaches the vertex nearest the
+  // cell's centre; the cell shows that vertex if it is an interior marker, else the nearest interior marker within two
+  // rings of it. Only the graph is used (no triangle walk), so a helper worker holding a copy can do it too.
+  viewMarker(px,py,pz,v){const X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,kind=this.mKind,off=this.off,adj=this.adj;
+    if(v<0||!kind[v]){v=this._anyV>=0&&kind[this._anyV]?this._anyV:-1;if(v<0){for(let m=0;m<kind.length;m++)if(kind[m]){v=m;break;}this._anyV=v;}}
+    let d=(X[v]-px)**2+(Y[v]-py)**2+(Z[v]-pz)**2;
+    for(let moved=true;moved;){moved=false;let nv=v;const e1=off[v+1];for(let e=off[v];e<e1;e++){const q=adj[e],dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<d){d=dq;nv=q;moved=true;}}v=nv;}
+    this._near=v;if(kind[v]===INTERIOR)return v;
+    let best=-1,bd=Infinity;
+    for(let e=off[v];e<off[v+1];e++){const q=adj[e];if(kind[q]===INTERIOR){const dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<bd){bd=dq;best=q;}}}
+    if(best<0)for(let e=off[v];e<off[v+1];e++){const r=adj[e];for(let f=off[r];f<off[r+1];f++){const q=adj[f];if(kind[q]!==INTERIOR)continue;const dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<bd){bd=dq;best=q;}}}
+    return best;}
+  markerForCell(i){const p=this.cube.pos;return this.viewMarker(p[3*i],p[3*i+1],p[3*i+2],-1);}
+  computeView(){const pos=this.cube.pos,N=this.N,kind=this.mKind;
     if(!this._vcache||this._vcache.length!==N){this._vcache=new Int32Array(N).fill(-1);this._vcid=new Uint32Array(N);}const vc=this._vcache,vid=this._vcid,mid=this.mId;let prev=-1;
-    for(let i=0;i<N;i++){const px=pos[3*i],py=pos[3*i+1],pz=pos[3*i+2];let v=vc[i];
+    for(let i=0;i<N;i++){let v=vc[i];
       // start from last step's vertex if it is still the same marker (slots are reused far away), else from the
       // previous cell's answer (cells are visited in spatial order)
       if(v<0||!kind[v]||mid[v]!==vid[i])v=prev>=0&&kind[prev]?prev:-1;
-      if(v<0){const t=T.locate(px,py,pz,-1);v=T.tv[3*t];}
-      let d=(X[v]-px)**2+(Y[v]-py)**2+(Z[v]-pz)**2;
-      for(let moved=true;moved;){moved=false;let nv=v;const e1=off[v+1];for(let e=off[v];e<e1;e++){const q=adj[e],dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<d){d=dq;nv=q;moved=true;}}v=nv;}
-      let best=kind[v]===INTERIOR?v:-1,bd=best>=0?d:Infinity;
-      if(best<0)for(let e=off[v];e<off[v+1];e++){const q=adj[e];if(kind[q]!==INTERIOR)continue;const dq=(X[q]-px)**2+(Y[q]-py)**2+(Z[q]-pz)**2;if(dq<bd){bd=dq;best=q;}}
-      if(best<0)best=this.nearestAny(px,py,pz);
+      const best=this.viewMarker(pos[3*i],pos[3*i+1],pos[3*i+2],v);v=this._near;
       vc[i]=v;vid[i]=mid[v];prev=v;
       this.owner[i]=this.mPlate[best];this.bodyIdx[i]=best;this.wT[i]=this.mT[best];this.wB[i]=this.mB[best];this.wS[i]=this.mS[best];this.wK[i]=this.mK[best];
       this.wCol[i]=this.mCol[best];this.elev[i]=this.mE[best];}
-    this.surface();}
+    this.viewStale=false;this.surface();}
+  ensureView(){if(this.viewStale)this.computeView();}
+  // the island event reads the markers (the view may be built elsewhere): the marker the hotspot's cell shows
+  hotspotEvents(){if(!this.mKind)return super.hotspotEvents();
+    for(const h of this.hotspots){const m=this.markerForCell(h.i),up=this.mE[m]>0;
+      if(up&&!h.wasUp&&!this.mK[m]&&this.t-h.last>15){this.log("island","A volcanic island emerges over a hotspot",h.v);h.last=this.t;}h.wasUp=up;}}
   // ---------- statistics, plates, events ----------
   updateStats(centroids){if(!this.mKind)return super.updateStats(centroids);
     const {plates,pool,t}=this,X=this.tri.X,Y=this.tri.Y,Z=this.tri.Z,ca=this.cellA;
@@ -544,33 +555,69 @@ class MeshWorld extends World{
 // function's, and talks to it by messages: it owns a MeshWorld, steps it (yielding between steps so a pause or a
 // question gets through), and after each step posts the fixed-grid view (fresh copies, transferred, not shared) with
 // the plates, statistics and new events; on request it posts the inspector's column, the handoff, or the export.
+// With a view helper (init's `helper`), the step worker does not build the view: it hands a copy of the markers to a
+// second worker and starts the next step at once; the view comes back and goes to the page with that step's summary.
+// While the helper is busy, steps are not queued: when it is free, it gets the newest state.
 function workerMain(){
-  let w=null,running=false,until=0,handoff=null,markers=false,lastEv=0,ms=0;
+  let w=null,running=false,until=0,handoff=null,markers=false,lastEv=0,ms=0,helper=null,busy=false,snap=null,evBuf=[];
   const ch=new MessageChannel();ch.port1.onmessage=()=>tick();const later=()=>ch.port2.postMessage(0);
-  const VIEW=["owner","wK","wT","wB","wS","wR","wRA","elev","trench","bodyIdx"];
-  function state(type){const out={type,t:w.t,steps:w.steps,landFrac:w.landFrac,contFrac:w.contFrac,oceanAge:w.oceanAge,meanUnits:w.meanUnits,netRot:w.netRot,rmsSpeed:w.rmsSpeed,
-      msPerStep:ms,running,plates:w.plates.map(P=>({id:P.id,alive:P.alive,hue:P.hue,W:P.W.slice(),c:P.c.slice(),area:P.area,contArea:P.contArea,Q:Array.from(P.Q),parent:P.parent,mergedInto:P.mergedInto})),
-      events:w.events.filter(e=>e.n>lastEv),nEvents:w.nEvents,view:{}},tr=[];
-    lastEv=w.nEvents;for(const k of VIEW){const a=w[k].slice();out.view[k]=a;tr.push(a.buffer);}
-    if(markers){const n=w.nSlots,M={X:w.tri.X.slice(0,n),Y:w.tri.Y.slice(0,n),Z:w.tri.Z.slice(0,n),K:w.mKind.slice(0,n),I:w.iKind.slice(0,n)};out.markers=M;for(const k in M)tr.push(M[k].buffer);}
-    self.postMessage(out,tr);}
-  function tick(){if(!running)return;const t0=performance.now();w.step();ms=performance.now()-t0;if(w.t>=until-1e-9)running=false;state(running?"state":"stopped");if(running)later();}
+  const VIEW=["owner","wK","wT","wB","wS","wR","wRA","elev","bodyIdx"];
+  const summary=()=>({t:w.t,steps:w.steps,landFrac:w.landFrac,contFrac:w.contFrac,oceanAge:w.oceanAge,meanUnits:w.meanUnits,netRot:w.netRot,rmsSpeed:w.rmsSpeed,
+    msPerStep:ms,plates:w.plates.map(P=>({id:P.id,alive:P.alive,hue:P.hue,W:P.W.slice(),c:P.c.slice(),area:P.area,contArea:P.contArea,Q:Array.from(P.Q),parent:P.parent,mergedInto:P.mergedInto})),
+    nEvents:w.nEvents,trench:w.trench.slice()});
+  const takeEvents=()=>{for(const e of w.events)if(e.n>lastEv)evBuf.push(e);lastEv=w.nEvents;const out=evBuf;evBuf=[];return out;};
+  const markerCopy=()=>{const n=w.nSlots;return{X:w.tri.X.slice(0,n),Y:w.tri.Y.slice(0,n),Z:w.tri.Z.slice(0,n),K:w.mKind.slice(0,n),I:w.iKind.slice(0,n)};};
+  const buffers=o=>{const b=[];for(const k in o)if(o[k]&&o[k].buffer)b.push(o[k].buffer);return b;};
+  // without a helper: the view built here
+  function stateHere(type){w.ensureView();const out={type,running,...summary(),events:takeEvents(),view:{}};for(const k of VIEW)out.view[k]=w[k].slice();
+    const tr=buffers(out.view);tr.push(out.trench.buffer);if(markers){out.markers=markerCopy();tr.push(...buffers(out.markers));}self.postMessage(out,tr);}
+  // with a helper: a copy of what the view needs goes out; the summary waits for it
+  function sendSnap(){const n=w.nSlots,pool=w.pool,M=markerCopy();
+    const m={steps:w.steps,n:w.n,N:w.N,X:M.X,Y:M.Y,Z:M.Z,kind:M.K,I:M.I,mId:w.mId.slice(0,n),plate:w.mPlate.slice(0,n),T:w.mT.slice(0,n),B:w.mB.slice(0,n),S:w.mS.slice(0,n),
+      K:w.mK.slice(0,n),E:w.mE.slice(0,n),col:w.mCol.slice(0,n),off:w.off.slice(0,n+1),adj:w.adj.slice(0,w.off[n]),cnt:pool.cnt.slice(),pT:pool.T.slice(),pR:pool.R.slice(),pB:pool.B.slice(),markers};
+    snap={steps:w.steps,summary:summary()};busy=true;helper.postMessage(m,buffers(m));}
+  function onView(v){busy=false;const s=snap,last=!running&&w.steps===s.steps;
+    const out={type:last?"stopped":"state",running:!last,...s.summary,events:takeEvents(),view:v.view},tr=buffers(out.view);tr.push(out.trench.buffer);
+    if(v.markers){out.markers=v.markers;tr.push(...buffers(v.markers));}self.postMessage(out,tr);
+    if(w.steps!==s.steps)sendSnap();}
+  function report(type){if(!helper)return stateHere(type);if(!busy)sendSnap();} // a busy helper sends the newest state when it is done
+  function tick(){if(!running)return;const t0=performance.now();w.step();ms=performance.now()-t0;if(w.t>=until-1e-9)running=false;report(running?"state":"stopped");if(running)later();}
+  function startHelper(){try{const src=`${SIMmodule}\nconst SIM=SIMmodule();\n${MESHmodule}\nconst MESH=MESHmodule(SIM);\n(${MESH.viewHelperMain})();`;
+      const h=new Worker(URL.createObjectURL(new Blob([src],{type:"text/javascript"})));
+      h.onmessage=e=>onView(e.data);h.onerror=e=>{if(e.preventDefault)e.preventDefault();helper=null;busy=false;w.deferView=false;w.viewStale=true;report(running?"state":"stopped");};
+      helper=h;w.deferView=true;w.viewStale=true;}catch(e){helper=null;}}
   self.onmessage=e=>{const m=e.data;try{
-    if(m.type==="init"){w=new MESH.MeshWorld(m.opts);lastEv=0;handoff=null;running=false;
-      self.postMessage({type:"ready",hotspots:w.hotspots.map(h=>({v:h.v,i:h.i})),dt:w.dt,cellKm:w.cellKm,contTarget:w.contTarget});state("stopped");}
+    if(m.type==="init"){if(helper){helper.terminate();helper=null;}w=new MESH.MeshWorld(m.opts);lastEv=0;evBuf=[];handoff=null;running=false;busy=false;
+      if(m.helper&&typeof Worker!=="undefined")startHelper();
+      self.postMessage({type:"ready",helper:!!helper,hotspots:w.hotspots.map(h=>({v:h.v,i:h.i})),dt:w.dt,cellKm:w.cellKm,contTarget:w.contTarget});report("stopped");}
     else if(m.type==="run"){until=m.until;if(!running&&w.t<until-1e-9){running=true;later();}}
-    else if(m.type==="pause"){if(running){running=false;state("stopped");}}
-    else if(m.type==="step"){running=false;const t0=performance.now();w.step();ms=performance.now()-t0;state("stopped");}
-    else if(m.type==="markers"){markers=!!m.on;state(running?"state":"stopped");}
-    else if(m.type==="column")self.postMessage({type:"column",i:m.i,steps:w.steps,...w.columnInfo(m.i)});
-    else if(m.type==="extract"){handoff=w.extractFaults();handoff.l1=w.buildL1();self.postMessage({type:"extract",steps:w.steps,handoff});}
-    else if(m.type==="buildL1")self.postMessage({type:"buildL1",steps:w.steps,l1:w.buildL1()});
-    else if(m.type==="export")self.postMessage({type:"export",json:handoff?JSON.stringify(w.exportHandoff(handoff)):null});
-    else if(m.type==="hash")self.postMessage({type:"hash",steps:w.steps,t:w.t,audit:w.audit()});
+    else if(m.type==="pause"){if(running){running=false;report("stopped");}}
+    else if(m.type==="step"){running=false;const t0=performance.now();w.step();ms=performance.now()-t0;report("stopped");}
+    else if(m.type==="markers"){markers=!!m.on;if(!helper||!busy)report(running?"state":"stopped");}
+    else if(m.type==="column"){w.ensureView();self.postMessage({type:"column",i:m.i,steps:w.steps,...w.columnInfo(m.i)});}
+    else if(m.type==="extract"){w.ensureView();handoff=w.extractFaults();handoff.l1=w.buildL1();self.postMessage({type:"extract",steps:w.steps,handoff});}
+    else if(m.type==="buildL1"){w.ensureView();self.postMessage({type:"buildL1",steps:w.steps,l1:w.buildL1()});}
+    else if(m.type==="export"){w.ensureView();self.postMessage({type:"export",json:handoff?JSON.stringify(w.exportHandoff(handoff)):null});}
+    else if(m.type==="hash"){w.ensureView();self.postMessage({type:"hash",steps:w.steps,t:w.t,audit:w.audit()});}
   }catch(err){self.postMessage({type:"error",message:String(err&&err.stack||err)});}};
 }
+// The view helper: given a copy of the markers, their adjacency and the rock columns, it builds the fixed-grid view
+// with MeshWorld's own computeView (on an object holding just those arrays) and sends it back.
+function viewHelperMain(){
+  const o=Object.create(MESH.MeshWorld.prototype);
+  self.onmessage=e=>{const m=e.data;
+    if(!o.cube||o.N!==m.N){o.cube=SIM.getCube(m.n);o.N=m.N;o._vcache=null;}
+    Object.assign(o,{tri:{X:m.X,Y:m.Y,Z:m.Z},mKind:m.kind,mId:m.mId,off:m.off,adj:m.adj,mPlate:m.plate,mT:m.T,mB:m.B,mS:m.S,mK:m.K,mCol:m.col,mE:m.E,
+      pool:{cnt:m.cnt,T:m.pT,R:m.pR,B:m.pB}});
+    const N=m.N;Object.assign(o,{owner:new Int16Array(N),bodyIdx:new Int32Array(N),wT:new Float32Array(N),wB:new Float32Array(N),wS:new Float32Array(N),wK:new Uint8Array(N),
+      wCol:new Int32Array(N),elev:new Float32Array(N),wR:new Uint8Array(N),wRA:new Float32Array(N)});
+    o.computeView();
+    const view={owner:o.owner,wK:o.wK,wT:o.wT,wB:o.wB,wS:o.wS,wR:o.wR,wRA:o.wRA,elev:o.elev,bodyIdx:o.bodyIdx},tr=[];for(const k in view)tr.push(view[k].buffer);
+    const out={steps:m.steps,view};if(m.markers){out.markers={X:m.X,Y:m.Y,Z:m.Z,K:m.kind,I:m.I};for(const k of ["X","Y","Z","kind","I"])tr.push(m[k].buffer);}
+    self.postMessage(out,tr);};
+}
 
-return {SphereTri,MeshWorld,workerMain};
+return {SphereTri,MeshWorld,workerMain,viewHelperMain};
 }
 const MESH=MESHmodule(SIM);
 // ===== MESH-END =====
